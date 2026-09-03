@@ -25,6 +25,7 @@ class ReadOnlyAdmin(admin.ModelAdmin):
 @admin.register(models.School)
 class SchoolAdmin(admin.ModelAdmin):
     list_display = ("name", "short_code", "is_active")
+    search_fields = ("name", "short_code")
 
 
 @admin.register(models.AcademicYear)

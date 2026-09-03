@@ -7,9 +7,17 @@ country list under Section 16 of the DPDP Act.
 """
 
 import os
+import sys
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Detected automatically so `manage.py test` (and CI) work correctly without
+# anyone needing to remember to also set DJANGO_DEBUG=1 — the HTTPS-only
+# settings below otherwise 301-redirect every request Django's test client
+# makes, since it talks plain HTTP. Production is unaffected: this is only
+# ever true when literally running the test command.
+TESTING = "test" in sys.argv
 
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "dev-only-do-not-use-in-prod")
 DEBUG = os.environ.get("DJANGO_DEBUG", "0") == "1"
@@ -23,8 +31,11 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "rest_framework",
+    "accounts",
     "fees",
 ]
+
+AUTH_USER_MODEL = "accounts.User"
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
@@ -77,6 +88,32 @@ AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
 ]
 
+# --- Email: password reset and staff invite links. ---
+# Console backend by default so local dev and CI never need real SMTP —
+# the "email" just prints to the server log. Set EMAIL_HOST to switch to
+# real delivery in production (any standard SMTP provider works).
+if os.environ.get("EMAIL_HOST"):
+    EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+    EMAIL_HOST = os.environ["EMAIL_HOST"]
+    EMAIL_PORT = int(os.environ.get("EMAIL_PORT", "587"))
+    EMAIL_HOST_USER = os.environ.get("EMAIL_HOST_USER", "")
+    EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "")
+    EMAIL_USE_TLS = os.environ.get("EMAIL_USE_TLS", "1") == "1"
+else:
+    EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
+
+DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", "no-reply@fee-portal.local")
+
+# Where password-reset and staff-invite links point — the React app's
+# origin, not this API's. /reset-password?uid=...&token=... is a route
+# the frontend needs to add; the backend only ever builds the URL.
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:5173").rstrip("/")
+
+# How long a reset/invite link stays valid. Django's default is 3 days;
+# staff credential links are shortened to 1 day since re-sending one is a
+# single click for whoever has manage_staff, not a real burden.
+PASSWORD_RESET_TIMEOUT = int(os.environ.get("PASSWORD_RESET_TIMEOUT", str(60 * 60 * 24)))
+
 LANGUAGE_CODE = "en-in"
 TIME_ZONE = "Asia/Kolkata"
 USE_I18N = True
@@ -107,7 +144,7 @@ X_FRAME_OPTIONS = "DENY"
 SESSION_COOKIE_AGE = 60 * 60 * 8          # office shift
 SESSION_EXPIRE_AT_BROWSER_CLOSE = True
 
-if not DEBUG:
+if not DEBUG and not TESTING:
     SECURE_SSL_REDIRECT = True
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True

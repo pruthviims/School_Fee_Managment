@@ -6,10 +6,11 @@ reopening dues, webhook idempotency, and arrears surviving promotion.
 
 from datetime import date
 
-from django.contrib.auth.models import User
 from django.core.management import call_command
 from django.db import transaction
 from django.test import TestCase
+
+from accounts.models import User
 
 from fees.models import (
     AcademicYear,
@@ -35,7 +36,7 @@ class Base(TestCase):
                      verbosity=0)
         cls.school = School.objects.get(short_code="test")
         cls.year = AcademicYear.objects.get(school=cls.school, name="2026-27")
-        cls.user = User.objects.create_user("clerk", password="x" * 14)
+        cls.user = User.objects.create_user("clerk@test.school", password="x" * 14)
 
     def admit(self, name, admission_no, class_name="VIII", section_name="A",
               stream=None, admission_type=Enrollment.AdmissionType.NEW):

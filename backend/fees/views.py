@@ -19,6 +19,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
+from accounts.permissions import IsMember, RequireCapability
 from fees.models import (
     AcademicYear,
     Enrollment,
@@ -99,6 +100,7 @@ class PaymentSerializer(serializers.Serializer):
 # ---------------------------------------------------------------------
 
 @api_view(["POST"])
+@permission_classes([RequireCapability("manage_admissions")])
 def admit_student(request):
     """New admission: student, enrollment, consent record and charges."""
     from django.db import transaction
@@ -164,6 +166,7 @@ def admit_student(request):
 
 
 @api_view(["GET"])
+@permission_classes([IsMember])
 def enrollment_ledger(request, enrollment_id):
     enrollment = get_object_or_404(
         Enrollment, id=enrollment_id, school=request.school
@@ -190,6 +193,7 @@ def enrollment_ledger(request, enrollment_id):
 # ---------------------------------------------------------------------
 
 @api_view(["POST"])
+@permission_classes([RequireCapability("collect_payments")])
 def collect_payment(request):
     s = PaymentSerializer(data=request.data)
     s.is_valid(raise_exception=True)
@@ -222,6 +226,7 @@ def collect_payment(request):
 
 
 @api_view(["GET"])
+@permission_classes([IsMember])
 def receipt_pdf(request, payment_id):
     payment = get_object_or_404(Payment, id=payment_id, school=request.school)
     # Any reprint is watermarked DUPLICATE so the original stays identifiable.
@@ -235,6 +240,7 @@ def receipt_pdf(request, payment_id):
 
 
 @api_view(["POST"])
+@permission_classes([RequireCapability("collect_payments")])
 def issue_bill(request, enrollment_id):
     enrollment = get_object_or_404(
         Enrollment, id=enrollment_id, school=request.school
@@ -258,6 +264,7 @@ def issue_bill(request, enrollment_id):
 
 
 @api_view(["GET"])
+@permission_classes([IsMember])
 def bill_pdf(request, invoice_id):
     invoice = get_object_or_404(Invoice, id=invoice_id, school=request.school)
     pdf = receipts.invoice_pdf(
@@ -271,6 +278,7 @@ def bill_pdf(request, invoice_id):
 # ---------------------------------------------------------------------
 
 @api_view(["POST"])
+@permission_classes([RequireCapability("manage_admissions")])
 def promotion_preview(request):
     from_year = get_object_or_404(
         AcademicYear, id=request.data["from_year_id"], school=request.school
@@ -358,6 +366,7 @@ def gateway_webhook(request):
 # ---------------------------------------------------------------------
 
 @api_view(["GET"])
+@permission_classes([RequireCapability("view_reports")])
 def day_book(request):
     from datetime import date as _date
 
@@ -367,6 +376,7 @@ def day_book(request):
 
 
 @api_view(["GET"])
+@permission_classes([RequireCapability("view_reports")])
 def defaulters(request):
     year = get_object_or_404(
         AcademicYear, id=request.query_params["year_id"], school=request.school
