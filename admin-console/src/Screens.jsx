@@ -10,6 +10,7 @@ import {
   FileSpreadsheet,
   GraduationCap,
   History,
+  Image as ImageIcon,
   IndianRupee,
   Percent,
   Plus,
@@ -128,7 +129,7 @@ export function FilterSelect({ value, onChange, disabled, active, className = ""
 /**
  * A student's concession — type toggle, value, reason, and (when the
  * student rides a bus) whether the discount extends to transport too.
- * Used identically in the payment modal and the Fee Collection & Roll
+ * Used identically in the payment modal and the Fee Collection
  * table; `compact` only changes sizing, never the fields or the update
  * logic, so the two surfaces can't drift out of sync with each other.
  */
@@ -195,7 +196,22 @@ export function ConcessionEditor({ student, state, save, fee, compact = false })
 export function SchoolScreen({ state, save }) {
   const [form, setForm] = useState({ ...state.school });
   const [saved, setSaved] = useState(false);
+  const [logoError, setLogoError] = useState("");
+  const fileRef = useRef(null);
   const set = (k) => (e) => { setForm({ ...form, [k]: e.target.value }); setSaved(false); };
+
+  function handleLogoFile(file) {
+    setLogoError("");
+    if (!file) return;
+    if (!file.type.startsWith("image/")) return setLogoError("Choose an image file (PNG, JPG, SVG).");
+    // Stored as a data URL right in localStorage alongside everything else
+    // — no server to upload to — so it needs to stay small.
+    if (file.size > 500 * 1024) return setLogoError("Keep the logo under 500KB.");
+    const reader = new FileReader();
+    reader.onload = () => { setForm((f) => ({ ...f, logo: String(reader.result) })); setSaved(false); };
+    reader.onerror = () => setLogoError("Could not read that file.");
+    reader.readAsDataURL(file);
+  }
 
   return (
     <div>
@@ -203,6 +219,38 @@ export function SchoolScreen({ state, save }) {
         subtitle="The details printed on every bill and receipt, and the account that manages them." />
 
       <div className={`${panel} p-6 grid sm:grid-cols-2 gap-5 max-w-3xl`}>
+        <div className="sm:col-span-2">
+          <label className={eyebrow}>School logo</label>
+          <div className="flex items-center gap-4 mt-2">
+            <div className="w-16 h-16 rounded-xl border border-slate-200 bg-slate-50 grid place-items-center overflow-hidden shrink-0">
+              {form.logo
+                ? <img src={form.logo} alt="School logo" className="w-full h-full object-contain" />
+                : <ImageIcon size={22} className="text-slate-300" />}
+            </div>
+            <div>
+              <div className="flex items-center gap-3">
+                <button type="button" onClick={() => fileRef.current?.click()} className={ghost}>
+                  <Upload size={14} /> {form.logo ? "Change logo" : "Upload logo"}
+                </button>
+                {form.logo && (
+                  <button type="button"
+                    onClick={() => { setForm((f) => ({ ...f, logo: "" })); setSaved(false); setLogoError(""); }}
+                    className="text-xs font-semibold text-slate-400 hover:text-red-500">
+                    Remove
+                  </button>
+                )}
+              </div>
+              <p className="text-[11px] text-slate-400 mt-1.5 max-w-xs">
+                Shown on the login screen once the correct School ID is typed.
+                PNG or JPG, under 500KB.
+              </p>
+              {logoError && <p className="text-xs font-semibold text-red-500 mt-1">{logoError}</p>}
+            </div>
+            <input ref={fileRef} type="file" accept="image/*" className="hidden"
+              onChange={(e) => { handleLogoFile(e.target.files?.[0]); e.target.value = ""; }} />
+          </div>
+        </div>
+
         <div className="sm:col-span-2">
           <label className={eyebrow}>School name</label>
           <input className={`${field} mt-2`} value={form.name} onChange={set("name")} />
@@ -640,7 +688,7 @@ export function PromoteTab({ state, save, onPaid }) {
   // already been promoted this cycle — closing the payment modal by
   // accident used to make a promoted student vanish from this screen
   // entirely, with no way back to their payment short of hunting for them
-  // on Fee Collection & Roll. Now the row just switches from "Promote" to a
+  // on Fee Collection. Now the row just switches from "Promote" to a
   // "Pay" action for whatever's still outstanding.
   const rows = byClass.filter((s) => !isTerminalClass(s.className)).map((s) => {
     const target = nextClassName(s.className);
@@ -692,14 +740,14 @@ export function PromoteTab({ state, save, onPaid }) {
   if (!years.length) {
     return (
       <div>
-        <PageHead title="Promote Students"
+        <PageHead title="Class Promotion"
           subtitle={`Bring continuing students into ${state.year} from last year's roll.`} />
         <div className={`${panel} border-dashed p-12 text-center`}>
           <Sparkles className="mx-auto text-slate-300 mb-3" size={26} />
           <p className="font-bold text-slate-700">No previous year to promote from</p>
           <p className="text-sm text-slate-500 mt-1 max-w-md mx-auto">
             Promotion needs a prior year's roll already in the system. Set "To"
-            below to last year and import that roll under Bulk CSV Import, or
+            below to last year and import that roll under First Time Import, or
             use New Admission for students joining now.
           </p>
         </div>
@@ -709,7 +757,7 @@ export function PromoteTab({ state, save, onPaid }) {
 
   return (
     <div>
-      <PageHead title="Promote Students"
+      <PageHead title="Class Promotion"
         subtitle={`Bring continuing students into ${state.year} from last year's roll, one at a time as they're found.`} />
 
       {justPromoted && (
@@ -848,7 +896,7 @@ export function PromoteTab({ state, save, onPaid }) {
               </div>
               <p className="px-6 py-3 text-xs text-slate-500 border-t border-slate-100 max-w-2xl">
                 Section carries forward automatically — reassign it later from
-                Fee Collection & Roll if the school reshuffles sections. A promoted
+                Fee Collection if the school reshuffles sections. A promoted
                 row stays here with a Pay button until it's settled, so
                 closing the payment window by accident never loses track of
                 who still owes.
@@ -1159,7 +1207,7 @@ function ClassImport({ state, save, klass, setKlass }) {
 
   return (
     <div>
-      <PageHead title="Bulk CSV Import"
+      <PageHead title="First Time Import"
         subtitle={`Import a whole class's roll at once for ${state.year} — for a school's existing roster, not day-to-day admissions. Choose the class below, then upload the sheet the office already keeps.`} />
 
       <div className="grid sm:grid-cols-3 gap-5 mb-6">
@@ -1463,10 +1511,10 @@ export function ConcessionScreen({ state, save }) {
   if (!currentYearStudents.length) {
     return (
       <div>
-        <PageHead title="Fee Collection & Roll"
+        <PageHead title="Fee Collection"
           subtitle="Every enrolled student for the year, with fees, concessions, and payment status in one place." />
         <div className={`${panel} border-dashed p-12 text-center text-slate-400 font-semibold`}>
-          No students in {state.year} yet. Add them under New Admission or Promote Students.
+          No students in {state.year} yet. Add them under New Admission or Class Promotion.
         </div>
       </div>
     );
@@ -1474,7 +1522,7 @@ export function ConcessionScreen({ state, save }) {
 
   return (
     <div>
-      <PageHead title="Fee Collection & Roll"
+      <PageHead title="Fee Collection"
         subtitle="Each fee is the class structure plus transport for the student's stop, less any concession. Collect payments and print receipts from the same row." />
 
       <div className="grid sm:grid-cols-2 lg:grid-cols-5 gap-5 mb-6">

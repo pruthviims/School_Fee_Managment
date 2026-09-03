@@ -33,10 +33,12 @@ function ErrorNote({ children }) {
   );
 }
 
-function Crest({ emoji }) {
+function Crest({ emoji, logo }) {
   return (
-    <div className="w-[104px] h-[104px] rounded-[28px] bg-white border border-slate-100 shadow-[0_8px_24px_-10px_rgba(15,23,41,0.25)] grid place-items-center text-[46px] leading-none">
-      <span role="img" aria-hidden="true">{emoji}</span>
+    <div className="w-[104px] h-[104px] rounded-[28px] bg-white border border-slate-100 shadow-[0_8px_24px_-10px_rgba(15,23,41,0.25)] grid place-items-center text-[46px] leading-none overflow-hidden">
+      {logo
+        ? <img src={logo} alt="School logo" className="w-full h-full object-contain p-2" />
+        : <span role="img" aria-hidden="true">{emoji}</span>}
     </div>
   );
 }
@@ -49,6 +51,12 @@ export function Login({ school, onLogin, onSetupClick }) {
   const [password, setPassword] = useState("");
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
+
+  // Live, as-you-type recognition — this prototype only ever holds one
+  // school, so "looking it up" just means the typed ID matches the one
+  // that's there. A real multi-tenant build would look this up server-side
+  // instead of comparing against a single stored record.
+  const matched = Boolean(school) && schoolId.trim().toLowerCase() === school.code;
 
   async function submit(e) {
     e.preventDefault();
@@ -67,8 +75,10 @@ export function Login({ school, onLogin, onSetupClick }) {
     <div className={shell}>
       <div className={cardCls}>
         <div className="flex flex-col items-center mb-8">
-          <Crest emoji="🎓" />
-          <h1 className="text-[30px] font-extrabold tracking-tight mt-5">School Portal</h1>
+          <Crest emoji="🎓" logo={matched ? school.logo : null} />
+          <h1 className="text-[28px] font-extrabold tracking-tight mt-5 text-center leading-tight">
+            {matched ? school.name : "School Portal"}
+          </h1>
           <p className="text-sm text-slate-500 mt-1">Secure Fee Administration Gateway</p>
         </div>
 

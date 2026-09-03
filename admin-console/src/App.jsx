@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import {
   Bus,
+  ChevronDown,
   FileSpreadsheet,
   LogOut,
   Percent,
@@ -82,16 +83,13 @@ function load() {
 // Bus Routes and Fee Structure share one sidebar entry — routes have to
 // exist before a fare can be attached to a class, so keeping them one click
 // apart makes that dependency obvious rather than splitting it across the
-// sidebar. Admissions, bulk import, promotion and the fee/payment roll are
-// grouped the same way: all four ultimately act on the same student record,
-// so one hub with four sub-tabs beats three separate top-level items that
-// each partly overlap with the others.
+// sidebar. Fees Setup only has two sub-screens, so a top-of-page pill bar
+// suits it; Admissions & Fees has four and gets its own expandable section
+// in the sidebar instead, with more room to breathe.
 const NAV = [
   { id: "school", label: "School Profile", Icon: School },
   { id: "feesSetup", label: "Fees Setup", Icon: ReceiptIndianRupee,
     group: ["transport", "fees"] },
-  { id: "students", label: "Admissions & Fees", Icon: Sparkles,
-    group: ["roll", "newadm", "bulkimport", "promote"] },
 ];
 
 // Screens where the working Academic Year actually matters. School Profile
@@ -106,18 +104,27 @@ const FEES_SUBTABS = [
   { id: "fees", label: "Fee Structure", Icon: ReceiptIndianRupee },
 ];
 
+// Workflow order for an admission season: bring in last year's roll, move
+// continuing students up, register anyone new, then take payments — not
+// the same as the default landing tab, which stays the day-to-day screen
+// (Fee Collection) regardless of where it sits in this list.
 const STUDENTS_SUBTABS = [
-  { id: "roll", label: "Fee Collection & Roll", Icon: Percent },
+  { id: "bulkimport", label: "First Time Import", Icon: FileSpreadsheet },
+  { id: "promote", label: "Class Promotion", Icon: Sparkles },
   { id: "newadm", label: "New Admission", Icon: UserPlus },
-  { id: "bulkimport", label: "Bulk CSV Import", Icon: FileSpreadsheet },
-  { id: "promote", label: "Promote Students", Icon: Sparkles },
+  { id: "roll", label: "Fee Collection", Icon: Percent },
 ];
+const DEFAULT_STUDENTS_STEP = "roll";
 
 export default function App() {
   const [state, setState] = useState(load);
   const [signedIn, setSignedIn] = useState(false);
   const [showSetup, setShowSetup] = useState(!load());
   const [step, setStep] = useState("transport");
+  // Sidebar accordion for Admissions & Fees — separate from `step` itself
+  // so collapsing it doesn't navigate away from whatever sub-screen is
+  // currently open.
+  const [studentsExpanded, setStudentsExpanded] = useState(false);
   // Set the moment a student is added or promoted, from Admissions, so the
   // payment window opens right there instead of sending staff off to find
   // that student again on the Fees & Concessions screen.
@@ -198,6 +205,58 @@ export default function App() {
               </button>
             );
           })}
+
+          {/* Admissions & Fees — an accordion in the sidebar itself rather
+              than a top-of-page pill bar, since four sub-screens want more
+              room than Fees Setup's two. */}
+          {(() => {
+            const studentsOn = STUDENTS_SUBTABS.some((t) => t.id === step);
+            // Not `studentsExpanded || studentsOn` — every path that lands
+            // on a sub-step already set studentsExpanded true on the way
+            // in (step resets on every login, so there's no way to arrive
+            // on a sub-step with it still false). Falling back to studentsOn
+            // here would make the collapse toggle silently do nothing while
+            // any of these sub-screens was active.
+            const studentsOpen = studentsExpanded;
+            return (
+              <div>
+                <button
+                  onClick={() => {
+                    if (!studentsOn) {
+                      setStep(DEFAULT_STUDENTS_STEP);
+                      setStudentsExpanded(true);
+                    } else {
+                      setStudentsExpanded((e) => !e);
+                    }
+                  }}
+                  className={`flex items-center gap-3 px-4 py-3 rounded-xl text-sm whitespace-nowrap transition ${
+                    studentsOn ? "bg-brand-600 text-white font-bold shadow-[0_10px_22px_-12px_rgba(91,61,245,1)]"
+                               : "text-slate-500 font-semibold hover:bg-slate-50"}`}>
+                  <Sparkles size={17} className="shrink-0" />
+                  <span className="flex-1 text-left">Admissions & Fees</span>
+                  <ChevronDown size={15}
+                    className={`shrink-0 transition-transform ${studentsOpen ? "rotate-180" : ""}`} />
+                </button>
+
+                {studentsOpen && (
+                  <div className="lg:mt-1 lg:ml-5 lg:pl-3 lg:border-l-2 lg:border-slate-100 flex lg:flex-col gap-1">
+                    {STUDENTS_SUBTABS.map((t) => {
+                      const subOn = step === t.id;
+                      return (
+                        <button key={t.id} onClick={() => setStep(t.id)}
+                          className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm text-left whitespace-nowrap transition ${
+                            subOn ? "bg-brand-50 text-brand-700 font-bold"
+                                  : "text-slate-500 font-medium hover:bg-slate-100"}`}>
+                          <t.Icon size={15} className="shrink-0" />
+                          {t.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
         </nav>
 
         <div className="mt-auto px-5 py-5 border-t border-slate-50 hidden lg:block">
@@ -265,21 +324,6 @@ export default function App() {
         {step === "transport" && <TransportScreen state={state} save={setState} />}
         {step === "fees" && <FeeScreen state={state} save={setState} />}
 
-        {STUDENTS_SUBTABS.some((t) => t.id === step) && (
-          <div className="mb-7 inline-flex flex-wrap bg-white rounded-xl border border-slate-100 p-1 shadow-[0_1px_3px_rgba(15,23,41,0.04)]">
-            {STUDENTS_SUBTABS.map((t) => {
-              const on = step === t.id;
-              return (
-                <button key={t.id} onClick={() => setStep(t.id)}
-                  className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold whitespace-nowrap transition ${
-                    on ? "bg-brand-600 text-white shadow-[0_6px_14px_-8px_rgba(91,61,245,0.9)]"
-                       : "text-slate-500 hover:text-slate-700"}`}>
-                  <t.Icon size={15} /> {t.label}
-                </button>
-              );
-            })}
-          </div>
-        )}
         {step === "roll" && <ConcessionScreen state={state} save={setState} />}
         {step === "newadm" && <NewAdmissionTab state={state} save={setState} onPaid={setPayFor} />}
         {step === "bulkimport" && <ImportScreen state={state} save={setState} />}
