@@ -20,6 +20,7 @@ import {
   NewAdmissionTab,
   PaymentModal,
   PromoteTab,
+  QuickBalanceSearch,
   SchoolScreen,
   TransportScreen,
 } from "./Screens";
@@ -188,6 +189,8 @@ export default function App() {
           </p>
           <p className="eyebrow text-brand-600 mt-1.5">Fee Portal</p>
         </div>
+
+        <QuickBalanceSearch state={state} onSelect={(s) => setPayFor(s)} />
 
         <nav className="flex lg:flex-col overflow-x-auto px-3 pb-3 gap-1.5">
           {NAV.map((n) => {

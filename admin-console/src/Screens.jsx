@@ -14,6 +14,7 @@ import {
   IndianRupee,
   Percent,
   Plus,
+  Search,
   Sparkles,
   Trash2,
   Upload,
@@ -184,6 +185,70 @@ export function ConcessionEditor({ student, state, save, fee, compact = false })
             onChange={(e) => patch({ includeTransport: e.target.checked })} />
           Also discount transport
         </label>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Always-available "how much does this one student owe" lookup, meant to
+ * live in the sidebar so it works from any screen without navigating to
+ * Fee Collection and searching there first. Selecting a result opens the
+ * same PaymentModal every other entry point uses, rather than building a
+ * second, view-only balance display that would need to be kept in sync.
+ */
+export function QuickBalanceSearch({ state, onSelect }) {
+  const [query, setQuery] = useState("");
+  const q = query.trim().toLowerCase();
+  const matches = q.length >= 2
+    ? state.students
+        .filter((s) => inYear(s, state.year))
+        .filter((s) => s.name.toLowerCase().includes(q) || s.admissionNo.toLowerCase().includes(q))
+        .slice(0, 6)
+    : [];
+
+  return (
+    <div className="px-5 pt-4 pb-4 border-b border-slate-50 relative">
+      <div className="relative">
+        <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+        <input value={query} onChange={(e) => setQuery(e.target.value)}
+          placeholder="Quick balance check…"
+          className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-8 pr-7 py-2.5 text-sm font-semibold outline-none focus:border-brand-400 focus:bg-white transition" />
+        {query && (
+          <button onClick={() => setQuery("")} aria-label="Clear search"
+            className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-300 hover:text-slate-500">
+            <X size={14} />
+          </button>
+        )}
+      </div>
+
+      {q.length >= 2 && (
+        <div className="absolute left-5 right-5 mt-1.5 bg-white border border-slate-200 rounded-xl shadow-lg z-30 overflow-hidden max-h-72 overflow-y-auto">
+          {matches.length === 0 ? (
+            <p className="px-3 py-3 text-xs text-slate-400 font-semibold">
+              No students match "{query}".
+            </p>
+          ) : matches.map((s) => {
+            const fee = computeFee(s, state);
+            const balance = fee.net - paidByStudent(state, s);
+            return (
+              <button key={s.id}
+                onClick={() => { onSelect(s); setQuery(""); }}
+                className="w-full flex items-center justify-between gap-3 px-3 py-2.5 hover:bg-slate-50 text-left border-b border-slate-50 last:border-0">
+                <span className="min-w-0">
+                  <span className="block text-sm font-bold truncate">{s.name}</span>
+                  <span className="block eyebrow text-slate-400 truncate">
+                    {s.className}{s.section ? `-${s.section}` : ""} · {s.admissionNo}
+                  </span>
+                </span>
+                <span className={`text-sm font-extrabold tabular-nums shrink-0 ${
+                  balance > 0 ? "text-red-500" : balance < 0 ? "text-amber-600" : "text-emerald-600"}`}>
+                  {balance > 0 ? inr(balance) : balance < 0 ? `+${inr(-balance)}` : "Paid up"}
+                </span>
+              </button>
+            );
+          })}
+        </div>
       )}
     </div>
   );
