@@ -6,7 +6,17 @@ import { Pool, types, type QueryResultRow } from "pg";
 // anywhere near that limit (₹90 lakh crore before it would matter) — so
 // parsing as a number here, once, is safe and saves converting at every
 // call site that touches an amount.
+//
+// numeric (OID 1700) needs the same treatment for a less obvious reason:
+// SUM() over a bigint column returns numeric, not bigint — Postgres's own
+// overflow-avoidance rule — so every aggregate query on a money column
+// would otherwise come back as a string even though the column itself
+// parses correctly. This was silently masked wherever a summed value
+// only ever went through arithmetic (JS coerces "100" - "50" to numbers
+// automatically), and only surfaced as a real bug once a test compared
+// a summed value with toBe() instead of using it in arithmetic.
 types.setTypeParser(20, (value: string) => Number(value));
+types.setTypeParser(1700, (value: string) => Number(value));
 
 // Neon (and most managed Postgres) handle bursty serverless connect/
 // disconnect patterns via their own pooler in front of the database, so a
