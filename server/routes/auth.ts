@@ -99,6 +99,21 @@ authRouter.get("/me", requireAuth, (req, res) => {
   res.json(meResponse(req.user!, req.membership ?? null, req.school ?? null));
 });
 
+authRouter.get("/schools/:shortCode", async (req, res) => {
+  // Deliberately public and deliberately narrow: exact short_code lookup
+  // only (never a search or a list), returning nothing but display
+  // details — no id, no counts, nothing that helps enumerate or profile
+  // a school. This exists for the login screen's live "does this School
+  // ID match a real school" preview as the office types it in.
+  const result = await pool.query(
+    `SELECT name, logo_key FROM schools WHERE short_code = $1 AND is_active = true`,
+    [String(req.params.shortCode).toLowerCase()],
+  );
+  const school = result.rows[0];
+  if (!school) return res.status(404).json({ detail: "No school with that ID." });
+  res.json({ name: school.name, logo_key: school.logo_key });
+});
+
 const bootstrapSchema = z.object({
   school_name: z.string().min(1).max(200),
   short_code: z.string().min(2).max(20)

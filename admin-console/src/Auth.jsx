@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   ArrowLeft,
   ArrowRight,
@@ -10,8 +10,7 @@ import {
   ShieldCheck,
   User as UserIcon,
 } from "lucide-react";
-
-export const DEMO_SETUP_TOKEN = "school-setup-2026";
+import { api } from "./api";
 
 const shell =
   "min-h-screen flex items-center justify-center p-4 bg-gradient-to-b from-white via-slate-50 to-[#eef0f8]";
@@ -45,18 +44,34 @@ function Crest({ emoji, logo }) {
 
 /* ------------------------------------------------------------------ */
 
-export function Login({ school, onLogin, onSetupClick }) {
-  const [schoolId, setSchoolId] = useState(school?.code || "");
+export function Login({ onLogin, onSetupClick }) {
+  const [schoolId, setSchoolId] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [preview, setPreview] = useState(null); // {name, logo_key} once a real match is found
+  const debounceRef = useRef(null);
 
-  // Live, as-you-type recognition — this prototype only ever holds one
-  // school, so "looking it up" just means the typed ID matches the one
-  // that's there. A real multi-tenant build would look this up server-side
-  // instead of comparing against a single stored record.
-  const matched = Boolean(school) && schoolId.trim().toLowerCase() === school.code;
+  // Debounced, not live-per-keystroke: a lookup fires 400ms after typing
+  // stops, and only for a plausible School ID shape, so the office isn't
+  // hammering the (rate-limited, but still) public endpoint on every
+  // keystroke while typing "vidya-mandir" out one letter at a time.
+  useEffect(() => {
+    clearTimeout(debounceRef.current);
+    const code = schoolId.trim().toLowerCase();
+    if (code.length < 2) { setPreview(null); return; }
+
+    debounceRef.current = setTimeout(async () => {
+      try {
+        const result = await api.get(`/auth/schools/${encodeURIComponent(code)}`);
+        setPreview(result);
+      } catch {
+        setPreview(null);
+      }
+    }, 400);
+    return () => clearTimeout(debounceRef.current);
+  }, [schoolId]);
 
   async function submit(e) {
     e.preventDefault();
@@ -75,9 +90,9 @@ export function Login({ school, onLogin, onSetupClick }) {
     <div className={shell}>
       <div className={cardCls}>
         <div className="flex flex-col items-center mb-8">
-          <Crest emoji="🎓" logo={matched ? school.logo : null} />
+          <Crest emoji="🎓" logo={null /* logo_key isn't a servable URL yet — no object storage wired up on the backend; falls back to the emoji until that exists */} />
           <h1 className="text-[28px] font-extrabold tracking-tight mt-5 text-center leading-tight">
-            {matched ? school.name : "School Portal"}
+            {preview ? preview.name : "School Portal"}
           </h1>
           <p className="text-sm text-slate-500 mt-1">Secure Fee Administration Gateway</p>
         </div>
@@ -107,7 +122,7 @@ export function Login({ school, onLogin, onSetupClick }) {
             <div className="flex items-baseline justify-between">
               <label className={fieldLabel}>Password</label>
               <button type="button" className="eyebrow text-brand-600 hover:text-brand-700"
-                onClick={() => setError("Password recovery is not wired up in this prototype yet.")}>
+                onClick={() => setError("Use \"Platform Setup\" if you've never signed in before, or ask whoever manages this school's account to reset it for you.")}>
                 Forgot?
               </button>
             </div>
@@ -134,14 +149,6 @@ export function Login({ school, onLogin, onSetupClick }) {
             <ShieldCheck size={13} /> AES-256 cloud encryption active
           </p>
         </div>
-
-        {school && (
-          <p className="mt-5 text-[11px] text-center text-slate-400 leading-relaxed">
-            Prototype sign-in — School ID <b className="text-slate-500">{school.code}</b>,
-            e-mail <b className="text-slate-500">{school.adminEmail}</b>, and the password
-            you set during setup.
-          </p>
-        )}
       </div>
     </div>
   );
@@ -152,27 +159,31 @@ export function Login({ school, onLogin, onSetupClick }) {
 export function Setup({ onDone, onBack, canGoBack }) {
   const [f, setF] = useState({
     name: "", code: "", address: "", adminName: "",
-    email: "", password: "", confirm: "", token: "",
+    email: "", password: "", confirm: "",
   });
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
 
-  function submit(e) {
+  async function submit(e) {
     e.preventDefault();
     setError(null);
-    if (!/^[a-z0-9-_]{3,}$/.test(f.code.trim().toLowerCase()))
-      return setError("School ID needs at least 3 characters: lowercase letters, numbers, hyphen or underscore.");
-    if (f.password.length < 8) return setError("Password must be at least 8 characters.");
+    if (!/^[a-z0-9-]{2,}$/.test(f.code.trim().toLowerCase()))
+      return setError("School ID needs at least 2 characters: lowercase letters, numbers, or hyphens.");
+    if (f.password.length < 12) return setError("Password must be at least 12 characters.");
     if (f.password !== f.confirm) return setError("The two passwords do not match.");
-    if (f.token.trim() !== DEMO_SETUP_TOKEN)
-      return setError("That setup token is not valid. Ask whoever runs the server for it.");
 
     setBusy(true);
-    onDone({
-      name: f.name.trim(), code: f.code.trim().toLowerCase(), address: f.address.trim(),
-      adminName: f.adminName.trim(), adminEmail: f.email.trim(), password: f.password,
-    });
+    try {
+      await onDone({
+        school_name: f.name.trim(), short_code: f.code.trim().toLowerCase(),
+        address: f.address.trim(), owner_full_name: f.adminName.trim(),
+        owner_email: f.email.trim(), owner_password: f.password,
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not create the school.");
+      setBusy(false);
+    }
   }
 
   const row = (lbl, key, Icon, props = {}) => (
@@ -213,20 +224,6 @@ export function Setup({ onDone, onBack, canGoBack }) {
           {row("Admin Mail ID", "email", Mail, { required: true, type: "email", placeholder: "principal@school.edu.in" })}
           {row("Password", "password", Lock, { required: true, type: "password", placeholder: "••••••••" })}
           {row("Confirm Password", "confirm", Lock, { required: true, type: "password", placeholder: "••••••••" })}
-
-          <div>
-            <label className={fieldLabel}>Setup Token</label>
-            <div className={fieldWrap}>
-              <ShieldCheck className={fieldIcon} size={17} />
-              <input required type="password" value={f.token} onChange={set("token")}
-                placeholder="Provided by your system administrator" className={fieldInput} />
-            </div>
-            <p className="text-[11px] text-slate-400 mt-2 leading-relaxed">
-              Checked against the server's <code>ADMIN_SETUP_TOKEN</code> in the real
-              build, where it never reaches the browser. This prototype has no server,
-              so use <b className="text-slate-600">{DEMO_SETUP_TOKEN}</b>.
-            </p>
-          </div>
 
           <button type="submit" disabled={busy} className={bigButton}>
             {busy ? <Loader2 className="animate-spin" size={17} /> : null}

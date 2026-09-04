@@ -12,6 +12,7 @@ import {
   UserPlus,
 } from "lucide-react";
 import { Login, Setup } from "./Auth";
+import { api } from "./api";
 import {
   ConcessionScreen,
   FeeScreen,
@@ -117,10 +118,36 @@ const STUDENTS_SUBTABS = [
 ];
 const DEFAULT_STUDENTS_STEP = "roll";
 
+const ROLE_LABEL = {
+  owner: "Owner", accountant: "Accountant", front_desk: "Front desk", viewer: "Viewer",
+};
+
+// Builds the shape the rest of the app already expects state.school to
+// have (name/address/adminName/adminEmail/code) from the real API's
+// response shape (school/user separate, membership carrying the role).
+// adminName/adminEmail now mean "whoever is actually signed in" rather
+// than a single fixed school-admin account, since real accounts mean
+// more than one person can hold them.
+function schoolFromSession(me) {
+  return {
+    name: me.school.name,
+    address: me.school.address,
+    code: me.school.short_code,
+    logo: "", // logo_key isn't a servable URL yet — no object storage wired up
+    adminName: me.full_name || me.email,
+    adminEmail: me.email,
+    role: me.membership?.role,
+  };
+}
+
 export default function App() {
   const [state, setState] = useState(load);
   const [signedIn, setSignedIn] = useState(false);
-  const [showSetup, setShowSetup] = useState(!load());
+  // Briefly true on first load while a real session cookie is checked —
+  // without this, a page refresh with a valid session would flash the
+  // login screen before the /me check comes back.
+  const [checkingSession, setCheckingSession] = useState(true);
+  const [showSetup, setShowSetup] = useState(false);
   const [step, setStep] = useState("transport");
   // Sidebar accordion for Admissions & Fees — separate from `step` itself
   // so collapsing it doesn't navigate away from whatever sub-screen is
@@ -140,37 +167,65 @@ export default function App() {
     }
   }, [state]);
 
-  function handleSetup(d) {
-    setState(freshWorkspace({
-      name: d.name, code: d.code, address: d.address,
-      adminName: d.adminName, adminEmail: d.adminEmail, password: d.password,
-    }));
+  // Restore a real session on first load, so a page refresh doesn't sign
+  // anyone out. The fee/student data underneath (still localStorage-only
+  // for now — see the note on `state`) genuinely doesn't follow an
+  // account to a new device yet; this only restores who's signed in.
+  useEffect(() => {
+    let cancelled = false;
+    api.get("/auth/me")
+      .then((me) => {
+        if (cancelled) return;
+        setState((prev) => prev || freshWorkspace(schoolFromSession(me)));
+        setSignedIn(true);
+      })
+      .catch(() => { /* no valid session — show the login screen */ })
+      .finally(() => { if (!cancelled) setCheckingSession(false); });
+    return () => { cancelled = true; };
+  }, []);
+
+  async function handleSetup(fields) {
+    const me = await api.post("/auth/bootstrap-school", fields);
+    // Always a clean start — this is explicitly "create a new school",
+    // never a reason to reuse whatever a previous, unrelated session left
+    // in this browser's storage.
+    setState(freshWorkspace(schoolFromSession(me)));
     setShowSetup(false);
     setSignedIn(true);
     setStep("transport");
   }
 
-  async function handleLogin(schoolId, email, password) {
-    const s = state?.school;
-    if (!s || s.code !== schoolId)
-      throw new Error("No school with that ID. Check it, or use Platform Setup.");
-    if (s.adminEmail.toLowerCase() !== email.toLowerCase() || s.password !== password)
-      throw new Error("That mail ID and password do not match.");
+  async function handleLogin(_schoolId, email, password) {
+    const me = await api.post("/auth/login", { email, password });
+    setState((prev) => prev || freshWorkspace(schoolFromSession(me)));
     setSignedIn(true);
     setStep("transport");
   }
 
+  async function handleLogout() {
+    try { await api.post("/auth/logout", {}); } catch { /* best-effort */ }
+    setSignedIn(false);
+  }
+
+  if (checkingSession) {
+    return (
+      <div className="min-h-screen grid place-items-center text-slate-400 text-sm font-semibold">
+        Loading…
+      </div>
+    );
+  }
+
   if (showSetup)
-    return <Setup onDone={handleSetup} canGoBack={Boolean(state)} onBack={() => setShowSetup(false)} />;
+    return <Setup onDone={handleSetup} canGoBack={signedIn} onBack={() => setShowSetup(false)} />;
 
   if (!signedIn)
-    return <Login school={state?.school} onLogin={handleLogin} onSetupClick={() => setShowSetup(true)} />;
+    return <Login onLogin={handleLogin} onSetupClick={() => setShowSetup(true)} />;
 
   function reset() {
     if (!confirm("This clears the school, routes, fee structure and students. Continue?")) return;
     localStorage.removeItem(KEY);
     setState(null);
-    setSignedIn(false);
+    handleLogout();
     setShowSetup(true);
   }
 
@@ -264,8 +319,10 @@ export default function App() {
 
         <div className="mt-auto px-5 py-5 border-t border-slate-50 hidden lg:block">
           <p className="text-xs font-bold">{state.school.adminName}</p>
-          <p className="eyebrow text-slate-400 mt-0.5">Administrator</p>
-          <button onClick={() => setSignedIn(false)}
+          <p className="eyebrow text-slate-400 mt-0.5">
+            {ROLE_LABEL[state.school.role] || "Administrator"}
+          </p>
+          <button onClick={handleLogout}
             className="mt-3 text-xs font-semibold text-slate-400 hover:text-slate-700 flex items-center gap-1.5">
             <LogOut size={13} /> Sign out
           </button>

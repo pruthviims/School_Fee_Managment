@@ -351,3 +351,23 @@ describe("bootstrap-school", () => {
     expect(res.status).toBe(400);
   });
 });
+
+describe("public school lookup", () => {
+  it("returns display details for an exact, active short_code match", async () => {
+    const res = await request(app).get("/api/auth/schools/acc-test");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ name: school.name, logo_key: school.logo_key });
+    expect(res.body.id).toBeUndefined(); // never leaks the id or anything beyond display fields
+  });
+
+  it("404s for a School ID that doesn't exist, not an empty 200", async () => {
+    const res = await request(app).get("/api/auth/schools/does-not-exist");
+    expect(res.status).toBe(404);
+  });
+
+  it("is genuinely public — no session needed", async () => {
+    const res = await request(app).get("/api/auth/schools/acc-test");
+    expect(res.status).not.toBe(401);
+    expect(res.status).not.toBe(403);
+  });
+});
