@@ -1,0 +1,48 @@
+{
+  "name": "school-fee-api",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev:server": "tsx watch server/index.ts",
+    "build:server": "esbuild server/index.ts --bundle --platform=node --target=node20 --outfile=dist-server/index.js --format=esm --packages=external",
+    "migrate": "node-pg-migrate -m server/db/migrations",
+    "migrate:up": "node-pg-migrate up -m server/db/migrations",
+    "test": "NODE_ENV=test vitest run",
+    "test:watch": "NODE_ENV=test vitest",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.6",
+    "dotenv": "^17.3.1",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.4.1",
+    "helmet": "^8.1.0",
+    "jsonwebtoken": "^9.0.3",
+    "nodemailer": "^6.9.16",
+    "pg": "^8.23.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/cookie-parser": "^1.4.7",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^22.10.5",
+    "@types/nodemailer": "^6.4.17",
+    "@types/pg": "^8.21.0",
+    "@types/supertest": "^6.0.2",
+    "esbuild": "^0.24.2",
+    "node-pg-migrate": "^7.9.1",
+    "supertest": "^7.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  },
+  "overrides": {
+    "qs": "^6.16.0"
+  }
+}
