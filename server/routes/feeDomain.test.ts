@@ -1,0 +1,275 @@
+/**
+ * End-to-end HTTP tests for the routes wired up in this slice — setup,
+ * admission, billing, collection. Unlike the service-layer tests, these
+ * exercise the actual request/response cycle (auth cookies, capability
+ * enforcement, zod validation, status codes) so a bug in the routing or
+ * permission-wiring layer itself would show up here even if every
+ * underlying service function is individually correct.
+ */
+
+import crypto from "node:crypto";
+import request from "supertest";
+import { afterAll, beforeEach, describe, expect, it } from "vitest";
+import { app } from "../app.js";
+import { pool } from "../db/index.js";
+import { createMembership, createSchool, createUser, resetDb } from "../tests/helpers.js";
+import { resetFeeDomain } from "../tests/fixtures.js";
+
+let school: any;
+let owner: any;
+let frontDesk: any;
+let accountant: any;
+
+beforeEach(async () => {
+  await resetFeeDomain();
+  await resetDb();
+
+  school = await createSchool({ short_code: "http-test" });
+  owner = await createUser("owner@http.test", "x".repeat(14));
+  await createMembership(owner.id, school.id, "owner");
+  frontDesk = await createUser("desk@http.test", "x".repeat(14));
+  await createMembership(frontDesk.id, school.id, "front_desk");
+  accountant = await createUser("acc@http.test", "x".repeat(14));
+  await createMembership(accountant.id, school.id, "accountant");
+});
+
+afterAll(async () => {
+  await pool.end();
+});
+
+async function loginAs(email: string) {
+  const res = await request(app).post("/api/auth/login").send({ email, password: "x".repeat(14) });
+  return res.headers["set-cookie"];
+}
+
+describe("setup routes", () => {
+  it("an accountant can create academic structure end to end", async () => {
+    const cookie = await loginAs("acc@http.test");
+
+    const year = await request(app).post("/api/setup/academic-years").set("Cookie", cookie)
+      .send({ name: "2026-27", starts_on: "2026-06-01", ends_on: "2027-03-31", status: "active" });
+    expect(year.status).toBe(201);
+
+    const classLevel = await request(app).post("/api/setup/class-levels").set("Cookie", cookie)
+      .send({ name: "VIII", ladder_order: 8, stage: "middle" });
+    expect(classLevel.status).toBe(201);
+
+    const section = await request(app).post("/api/setup/sections").set("Cookie", cookie).send({
+      academic_year_id: year.body.id, class_level_id: classLevel.body.id, name: "A",
+    });
+    expect(section.status).toBe(201);
+
+    const feeHead = await request(app).post("/api/setup/fee-heads").set("Cookie", cookie)
+      .send({ name: "Tuition fee" });
+    expect(feeHead.status).toBe(201);
+
+    const structure = await request(app).post("/api/setup/fee-structure").set("Cookie", cookie).send({
+      academic_year_id: year.body.id, class_level_id: classLevel.body.id,
+      fee_head_id: feeHead.body.id, amount: 4000000, due_on: "2026-06-15",
+    });
+    expect(structure.status).toBe(201);
+
+    const list = await request(app).get(`/api/setup/fee-structure?academic_year_id=${year.body.id}`)
+      .set("Cookie", cookie);
+    expect(list.body).toHaveLength(1);
+  });
+
+  it("front desk cannot write to fee structure but can read it", async () => {
+    const ownerCookie = await loginAs("owner@http.test");
+    const year = await request(app).post("/api/setup/academic-years").set("Cookie", ownerCookie)
+      .send({ name: "2026-27", starts_on: "2026-06-01", ends_on: "2027-03-31" });
+
+    const deskCookie = await loginAs("desk@http.test");
+    const write = await request(app).post("/api/setup/class-levels").set("Cookie", deskCookie)
+      .send({ name: "VIII", ladder_order: 8, stage: "middle" });
+    expect(write.status).toBe(403);
+
+    const read = await request(app).get("/api/setup/academic-years").set("Cookie", deskCookie);
+    expect(read.status).toBe(200);
+    expect(read.body).toHaveLength(1);
+    void year;
+  });
+
+  it("rejects a duplicate class ladder position with 409", async () => {
+    const cookie = await loginAs("owner@http.test");
+    await request(app).post("/api/setup/class-levels").set("Cookie", cookie)
+      .send({ name: "VIII", ladder_order: 8, stage: "middle" });
+    const dup = await request(app).post("/api/setup/class-levels").set("Cookie", cookie)
+      .send({ name: "VIII-Repeat", ladder_order: 8, stage: "middle" });
+    expect(dup.status).toBe(409);
+  });
+});
+
+describe("admission -> billing -> collection, end to end", () => {
+  async function setUpAcademicStructure(cookie: string) {
+    const year = await request(app).post("/api/setup/academic-years").set("Cookie", cookie)
+      .send({ name: "2026-27", starts_on: "2026-06-01", ends_on: "2027-03-31", status: "active" });
+    const classLevel = await request(app).post("/api/setup/class-levels").set("Cookie", cookie)
+      .send({ name: "VIII", ladder_order: 8, stage: "middle" });
+    const section = await request(app).post("/api/setup/sections").set("Cookie", cookie).send({
+      academic_year_id: year.body.id, class_level_id: classLevel.body.id, name: "A",
+    });
+    const feeHead = await request(app).post("/api/setup/fee-heads").set("Cookie", cookie)
+      .send({ name: "Tuition fee" });
+    await request(app).post("/api/setup/fee-structure").set("Cookie", cookie).send({
+      academic_year_id: year.body.id, class_level_id: classLevel.body.id,
+      fee_head_id: feeHead.body.id, amount: 4000000, due_on: "2026-06-15",
+    });
+    return { year: year.body, classLevel: classLevel.body, section: section.body };
+  }
+
+  it("front desk can admit a student, charges post automatically", async () => {
+    const ownerCookie = await loginAs("owner@http.test");
+    const { year, classLevel, section } = await setUpAcademicStructure(ownerCookie);
+
+    const deskCookie = await loginAs("desk@http.test");
+    const admission = await request(app).post("/api/students/admit").set("Cookie", deskCookie).send({
+      admission_no: "2026/001", full_name: "Ravi Kumar",
+      academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
+    });
+    expect(admission.status).toBe(201);
+    expect(admission.body.charges).toHaveLength(1);
+
+    const ledger = await request(app)
+      .get(`/api/students/enrollments/${admission.body.enrollment.id}/ledger`)
+      .set("Cookie", deskCookie);
+    expect(ledger.body.balance).toBe(4000000);
+  });
+
+  it("front desk cannot access the defaulters report", async () => {
+    const ownerCookie = await loginAs("owner@http.test");
+    const { year } = await setUpAcademicStructure(ownerCookie);
+
+    const deskCookie = await loginAs("desk@http.test");
+    const res = await request(app).get(`/api/billing/academic-years/${year.id}/defaulters`)
+      .set("Cookie", deskCookie);
+    expect(res.status).toBe(403);
+  });
+
+  it("recording a payment over HTTP updates the enrollment's balance", async () => {
+    const ownerCookie = await loginAs("owner@http.test");
+    const { year, classLevel, section } = await setUpAcademicStructure(ownerCookie);
+    const deskCookie = await loginAs("desk@http.test");
+    const admission = await request(app).post("/api/students/admit").set("Cookie", deskCookie).send({
+      admission_no: "2026/002", full_name: "Sneha Iyer",
+      academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
+    });
+
+    const payment = await request(app).post("/api/collection/payments").set("Cookie", deskCookie).send({
+      enrollment_id: admission.body.enrollment.id, amount: 1500000, mode: "cash",
+    });
+    expect(payment.status).toBe(201);
+    expect(payment.body.receipt_no).toMatch(/^RCP\//);
+
+    const ledger = await request(app)
+      .get(`/api/students/enrollments/${admission.body.enrollment.id}/ledger`)
+      .set("Cookie", deskCookie);
+    expect(ledger.body.balance).toBe(4000000 - 1500000);
+  });
+
+  it("an accountant can see the day book after front desk collects", async () => {
+    const ownerCookie = await loginAs("owner@http.test");
+    const { year, classLevel, section } = await setUpAcademicStructure(ownerCookie);
+    const deskCookie = await loginAs("desk@http.test");
+    const admission = await request(app).post("/api/students/admit").set("Cookie", deskCookie).send({
+      admission_no: "2026/003", full_name: "Arjun Shetty",
+      academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
+    });
+    await request(app).post("/api/collection/payments").set("Cookie", deskCookie).send({
+      enrollment_id: admission.body.enrollment.id, amount: 2000000, mode: "upi",
+    });
+
+    const accCookie = await loginAs("acc@http.test");
+    const today = new Date().toISOString().slice(0, 10);
+    const dayBook = await request(app).get(`/api/collection/day-book?date=${today}`)
+      .set("Cookie", accCookie);
+    expect(dayBook.status).toBe(200);
+    expect(dayBook.body.total).toBe(2000000);
+    expect(dayBook.body.byMode.upi).toBe(2000000);
+  });
+
+  it("issuing an invoice over HTTP requires collect_payments and returns a numbered invoice", async () => {
+    const ownerCookie = await loginAs("owner@http.test");
+    const { year, classLevel, section } = await setUpAcademicStructure(ownerCookie);
+    const deskCookie = await loginAs("desk@http.test");
+    const admission = await request(app).post("/api/students/admit").set("Cookie", deskCookie).send({
+      admission_no: "2026/004", full_name: "Meera Nair",
+      academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
+    });
+
+    const invoice = await request(app)
+      .post(`/api/billing/enrollments/${admission.body.enrollment.id}/invoice`)
+      .set("Cookie", deskCookie).send({});
+    expect(invoice.status).toBe(201);
+    expect(invoice.body.invoice_no).toMatch(/^INV\//);
+  });
+
+  it("anonymous requests to every route in this domain are refused", async () => {
+    const routes = [
+      ["get", "/api/setup/academic-years"],
+      ["post", "/api/students/admit"],
+      ["post", "/api/collection/payments"],
+      ["get", "/api/collection/day-book"],
+    ] as const;
+    for (const [method, path] of routes) {
+      const res = await (request(app) as any)[method](path);
+      expect(res.status).toBe(403);
+    }
+  });
+});
+
+describe("gateway webhook", () => {
+  it("accepts a correctly signed payload and is idempotent on retry", async () => {
+    const ownerCookie = await loginAs("owner@http.test");
+    const year = await request(app).post("/api/setup/academic-years").set("Cookie", ownerCookie)
+      .send({ name: "2026-27", starts_on: "2026-06-01", ends_on: "2027-03-31", status: "active" });
+    const classLevel = await request(app).post("/api/setup/class-levels").set("Cookie", ownerCookie)
+      .send({ name: "VIII", ladder_order: 8, stage: "middle" });
+    const section = await request(app).post("/api/setup/sections").set("Cookie", ownerCookie).send({
+      academic_year_id: year.body.id, class_level_id: classLevel.body.id, name: "A",
+    });
+    const feeHead = await request(app).post("/api/setup/fee-heads").set("Cookie", ownerCookie)
+      .send({ name: "Tuition fee" });
+    await request(app).post("/api/setup/fee-structure").set("Cookie", ownerCookie).send({
+      academic_year_id: year.body.id, class_level_id: classLevel.body.id,
+      fee_head_id: feeHead.body.id, amount: 4000000, due_on: "2026-06-15",
+    });
+    const admission = await request(app).post("/api/students/admit").set("Cookie", ownerCookie).send({
+      admission_no: "2026/005", full_name: "Kavya Reddy",
+      academic_year_id: year.body.id, class_level_id: classLevel.body.id, section_id: section.body.id,
+    });
+
+    process.env.RAZORPAY_WEBHOOK_SECRET = "test-secret";
+    const payload = JSON.stringify({
+      enrollment_id: admission.body.enrollment.id, order_id: "order_1",
+      payment_id: "pay_webhook_1", amount: 4000000,
+    });
+    const signature = crypto.createHmac("sha256", "test-secret").update(payload).digest("hex");
+
+    const first = await request(app).post("/api/collection/webhook/razorpay")
+      .set("Content-Type", "application/json")
+      .set("x-webhook-signature", signature)
+      .send(payload);
+    expect(first.status).toBe(201);
+
+    const second = await request(app).post("/api/collection/webhook/razorpay")
+      .set("Content-Type", "application/json")
+      .set("x-webhook-signature", signature)
+      .send(payload);
+    expect(second.status).toBe(200); // not created again
+    expect(second.body.id).toBe(first.body.id);
+  });
+
+  it("rejects a webhook with a bad signature", async () => {
+    process.env.RAZORPAY_WEBHOOK_SECRET = "test-secret";
+    const payload = JSON.stringify({
+      enrollment_id: "00000000-0000-0000-0000-000000000000", order_id: "order_1",
+      payment_id: "pay_bad", amount: 1000,
+    });
+    const res = await request(app).post("/api/collection/webhook/razorpay")
+      .set("Content-Type", "application/json")
+      .set("x-webhook-signature", "not-the-right-signature")
+      .send(payload);
+    expect(res.status).toBe(401);
+  });
+});

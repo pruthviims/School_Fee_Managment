@@ -6,7 +6,11 @@ import rateLimit from "express-rate-limit";
 import helmet from "helmet";
 import { attachAuth } from "./middleware/auth.js";
 import { authRouter } from "./routes/auth.js";
+import { billingRouter } from "./routes/billing.js";
+import { collectionRouter, webhookHandler } from "./routes/collection.js";
+import { setupRouter } from "./routes/setup.js";
 import { staffRouter } from "./routes/staff.js";
+import { studentsRouter } from "./routes/students.js";
 
 export const app = express();
 
@@ -15,9 +19,19 @@ app.use(cors({
   origin: process.env.FRONTEND_URL || "http://localhost:5173",
   credentials: true,
 }));
-app.use(express.json());
+
+// Registered ahead of the general JSON parser, deliberately: HMAC
+// verification needs the exact bytes the gateway signed, and by the time
+// express.json() below has parsed and could re-serialise a body, key
+// ordering may have changed and every signature would fail. attachAuth
+// still needs to run first so req.user/school resolve the same way here
+// as everywhere else, even though this route is otherwise unauthenticated
+// (the signature check IS the authentication).
 app.use(cookieParser());
 app.use(attachAuth);
+app.post("/api/collection/webhook/:gateway", express.raw({ type: "*/*" }), webhookHandler);
+
+app.use(express.json());
 
 // Login is the one endpoint worth a tighter, dedicated limit — it's the
 // obvious target for credential-stuffing attempts. Skipped in tests: a
@@ -34,6 +48,10 @@ app.get("/api/health", (_req, res) => res.json({ ok: true }));
 
 app.use("/api/auth", authRouter);
 app.use("/api/staff", staffRouter);
+app.use("/api/setup", setupRouter);
+app.use("/api/students", studentsRouter);
+app.use("/api/billing", billingRouter);
+app.use("/api/collection", collectionRouter);
 
 // Keep error details out of responses — logged server-side only, since a
 // stack trace is an information leak, not a debugging aid, once this is
