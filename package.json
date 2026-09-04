@@ -21,7 +21,8 @@
     "express-rate-limit": "^7.4.1",
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.3",
-    "nodemailer": "^6.9.16",
+    "nodemailer": "^10.0.0",
+    "papaparse": "^5.4.1",
     "pg": "^8.23.0",
     "zod": "^3.24.1"
   },
@@ -33,6 +34,7 @@
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^22.10.5",
     "@types/nodemailer": "^6.4.17",
+    "@types/papaparse": "^5.3.15",
     "@types/pg": "^8.21.0",
     "@types/supertest": "^6.0.2",
     "esbuild": "^0.24.2",

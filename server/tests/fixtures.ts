@@ -31,13 +31,13 @@ export async function createAcademicYear(
 
 export async function createClassLevel(
   schoolId: string,
-  overrides: Partial<{ name: string; ladder_order: number; stage: string; is_terminal: boolean }> = {},
+  overrides: Partial<{ name: string; ladder_order: number; stage: string; is_terminal: boolean; requires_stream: boolean }> = {},
 ) {
   const result = await pool.query(
-    `INSERT INTO class_levels (school_id, name, ladder_order, stage, is_terminal)
-     VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+    `INSERT INTO class_levels (school_id, name, ladder_order, stage, is_terminal, requires_stream)
+     VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
     [schoolId, overrides.name ?? "VIII", overrides.ladder_order ?? 8,
-     overrides.stage ?? "middle", overrides.is_terminal ?? false],
+     overrides.stage ?? "middle", overrides.is_terminal ?? false, overrides.requires_stream ?? false],
   );
   return result.rows[0];
 }

@@ -8,6 +8,7 @@ import { attachAuth } from "./middleware/auth.js";
 import { authRouter } from "./routes/auth.js";
 import { billingRouter } from "./routes/billing.js";
 import { collectionRouter, webhookHandler } from "./routes/collection.js";
+import { importRouter } from "./routes/import.js";
 import { promotionRouter } from "./routes/promotion.js";
 import { setupRouter } from "./routes/setup.js";
 import { staffRouter } from "./routes/staff.js";
@@ -54,6 +55,7 @@ app.use("/api/students", studentsRouter);
 app.use("/api/billing", billingRouter);
 app.use("/api/collection", collectionRouter);
 app.use("/api/promotion", promotionRouter);
+app.use("/api/import", importRouter);
 
 // Keep error details out of responses — logged server-side only, since a
 // stack trace is an information leak, not a debugging aid, once this is
