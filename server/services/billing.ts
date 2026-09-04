@@ -55,14 +55,21 @@ async function loadEnrollment(client: PoolClient, enrollmentId: string): Promise
  * Snapshot the fee structure onto an enrollment. Idempotent per
  * (enrollment, fee_head, term_no) — re-running never duplicates charges,
  * so a half-failed admission can safely be retried.
+ *
+ * Accepts an optional `client` so this can participate in a caller's own
+ * transaction (promotion's commit() does exactly this) instead of always
+ * opening a fresh connection — a fresh connection can't see rows an
+ * outer, still-open transaction has written but not yet committed.
  */
 export async function generateCharges(
   enrollmentId: string,
-  { optionalHeadIds = [], createdBy = null }: { optionalHeadIds?: string[]; createdBy?: string | null } = {},
+  { optionalHeadIds = [], createdBy = null, client: providedClient }:
+    { optionalHeadIds?: string[]; createdBy?: string | null; client?: PoolClient } = {},
 ): Promise<unknown[]> {
-  const client = await pool.connect();
+  const ownsConnection = !providedClient;
+  const client = providedClient ?? await pool.connect();
   try {
-    await client.query("BEGIN");
+    if (ownsConnection) await client.query("BEGIN");
     const enrollment = await loadEnrollment(client, enrollmentId);
 
     if (enrollment.academic_year_status === "closed") {
@@ -120,13 +127,13 @@ export async function generateCharges(
       created.push(inserted.rows[0]);
     }
 
-    await client.query("COMMIT");
+    if (ownsConnection) await client.query("COMMIT");
     return created;
   } catch (err) {
-    await client.query("ROLLBACK");
+    if (ownsConnection) await client.query("ROLLBACK");
     throw err;
   } finally {
-    client.release();
+    if (ownsConnection) client.release();
   }
 }
 
@@ -134,21 +141,23 @@ export async function generateCharges(
  * Move an unpaid balance into the new academic year as a single opening
  * arrear charge, flagged so it reports separately from current-year
  * dues. Idempotent: re-running finds the existing arrear row and does
- * nothing.
+ * nothing. Accepts an optional `client` for the same reason
+ * generateCharges does — see its docstring.
  */
 export async function carryForwardArrears(
-  { fromEnrollmentId, toEnrollmentId, createdBy = null }:
-    { fromEnrollmentId: string; toEnrollmentId: string; createdBy?: string | null },
+  { fromEnrollmentId, toEnrollmentId, createdBy = null, client: providedClient }:
+    { fromEnrollmentId: string; toEnrollmentId: string; createdBy?: string | null; client?: PoolClient },
 ): Promise<unknown | null> {
-  const client = await pool.connect();
+  const ownsConnection = !providedClient;
+  const client = providedClient ?? await pool.connect();
   try {
-    await client.query("BEGIN");
+    if (ownsConnection) await client.query("BEGIN");
     const from = await loadEnrollment(client, fromEnrollmentId);
     const to = await loadEnrollment(client, toEnrollmentId);
 
     const ledger = await getEnrollmentLedger(fromEnrollmentId, client);
     if (ledger.balance <= 0) {
-      await client.query("COMMIT");
+      if (ownsConnection) await client.query("COMMIT");
       return null;
     }
 
@@ -158,7 +167,7 @@ export async function carryForwardArrears(
       [toEnrollmentId, from.academic_year_id],
     );
     if (existing.rows[0]) {
-      await client.query("COMMIT");
+      if (ownsConnection) await client.query("COMMIT");
       return existing.rows[0];
     }
 
@@ -171,13 +180,13 @@ export async function carryForwardArrears(
       [to.school_id, toEnrollmentId, `Arrears carried forward (${from.academic_year_name})`,
        ledger.balance, to.academic_year_starts_on, from.academic_year_id, createdBy],
     );
-    await client.query("COMMIT");
+    if (ownsConnection) await client.query("COMMIT");
     return inserted.rows[0];
   } catch (err) {
-    await client.query("ROLLBACK");
+    if (ownsConnection) await client.query("ROLLBACK");
     throw err;
   } finally {
-    client.release();
+    if (ownsConnection) client.release();
   }
 }
 
