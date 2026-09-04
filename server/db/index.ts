@@ -1,4 +1,12 @@
-import { Pool, type QueryResultRow } from "pg";
+import { Pool, types, type QueryResultRow } from "pg";
+
+// Postgres bigint (OID 20) comes back as a string by default, to avoid
+// silent precision loss for values outside JS's safe integer range. Every
+// bigint column in this schema is money in paise, which never gets
+// anywhere near that limit (₹90 lakh crore before it would matter) — so
+// parsing as a number here, once, is safe and saves converting at every
+// call site that touches an amount.
+types.setTypeParser(20, (value: string) => Number(value));
 
 // Neon (and most managed Postgres) handle bursty serverless connect/
 // disconnect patterns via their own pooler in front of the database, so a
