@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { requireCapability } from "../middleware/permissions.js";
 import { BillingError, issueInvoice, outstandingSummary } from "../services/billing.js";
+import { ReceiptError, getInvoiceData } from "../services/receipts.js";
 
 export const billingRouter = Router();
 
@@ -36,5 +37,19 @@ billingRouter.get(
   async (req, res) => {
     const summary = await outstandingSummary(String(req.params.id));
     res.json(summary);
+  },
+);
+
+billingRouter.get(
+  "/invoices/:id/receipt-data",
+  requireCapability("collect_payments"),
+  async (req, res) => {
+    try {
+      const data = await getInvoiceData(String(req.params.id));
+      res.json(data);
+    } catch (err) {
+      if (err instanceof ReceiptError) return res.status(404).json({ detail: err.message });
+      throw err;
+    }
   },
 );

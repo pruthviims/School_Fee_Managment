@@ -5,10 +5,13 @@ export async function resetDb() {
   await pool.query("TRUNCATE memberships, users, schools RESTART IDENTITY CASCADE");
 }
 
-export async function createSchool(overrides: Partial<{ name: string; short_code: string }> = {}) {
+export async function createSchool(
+  overrides: Partial<{ name: string; short_code: string; address: string }> = {},
+) {
   const result = await pool.query(
-    `INSERT INTO schools (name, short_code) VALUES ($1, $2) RETURNING *`,
-    [overrides.name ?? "Test School", overrides.short_code ?? `test-${Date.now()}-${Math.random()}`],
+    `INSERT INTO schools (name, short_code, address) VALUES ($1, $2, $3) RETURNING *`,
+    [overrides.name ?? "Test School", overrides.short_code ?? `test-${Date.now()}-${Math.random()}`,
+     overrides.address ?? ""],
   );
   return result.rows[0];
 }

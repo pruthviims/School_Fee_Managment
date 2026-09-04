@@ -16,6 +16,7 @@ import {
   CollectionError, dailyCollection, handleGatewayWebhook, markBounced, markCleared,
   recordPayment, verifyWebhookSignature,
 } from "../services/collection.js";
+import { ReceiptError, getReceiptData } from "../services/receipts.js";
 
 export const collectionRouter = Router();
 collectionRouter.use(requireMember);
@@ -80,6 +81,20 @@ collectionRouter.get(
     res.json(report);
   },
 );
+
+// Any active member can look up and reprint a receipt (a parent who lost
+// theirs is a routine front-desk request), matching how the fees app's
+// original receipt_pdf view was gated under IsMember rather than
+// collect_payments specifically.
+collectionRouter.get("/payments/:id/receipt-data", async (req, res) => {
+  try {
+    const data = await getReceiptData(String(req.params.id));
+    res.json(data);
+  } catch (err) {
+    if (err instanceof ReceiptError) return res.status(404).json({ detail: err.message });
+    throw err;
+  }
+});
 
 // ---------------------------------------------------------------------
 // Gateway webhook — registered directly in app.ts with express.raw(),
