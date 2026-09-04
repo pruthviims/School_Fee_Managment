@@ -25,7 +25,7 @@ import {
   SchoolScreen,
   TransportScreen,
 } from "./Screens";
-import { ACADEMIC_YEARS, CLASSES, TRANSPORT_ID } from "./lib";
+import { CLASSES, TRANSPORT_ID } from "./lib";
 
 const KEY = "school-fee-admin-v3";
 
@@ -116,6 +116,20 @@ const STUDENTS_SUBTABS = [
   { id: "newadm", label: "New Admission", Icon: UserPlus },
   { id: "roll", label: "Fee Collection", Icon: Percent },
 ];
+// Indian academic year: roughly June to March. Used only to seed a
+// sensible first year automatically when a school has none yet — after
+// that, every year comes from the real backend, never computed locally.
+function defaultAcademicYearRange(today = new Date()) {
+  const month = today.getMonth(); // 0-indexed
+  const startYear = month >= 4 ? today.getFullYear() : today.getFullYear() - 1;
+  const endYear = startYear + 1;
+  return {
+    name: `${startYear}-${String(endYear).slice(-2)}`,
+    starts_on: `${startYear}-06-01`,
+    ends_on: `${endYear}-03-31`,
+  };
+}
+
 const DEFAULT_STUDENTS_STEP = "roll";
 
 const ROLE_LABEL = {
@@ -157,6 +171,72 @@ export default function App() {
   // payment window opens right there instead of sending staff off to find
   // that student again on the Fees & Concessions screen.
   const [payFor, setPayFor] = useState(null);
+  // The real, backend-backed list of academic years for this school —
+  // never persisted locally, always fetched fresh, since these are the
+  // first genuinely shared, multi-user data this app manages. state.year
+  // stays a plain name string (e.g. "2026-27") for the rest of the app,
+  // still localStorage-backed, to keep every other screen working
+  // unchanged until each of them is wired up in turn.
+  const [academicYears, setAcademicYears] = useState([]);
+
+  // Fetches the school's real academic years, creating a sensible first
+  // one automatically if none exist yet — the same zero-friction default
+  // freshWorkspace() used to hardcode, now actually persisted.
+  async function ensureAcademicYears() {
+    let years = await api.get("/setup/academic-years");
+    if (years.length === 0) {
+      const seed = defaultAcademicYearRange();
+      const created = await api.post("/setup/academic-years", { ...seed, status: "active" });
+      years = [created];
+    }
+    setAcademicYears(years);
+    return years;
+  }
+
+  function pickCurrentYearName(years) {
+    const today = new Date().toISOString().slice(0, 10);
+    const current = years.find((y) => y.starts_on <= today && today <= y.ends_on);
+    if (current) return current.name;
+    return [...years].sort((a, b) => (a.starts_on < b.starts_on ? 1 : -1))[0]?.name;
+  }
+
+  // Shared by setup, login, and session-restore: once we know who's
+  // signed in, fetch (or seed) their real academic years and make sure
+  // state.year actually matches one of them, rather than trusting
+  // whatever freshWorkspace()'s hardcoded default guessed.
+  async function afterAuthResolved(me, { fresh } = {}) {
+    const school = schoolFromSession(me);
+    setState((prev) => (fresh || !prev) ? freshWorkspace(school) : { ...prev, school });
+    const years = await ensureAcademicYears();
+    const yearName = pickCurrentYearName(years);
+    if (yearName) setState((prev) => (prev.year === yearName ? prev : { ...prev, year: yearName }));
+    setSignedIn(true);
+  }
+
+  // A single prompt for the start year is enough to compute a sensible
+  // full range automatically — matching how ensureAcademicYears() seeds
+  // the very first year, and avoiding a whole modal for one date field.
+  async function handleYearChange(value) {
+    if (value !== "__new__") return setState({ ...state, year: value });
+
+    const suggested = Math.max(...academicYears.map((y) => Number(y.name.slice(0, 4)))) + 1 || new Date().getFullYear();
+    const startYear = window.prompt("New academic year starts in which calendar year? (e.g. 2028)",
+      String(suggested));
+    if (!startYear || !/^\d{4}$/.test(startYear.trim())) return;
+
+    const year = Number(startYear.trim());
+    const seed = {
+      name: `${year}-${String(year + 1).slice(-2)}`,
+      starts_on: `${year}-06-01`, ends_on: `${year + 1}-03-31`, status: "planning",
+    };
+    try {
+      const created = await api.post("/setup/academic-years", seed);
+      setAcademicYears((prev) => [...prev, created]);
+      setState({ ...state, year: created.name });
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Could not create that academic year.");
+    }
+  }
 
   useEffect(() => {
     if (!state) return;
@@ -174,10 +254,9 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     api.get("/auth/me")
-      .then((me) => {
+      .then(async (me) => {
         if (cancelled) return;
-        setState((prev) => prev || freshWorkspace(schoolFromSession(me)));
-        setSignedIn(true);
+        await afterAuthResolved(me);
       })
       .catch(() => { /* no valid session — show the login screen */ })
       .finally(() => { if (!cancelled) setCheckingSession(false); });
@@ -189,16 +268,14 @@ export default function App() {
     // Always a clean start — this is explicitly "create a new school",
     // never a reason to reuse whatever a previous, unrelated session left
     // in this browser's storage.
-    setState(freshWorkspace(schoolFromSession(me)));
+    await afterAuthResolved(me, { fresh: true });
     setShowSetup(false);
-    setSignedIn(true);
     setStep("transport");
   }
 
   async function handleLogin(_schoolId, email, password) {
     const me = await api.post("/auth/login", { email, password });
-    setState((prev) => prev || freshWorkspace(schoolFromSession(me)));
-    setSignedIn(true);
+    await afterAuthResolved(me);
     setStep("transport");
   }
 
@@ -344,9 +421,10 @@ export default function App() {
 
             {YEAR_SCOPED_STEPS.has(step) && (
               <FilterSelect value={state.year} active
-                onChange={(e) => setState({ ...state, year: e.target.value })}
+                onChange={(e) => handleYearChange(e.target.value)}
                 className="w-auto min-w-[110px]">
-                {ACADEMIC_YEARS.map((y) => <option key={y} value={y}>{y}</option>)}
+                {academicYears.map((y) => <option key={y.id} value={y.name}>{y.name}</option>)}
+                <option value="__new__">+ Add academic year</option>
               </FilterSelect>
             )}
           </div>
