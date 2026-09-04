@@ -24,12 +24,20 @@ const cookieOptions = {
   maxAge: 1000 * 60 * 60 * 8, // 8h, matches the JWT's own expiry
 };
 
-function meResponse(user: { id: string; email: string; full_name: string },
-                     membership: { id: string; role: string; is_active: boolean } | null) {
+function meResponse(
+  user: { id: string; email: string; full_name: string },
+  membership: { id: string; role: string; is_active: boolean } | null,
+  school: { id: string; name: string; short_code: string; address: string;
+            logo_key: string; receipt_footer: string } | null,
+) {
   return {
     id: user.id,
     email: user.email,
     full_name: user.full_name,
+    school: school && {
+      id: school.id, name: school.name, short_code: school.short_code,
+      address: school.address, logo_key: school.logo_key, receipt_footer: school.receipt_footer,
+    },
     membership: membership && {
       id: membership.id,
       role: membership.role,
@@ -62,20 +70,24 @@ authRouter.post("/login", async (req, res) => {
   }
 
   const membershipResult = await pool.query(
-    `SELECT m.id, m.role, m.is_active
+    `SELECT m.id, m.role, m.is_active,
+            s.id AS school_id, s.name, s.short_code, s.address, s.logo_key, s.receipt_footer
      FROM memberships m JOIN schools s ON s.id = m.school_id
      WHERE m.user_id = $1 AND m.is_active = true AND s.is_active = true
      ORDER BY m.created_at ASC LIMIT 1`,
     [user.id],
   );
-  const membership = membershipResult.rows[0] ?? null;
-  if (!membership) {
+  const row = membershipResult.rows[0];
+  if (!row) {
     return res.status(403).json({ detail: "This account has no active school to sign in to." });
   }
+  const membership = { id: row.id, role: row.role, is_active: row.is_active };
+  const school = { id: row.school_id, name: row.name, short_code: row.short_code,
+    address: row.address, logo_key: row.logo_key, receipt_footer: row.receipt_footer };
 
   const token = issueSessionToken(user.id);
   res.cookie(SESSION_COOKIE, token, cookieOptions);
-  res.json(meResponse(user, membership));
+  res.json(meResponse(user, membership, school));
 });
 
 authRouter.post("/logout", requireAuth, (_req, res) => {
@@ -84,7 +96,85 @@ authRouter.post("/logout", requireAuth, (_req, res) => {
 });
 
 authRouter.get("/me", requireAuth, (req, res) => {
-  res.json(meResponse(req.user!, req.membership ?? null));
+  res.json(meResponse(req.user!, req.membership ?? null, req.school ?? null));
+});
+
+const bootstrapSchema = z.object({
+  school_name: z.string().min(1).max(200),
+  short_code: z.string().min(2).max(20)
+    .regex(/^[a-z0-9-]+$/, "Use lowercase letters, numbers, and hyphens only."),
+  address: z.string().max(500).optional().default(""),
+  owner_full_name: z.string().min(1).max(150),
+  owner_email: z.string().email(),
+  owner_password: z.string().min(12, "Use at least 12 characters."),
+});
+
+/**
+ * Self-serve: create a brand-new school and its first (owner) user in one
+ * transaction, then sign them straight in. Everything after this point —
+ * inviting more staff, setting up fee structure — goes through the
+ * normal authenticated routes; this is the one unauthenticated door in,
+ * matching what the frontend's Setup screen needs.
+ */
+authRouter.post("/bootstrap-school", async (req, res) => {
+  const parsed = bootstrapSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ detail: parsed.error.issues[0]?.message });
+  const d = parsed.data;
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    let school;
+    try {
+      const schoolResult = await client.query(
+        `INSERT INTO schools (name, short_code, address) VALUES ($1, $2, $3) RETURNING *`,
+        [d.school_name, d.short_code, d.address],
+      );
+      school = schoolResult.rows[0];
+    } catch (err) {
+      if ((err as { code?: string }).code === "23505") {
+        await client.query("ROLLBACK");
+        return res.status(409).json({ detail: "That School ID is already taken." });
+      }
+      throw err;
+    }
+
+    let user;
+    try {
+      const passwordHash = await hashPassword(d.owner_password);
+      const userResult = await client.query(
+        `INSERT INTO users (email, full_name, password_hash) VALUES ($1, $2, $3) RETURNING *`,
+        [d.owner_email.toLowerCase(), d.owner_full_name, passwordHash],
+      );
+      user = userResult.rows[0];
+    } catch (err) {
+      if ((err as { code?: string }).code === "23505") {
+        await client.query("ROLLBACK");
+        return res.status(409).json({
+          detail: "An account already exists with that email. Sign in instead, or use a different email.",
+        });
+      }
+      throw err;
+    }
+
+    const membershipResult = await client.query(
+      `INSERT INTO memberships (user_id, school_id, role) VALUES ($1, $2, 'owner') RETURNING *`,
+      [user.id, school.id],
+    );
+    const membership = membershipResult.rows[0];
+
+    await client.query("COMMIT");
+
+    const token = issueSessionToken(user.id);
+    res.cookie(SESSION_COOKIE, token, cookieOptions);
+    res.status(201).json(meResponse(user, membership, school));
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
 });
 
 const resetRequestSchema = z.object({ email: z.string().email() });

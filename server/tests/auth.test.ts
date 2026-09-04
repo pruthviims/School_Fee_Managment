@@ -58,6 +58,8 @@ describe("login", () => {
     expect(res.status).toBe(200);
     expect(res.body.email).toBe("owner@school.test");
     expect(res.body.membership.role).toBe("owner");
+    expect(res.body.school.name).toBe(school.name);
+    expect(res.body.school.short_code).toBe("acc-test");
   });
 
   it("rejects a wrong password", async () => {
@@ -83,6 +85,7 @@ describe("login", () => {
     expect(res.body.membership.role).toBe("front_desk");
     expect(res.body.membership.capabilities).toContain("manage_admissions");
     expect(res.body.membership.capabilities).not.toContain("manage_staff");
+    expect(res.body.school.short_code).toBe("acc-test");
   });
 
   it("logout ends the session", async () => {
@@ -273,5 +276,78 @@ describe("password reset", () => {
     const { res } = await loginAs("invitee@school.test", "invitees-new-password-1");
     expect(res.status).toBe(200);
     expect(res.body.membership.role).toBe("viewer");
+  });
+});
+
+describe("bootstrap-school", () => {
+  it("creates a school, an owner user, and logs them straight in", async () => {
+    const res = await request(app).post("/api/auth/bootstrap-school").send({
+      school_name: "Vidya Mandir Public School",
+      short_code: "vidya-mandir",
+      address: "48 MG Road, Bengaluru",
+      owner_full_name: "R. Krishnamurthy",
+      owner_email: "admin@vidyamandir.test",
+      owner_password: "a-genuinely-strong-password-1",
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.school.short_code).toBe("vidya-mandir");
+    expect(res.body.membership.role).toBe("owner");
+    expect(res.headers["set-cookie"]).toBeDefined();
+
+    // The session cookie actually works, not just present.
+    const me = await request(app).get("/api/auth/me").set("Cookie", res.headers["set-cookie"]);
+    expect(me.status).toBe(200);
+    expect(me.body.email).toBe("admin@vidyamandir.test");
+  });
+
+  it("refuses a duplicate School ID", async () => {
+    await request(app).post("/api/auth/bootstrap-school").send({
+      school_name: "First School", short_code: "dup-code",
+      owner_full_name: "Owner One", owner_email: "one@dup.test",
+      owner_password: "a-genuinely-strong-password-1",
+    });
+    const second = await request(app).post("/api/auth/bootstrap-school").send({
+      school_name: "Second School", short_code: "dup-code",
+      owner_full_name: "Owner Two", owner_email: "two@dup.test",
+      owner_password: "a-genuinely-strong-password-1",
+    });
+    expect(second.status).toBe(409);
+
+    const schools = await pool.query(`SELECT COUNT(*) FROM schools WHERE short_code = 'dup-code'`);
+    expect(Number(schools.rows[0].count)).toBe(1); // the failed attempt created nothing
+  });
+
+  it("refuses an email already in use, and doesn't leave a half-created school behind", async () => {
+    await request(app).post("/api/auth/bootstrap-school").send({
+      school_name: "First School", short_code: "first-school",
+      owner_full_name: "Owner", owner_email: "shared@dup.test",
+      owner_password: "a-genuinely-strong-password-1",
+    });
+    const second = await request(app).post("/api/auth/bootstrap-school").send({
+      school_name: "Second School", short_code: "second-school",
+      owner_full_name: "Owner", owner_email: "shared@dup.test",
+      owner_password: "a-genuinely-strong-password-1",
+    });
+    expect(second.status).toBe(409);
+
+    const secondSchool = await pool.query(`SELECT 1 FROM schools WHERE short_code = 'second-school'`);
+    expect(secondSchool.rows).toHaveLength(0); // rolled back, not left as an orphan
+  });
+
+  it("rejects a weak owner password", async () => {
+    const res = await request(app).post("/api/auth/bootstrap-school").send({
+      school_name: "Weak Pw School", short_code: "weak-pw-school",
+      owner_full_name: "Owner", owner_email: "weak@pw.test", owner_password: "12345",
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects a School ID with spaces or uppercase letters", async () => {
+    const res = await request(app).post("/api/auth/bootstrap-school").send({
+      school_name: "Bad Code School", short_code: "Bad Code!",
+      owner_full_name: "Owner", owner_email: "bad@code.test",
+      owner_password: "a-genuinely-strong-password-1",
+    });
+    expect(res.status).toBe(400);
   });
 });
