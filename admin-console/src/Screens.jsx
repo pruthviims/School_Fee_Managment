@@ -1411,59 +1411,61 @@ export function NewAdmissionTab({ state, save, classLevels, academicYears, ensur
 /* Import students — class chosen from a dropdown, no separate picker  */
 /* ================================================================== */
 
-export function ImportScreen({ state, save }) {
-  // Default to the first class with students already in it this year, else
-  // the first class on the ladder. Either way the dropdown is never empty.
-  const [klass, setKlass] = useState(
-    () => state.students.find((s) => inYear(s, state.year))?.className || CLASSES[0].name,
+export function ImportScreen({ state, academicYears, classLevels }) {
+  const [classLevelId, setClassLevelId] = useState(classLevels[10]?.id || classLevels[0]?.id || "");
+  return (
+    <ClassImport state={state} academicYears={academicYears} classLevels={classLevels}
+      classLevelId={classLevelId} setClassLevelId={setClassLevelId} />
   );
-  return <ClassImport state={state} save={save} klass={klass} setKlass={setKlass} />;
 }
 
-function ClassImport({ state, save, klass, setKlass }) {
-  const [text, setText] = useState("");
+function ClassImport({ state, academicYears, classLevels, classLevelId, setClassLevelId }) {
   const [filename, setFilename] = useState("");
-  const [map, setMap] = useState(null);
-  const [headers, setHeaders] = useState([]);
-  const [body, setBody] = useState([]);
+  const [content, setContent] = useState("");
+  const [batch, setBatch] = useState(null); // {id, total_rows, valid_rows}
+  const [rows, setRows] = useState([]);
+  const [existing, setExisting] = useState([]);
   const [error, setError] = useState("");
   const [done, setDone] = useState(null);
   const [filter, setFilter] = useState("all");
   const [dragging, setDragging] = useState(false);
+  const [busy, setBusy] = useState(false);
   const fileRef = useRef(null);
 
-  // A duplicate is only real within the same year — a continuing student
-  // legitimately keeps their admission number when they move up a class.
-  const currentYearStudents = state.students.filter((s) => inYear(s, state.year));
+  const year = academicYears.find((y) => y.name === state.year);
+  const activeClass = classLevels.find((c) => c.id === classLevelId);
 
-  const rows = useMemo(() => {
-    if (!map || !body.length) return [];
-    return validateRows(body, map, {
-      existingAdmissionNos: currentYearStudents.map((s) => s.admissionNo),
-      routes: state.routes,
-      defaultClass: klass,
-    });
-  }, [map, body, currentYearStudents, state.routes, klass]);
+  async function refetchExisting() {
+    if (!year || !classLevelId) { setExisting([]); return; }
+    const list = await api.get(
+      `/students/enrollments?academic_year_id=${year.id}&class_level_id=${classLevelId}`);
+    setExisting(list);
+  }
+  useEffect(() => { refetchExisting(); }, [year?.id, classLevelId]); // eslint-disable-line
 
-  const good = rows.filter((r) => !r.errors.length);
-  const bad = rows.filter((r) => r.errors.length);
-  const warned = good.filter((r) => r.warnings.length);
-
-  function ingest(content, name) {
+  async function stage(text, name) {
     setError(""); setDone(null);
+    if (!year) return setError("No academic year is set up yet.");
+    setBusy(true);
     try {
-      const { headers: h, body: b } = splitHeader(parseCSV(content));
-      if (!b.length) return setError("That file has a header row but no students under it.");
-      setHeaders(h); setBody(b); setMap(suggestColumnMap(h)); setFilename(name);
-    } catch {
-      setError("That file could not be read. Save it as CSV and try again.");
+      const staged = await api.post("/import/stage", {
+        academic_year_id: year.id, filename: name, content: text,
+      });
+      setBatch(staged);
+      const { rows: stagedRows } = await api.get(`/import/batches/${staged.id}/rows`);
+      setRows(stagedRows);
+      setContent(text); setFilename(name);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "That file could not be staged.");
+    } finally {
+      setBusy(false);
     }
   }
 
   function readFile(file) {
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = () => ingest(String(reader.result), file.name);
+    reader.onload = () => stage(String(reader.result), file.name);
     reader.onerror = () => setError("The file could not be read.");
     reader.readAsText(file);
   }
@@ -1474,85 +1476,74 @@ function ClassImport({ state, save, klass, setKlass }) {
     readFile(e.dataTransfer.files?.[0]);
   }
 
-  function commit() {
-    const added = good.map((r) => ({
-      id: uid(), admissionNo: r.admissionNo, name: r.fullName,
-      className: r.className, section: r.section, rollNo: r.rollNo, dob: r.dob,
-      guardianName: r.guardianName, phone: r.phone, email: r.email, stopId: r.stopId,
-      admissionType: "continuing", year: state.year,
-      concession: r.concession || { type: "percent", value: 0, reason: "", includeTransport: false },
-    }));
-    save({ ...state, students: [...state.students, ...added] });
-    setDone({ created: added.length, skipped: bad.length });
-    setMap(null); setBody([]); setHeaders([]); setText("");
+  async function commit() {
+    if (!batch) return;
+    setBusy(true);
+    try {
+      const result = await api.post(`/import/batches/${batch.id}/commit`, {});
+      setDone(result);
+      setBatch(null); setRows([]); setContent(""); setFilename("");
+      await refetchExisting();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not commit that import.");
+    } finally {
+      setBusy(false);
+    }
   }
 
-  function download(content, name) {
-    const url = URL.createObjectURL(new Blob([content], { type: "text/csv" }));
+  async function downloadTemplate() {
+    const csv = await api.get("/import/template");
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
     const a = document.createElement("a");
-    a.href = url; a.download = name; a.click();
+    a.href = url; a.download = `${activeClass?.name || "class"}-import-template.csv`; a.click();
     URL.revokeObjectURL(url);
   }
 
-  const shown = filter === "errors" ? bad : filter === "warnings" ? warned
-    : filter === "ok" ? good : rows;
-  const existing = currentYearStudents.filter((s) => s.className === klass);
-  const total = currentYearStudents.length;
-  const countOf = (name) => currentYearStudents.filter((s) => s.className === name).length;
+  function startOver() {
+    setBatch(null); setRows([]); setContent(""); setFilename(""); setError(""); setDone(null);
+  }
 
-  // Switching class mid-upload would silently reassign whatever is on
+  // Switching class mid-upload would silently reassign whatever's on
   // screen against the wrong roll, so the picker resets the file instead.
   function changeClass(next) {
-    setKlass(next);
-    setMap(null); setBody([]); setHeaders([]); setText(""); setError(""); setDone(null);
+    setClassLevelId(next);
+    startOver();
   }
+
+  const good = rows.filter((r) => !r.errors.length);
+  const bad = rows.filter((r) => r.errors.length);
+  const warned = good.filter((r) => r.warnings.length);
+  const shown = filter === "errors" ? bad : filter === "warnings" ? warned
+    : filter === "ok" ? good : rows;
 
   return (
     <div>
       <PageHead title="First Time Import"
         subtitle={`Import a whole class's roll at once for ${state.year} — for a school's existing roster, not day-to-day admissions. Choose the class below, then upload the sheet the office already keeps.`} />
 
-      <div className="grid sm:grid-cols-3 gap-5 mb-6">
-        <StatCard icon={Users} tint="bg-brand-50 text-brand-600" label="Students on roll"
-          value={total} note={`In ${state.year}`} />
-        <StatCard icon={FileSpreadsheet} tint="bg-emerald-50 text-emerald-600" label="Classes filled"
-          value={CLASSES.filter((c) => countOf(c.name) > 0).length}
-          note={`of ${CLASSES.length}`} noteTint="text-emerald-600" />
-        <StatCard icon={Bus} tint="bg-amber-50 text-amber-600" label="On transport"
-          value={currentYearStudents.filter((s) => s.stopId).length} note="Assigned a stop"
-          noteTint="text-amber-600" />
-      </div>
-
       <div className={`${panel} p-5 mb-6 flex flex-wrap items-end gap-4`}>
         <div className="min-w-[240px]">
           <label className={eyebrow}>Importing into</label>
-          <FilterSelect value={klass} onChange={(e) => changeClass(e.target.value)} active className="mt-2">
-            {CLASSES.map((c) => {
-              const n = countOf(c.name);
-              return (
-                <option key={c.name} value={c.name}>
-                  {c.name} — {c.stage}{n ? ` (${n} already in)` : ""}
-                </option>
-              );
-            })}
+          <FilterSelect value={classLevelId} onChange={(e) => changeClass(e.target.value)} active className="mt-2">
+            {classLevels.map((c) => <option key={c.id} value={c.id}>{c.name} — {c.stage}</option>)}
           </FilterSelect>
         </div>
         <p className="text-xs text-slate-500 pb-2.5 max-w-md">
-          Every row in the file below goes into <b className="text-slate-700">{klass}</b>{" "}
+          Every row in the file below goes into <b className="text-slate-700">{activeClass?.name}</b>{" "}
           unless the sheet names a different class for that row.
         </p>
       </div>
 
       {done && (
         <div className="mb-6 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-2xl px-5 py-4 text-sm font-semibold">
-          Imported {done.created} students into {klass}.{" "}
+          Imported {done.created} students into {activeClass?.name}.{" "}
           {done.skipped > 0
             ? `${done.skipped} rows were skipped. Fix them in your sheet and upload again — anything already in is caught as a duplicate.`
             : "Every row came through cleanly."}
         </div>
       )}
 
-      {!map && (
+      {!batch && (
         <>
           <div
             onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
@@ -1564,7 +1555,7 @@ function ClassImport({ state, save, klass, setKlass }) {
             <div className="w-14 h-14 rounded-2xl bg-brand-50 text-brand-600 grid place-items-center mx-auto mb-4">
               <Upload size={24} />
             </div>
-            <p className="text-lg font-extrabold">Drop your CSV file here</p>
+            <p className="text-lg font-extrabold">{busy ? "Reading your file…" : "Drop your CSV file here"}</p>
             <p className="text-sm text-slate-500 mt-1">or click to browse your computer</p>
             <span className="inline-flex items-center gap-2 mt-5 bg-brand-600 text-white text-sm font-bold rounded-xl px-5 py-2.5 shadow-[0_8px_20px_-8px_rgba(91,61,245,0.8)]">
               <FileSpreadsheet size={16} /> Choose CSV file
@@ -1577,58 +1568,45 @@ function ClassImport({ state, save, klass, setKlass }) {
           </div>
 
           <div className="flex flex-wrap gap-2.5 mt-4">
-            <button className={ghost} onClick={() => download(TEMPLATE_CSV, `${klass}-import-template.csv`)}>
+            <button className={ghost} onClick={downloadTemplate}>
               <Download size={15} /> Blank template
             </button>
-            <button className={ghost} onClick={() => { setText(SAMPLE_MESSY_CSV); }}>
+            <button className={ghost} onClick={() => stage(SAMPLE_MESSY_CSV, "messy-example.csv")}>
               Load a messy example
             </button>
           </div>
 
-          <details className="mt-5">
-            <summary className="eyebrow text-slate-400 cursor-pointer hover:text-slate-600">
-              Or paste rows instead
-            </summary>
-            <textarea rows={5} value={text} onChange={(e) => setText(e.target.value)}
-              className={`${field} font-mono text-xs mt-3`}
-              placeholder={"Adm No,Name,Section\n2026/0001,Ananya K,A"} />
-            <button className={`${primary} mt-3`} disabled={!text.trim()}
-              onClick={() => ingest(text, "pasted rows")}>Read these rows</button>
-          </details>
-
           {existing.length > 0 && (
             <div className={`${panel} mt-6 overflow-hidden`}>
               <div className="px-6 py-4 border-b border-slate-100 flex flex-wrap items-center justify-between gap-3">
-                <h2 className="font-extrabold">{existing.length} already in {klass}</h2>
-                {existing.some((s) => !s.section) && (
+                <h2 className="font-extrabold">{existing.length} already in {activeClass?.name}</h2>
+                {existing.some((s) => s.section_name === "Unassigned") && (
                   <span className="text-xs font-bold text-amber-600 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1">
-                    {existing.filter((s) => !s.section).length} need a section
+                    {existing.filter((s) => s.section_name === "Unassigned").length} need a section
                   </span>
                 )}
               </div>
               <p className="px-6 pt-3 text-xs text-slate-500 max-w-2xl">
                 For reference while you import — section is assigned from Fee
-                Collection & Roll, once class rosters are settled.
+                Collection, once class rosters are settled.
               </p>
               <div className="overflow-x-auto">
                 <table className="w-full">
                   <thead className="bg-slate-50/70">
-                    <tr>{["Admission no.", "Name", "Section", "Guardian", "Phone"].map((h) =>
+                    <tr>{["Admission no.", "Name", "Section"].map((h) =>
                       <th key={h} className={th}>{h}</th>)}</tr>
                   </thead>
                   <tbody>
                     {existing.slice(0, 25).map((s) => (
                       <tr key={s.id}
-                        className={`border-b border-slate-50 text-sm font-medium ${!s.section ? "bg-amber-50/40" : ""}`}>
-                        <td className="px-5 py-2.5 tabular-nums text-slate-500">{s.admissionNo}</td>
-                        <td className="px-5 py-2.5 font-semibold">{s.name}</td>
+                        className={`border-b border-slate-50 text-sm font-medium ${s.section_name === "Unassigned" ? "bg-amber-50/40" : ""}`}>
+                        <td className="px-5 py-2.5 tabular-nums text-slate-500">{s.admission_no}</td>
+                        <td className="px-5 py-2.5 font-semibold">{s.full_name}</td>
                         <td className="px-5 py-2.5">
-                          {s.section
-                            ? <span className="font-bold">{s.section}</span>
-                            : <span className="text-xs font-semibold text-amber-600">Not assigned</span>}
+                          {s.section_name === "Unassigned"
+                            ? <span className="text-xs font-semibold text-amber-600">Not assigned</span>
+                            : <span className="font-bold">{s.section_name}</span>}
                         </td>
-                        <td className="px-5 py-2.5">{s.guardianName || "—"}</td>
-                        <td className="px-5 py-2.5 tabular-nums">{s.phone || "—"}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -1645,36 +1623,8 @@ function ClassImport({ state, save, klass, setKlass }) {
         </div>
       )}
 
-      {map && (
+      {batch && (
         <>
-          <div className={`${panel} p-5 mb-5`}>
-            <h2 className="font-extrabold mb-1">Check the columns from {filename}</h2>
-            <p className="text-sm text-slate-500 mb-4">
-              Your headings were matched to the fields below. Class is optional here —
-              anything blank goes into {klass}.
-            </p>
-            <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
-              {IMPORT_FIELDS.map((f) => (
-                <div key={f.key}>
-                  <label className={eyebrow}>
-                    {f.label}
-                    {f.required && <span className="text-red-500"> required</span>}
-                  </label>
-                  <select className={`${field} mt-2`} value={map[f.key] ?? ""}
-                    onChange={(e) => {
-                      const v = e.target.value;
-                      const next = { ...map };
-                      if (v === "") delete next[f.key]; else next[f.key] = +v;
-                      setMap(next);
-                    }}>
-                    <option value="">Not in my file</option>
-                    {headers.map((h, i) => <option key={i} value={i}>{h || `Column ${i + 1}`}</option>)}
-                  </select>
-                </div>
-              ))}
-            </div>
-          </div>
-
           <div className="grid sm:grid-cols-4 gap-4 mb-5">
             {[["all", rows.length, "Rows read", "text-ink", "bg-slate-100 text-slate-500"],
               ["ok", good.length, "Ready to import", "text-emerald-600", "bg-emerald-50 text-emerald-600"],
@@ -1698,30 +1648,26 @@ function ClassImport({ state, save, klass, setKlass }) {
             <table className="w-full min-w-[900px]">
               <thead className="bg-slate-50/70">
                 <tr>{["Line", "Admission no.", "Name", "Class", "Sec", "Date of birth",
-                      "Guardian", "Phone", "Bus stop", "What we found"].map((h) =>
+                      "Guardian", "Phone", "What we found"].map((h) =>
                   <th key={h} className={th}>{h}</th>)}</tr>
               </thead>
               <tbody>
                 {shown.map((r) => (
-                  <tr key={r.lineNo} className={`border-b border-slate-50 text-sm font-medium ${
+                  <tr key={r.id} className={`border-b border-slate-50 text-sm font-medium ${
                     r.errors.length ? "bg-red-50/60" : r.warnings.length ? "bg-amber-50/50" : ""}`}>
-                    <td className="px-5 py-2.5 text-slate-300 tabular-nums">{r.lineNo}</td>
-                    <td className="px-5 py-2.5 tabular-nums">{r.admissionNo || <em className="text-slate-300">blank</em>}</td>
-                    <td className="px-5 py-2.5 font-semibold">{r.fullName || <em className="text-slate-300 font-normal">blank</em>}</td>
+                    <td className="px-5 py-2.5 text-slate-300 tabular-nums">{r.line_no}</td>
+                    <td className="px-5 py-2.5 tabular-nums">{r.raw.admission_no || <em className="text-slate-300">blank</em>}</td>
+                    <td className="px-5 py-2.5 font-semibold">{r.raw.full_name || <em className="text-slate-300 font-normal">blank</em>}</td>
                     <td className="px-5 py-2.5">
-                      {r.className || <em className="text-slate-300">{r.rawClass || "blank"}</em>}
-                      {r.className && r.rawClass && r.className !== r.rawClass && (
-                        <span className="text-[11px] text-slate-400 ml-1.5">was “{r.rawClass}”</span>
+                      {r.raw._class || <em className="text-slate-300">{r.raw.class_name || "blank"}</em>}
+                      {r.raw._class && r.raw.class_name && r.raw._class !== r.raw.class_name && (
+                        <span className="text-[11px] text-slate-400 ml-1.5">was "{r.raw.class_name}"</span>
                       )}
                     </td>
-                    <td className="px-5 py-2.5">{r.section}</td>
-                    <td className="px-5 py-2.5">{displayDate(r.dob) || <span className="text-slate-300">—</span>}</td>
-                    <td className="px-5 py-2.5">{r.guardianName || <span className="text-slate-300">—</span>}</td>
-                    <td className="px-5 py-2.5 tabular-nums">{r.phone || <span className="text-slate-300">—</span>}</td>
-                    <td className="px-5 py-2.5">
-                      {r.stopName || (r.rawStop ? <em className="text-slate-300">{r.rawStop}</em>
-                        : <span className="text-slate-300">—</span>)}
-                    </td>
+                    <td className="px-5 py-2.5">{r.raw._section}</td>
+                    <td className="px-5 py-2.5">{displayDate(r.raw._dob) || <span className="text-slate-300">—</span>}</td>
+                    <td className="px-5 py-2.5">{r.raw.guardian_name || <span className="text-slate-300">—</span>}</td>
+                    <td className="px-5 py-2.5 tabular-nums">{r.raw._phone || <span className="text-slate-300">—</span>}</td>
                     <td className="px-5 py-2.5 max-w-xs">
                       {r.errors.map((m, i) => <div key={i} className="text-xs font-semibold text-red-600">{m}</div>)}
                       {r.warnings.map((m, i) => <div key={i} className="text-xs font-semibold text-amber-600">{m}</div>)}
@@ -1737,7 +1683,7 @@ function ClassImport({ state, save, klass, setKlass }) {
           <div className={`${panel} p-5 mt-5 flex flex-wrap justify-between items-center gap-4`}>
             <div>
               <p className="font-extrabold">
-                Import {good.length} into {klass}
+                Import {good.length} into {activeClass?.name}
                 {bad.length > 0 && <span className="font-semibold text-slate-400"> · {bad.length} skipped</span>}
               </p>
               <p className="text-xs text-slate-500 mt-1 max-w-xl">
@@ -1746,12 +1692,10 @@ function ClassImport({ state, save, klass, setKlass }) {
               </p>
             </div>
             <div className="flex gap-2.5">
-              <button className={primary} disabled={!good.length} onClick={commit}>
-                <Upload size={16} /> Import {good.length}
+              <button className={primary} disabled={!good.length || busy} onClick={commit}>
+                <Upload size={16} /> {busy ? "Importing…" : `Import ${good.length}`}
               </button>
-              <button className={ghost} onClick={() => { setMap(null); setBody([]); setError(""); }}>
-                Start over
-              </button>
+              <button className={ghost} onClick={startOver}>Start over</button>
             </div>
           </div>
         </>

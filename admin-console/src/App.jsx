@@ -538,7 +538,9 @@ export default function App() {
             classLevels={classLevels} academicYears={academicYears}
             ensureUnassignedSection={ensureUnassignedSection} />
         )}
-        {step === "bulkimport" && <ImportScreen state={state} save={setState} />}
+        {step === "bulkimport" && (
+          <ImportScreen state={state} academicYears={academicYears} classLevels={classLevels} />
+        )}
         {step === "promote" && (
           <PromoteTab state={state} save={setState}
             academicYears={academicYears} classLevels={classLevels}
