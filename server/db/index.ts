@@ -38,6 +38,13 @@ export const pool = new Pool({
     ? false
     : { rejectUnauthorized: false },
   max: Number(process.env.PG_POOL_MAX) || 5,
+  // pg's own default is 0 — wait forever. A wrong or unreachable
+  // DATABASE_URL (a typo, an env var that never got set, a firewalled
+  // host) would otherwise hang every request indefinitely rather than
+  // fail with a real error — which, from the browser, looks exactly
+  // like the app itself had frozen rather than a misconfigured backend.
+  connectionTimeoutMillis: 10000,
+  idleTimeoutMillis: 30000,
 });
 
 export async function query<T extends QueryResultRow = QueryResultRow>(
