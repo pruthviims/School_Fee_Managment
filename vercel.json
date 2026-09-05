@@ -2,9 +2,6 @@
   "installCommand": "npm install && npm --prefix admin-console install",
   "buildCommand": "npm --prefix admin-console run build",
   "outputDirectory": "admin-console/dist",
-  "functions": {
-    "api/index.ts": {}
-  },
   "rewrites": [
     { "source": "/api/(.*)", "destination": "/api" }
   ]
