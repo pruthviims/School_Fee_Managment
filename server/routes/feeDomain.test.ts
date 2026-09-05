@@ -259,6 +259,30 @@ describe("admission -> billing -> collection, end to end", () => {
     expect(ledger.body.balance).toBe(4000000 - 1500000);
   });
 
+  it("lists payments for an enrollment, most recent first", async () => {
+    const ownerCookie = await loginAs("owner@http.test");
+    const { year, classLevel, section } = await setUpAcademicStructure(ownerCookie);
+    const deskCookie = await loginAs("desk@http.test");
+    const admission = await request(app).post("/api/students/admit").set("Cookie", deskCookie).send({
+      admission_no: "2026/902", full_name: "Payment History Student",
+      academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
+    });
+    await request(app).post("/api/collection/payments").set("Cookie", deskCookie).send({
+      enrollment_id: admission.body.enrollment.id, amount: 1000000, mode: "cash",
+    });
+    await request(app).post("/api/collection/payments").set("Cookie", deskCookie).send({
+      enrollment_id: admission.body.enrollment.id, amount: 500000, mode: "upi",
+    });
+
+    const list = await request(app)
+      .get(`/api/collection/enrollments/${admission.body.enrollment.id}/payments`)
+      .set("Cookie", deskCookie);
+    expect(list.status).toBe(200);
+    expect(list.body).toHaveLength(2);
+    expect(list.body[0].amount).toBe(500000); // most recent first
+    expect(list.body[1].amount).toBe(1000000);
+  });
+
   it("an accountant can see the day book after front desk collects", async () => {
     const ownerCookie = await loginAs("owner@http.test");
     const { year, classLevel, section } = await setUpAcademicStructure(ownerCookie);

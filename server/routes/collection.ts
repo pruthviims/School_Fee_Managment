@@ -11,6 +11,7 @@
 import type { Request, Response } from "express";
 import { Router } from "express";
 import { z } from "zod";
+import { pool } from "../db/index.js";
 import { requireCapability, requireMember } from "../middleware/permissions.js";
 import {
   CollectionError, dailyCollection, handleGatewayWebhook, markBounced, markCleared,
@@ -81,6 +82,19 @@ collectionRouter.get(
     res.json(report);
   },
 );
+
+// Any active member — this is what PaymentModal's history list reads
+// from before a new payment is even recorded.
+collectionRouter.get("/enrollments/:id/payments", async (req, res) => {
+  const result = await pool.query(
+    `SELECT id, receipt_no, amount, mode, clearing_status, received_on, instrument_ref
+     FROM payments
+     WHERE enrollment_id = $1 AND school_id = $2 AND reversed_by IS NULL
+     ORDER BY created_at DESC`,
+    [String(req.params.id), req.school!.id],
+  );
+  res.json(result.rows);
+});
 
 // Any active member can look up and reprint a receipt (a parent who lost
 // theirs is a routine front-desk request), matching how the fees app's
