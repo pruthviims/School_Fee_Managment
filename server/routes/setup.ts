@@ -253,3 +253,35 @@ setupRouter.post("/fee-structure", writeGuard, async (req, res) => {
     throw err;
   }
 });
+
+const feeStructureUpdateSchema = z.object({
+  amount: z.number().int().nonnegative().optional(),
+  due_on: z.string().optional(),
+}).refine((v) => v.amount !== undefined || v.due_on !== undefined, { message: "Nothing to update." });
+
+setupRouter.patch("/fee-structure/:id", writeGuard, async (req, res) => {
+  const parsed = feeStructureUpdateSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ detail: parsed.error.issues[0]?.message });
+
+  const fields = Object.keys(parsed.data);
+  const setClause = fields.map((f, i) => `${f} = $${i + 3}`).join(", ");
+  const result = await pool.query(
+    `UPDATE fee_structures SET ${setClause} WHERE id = $1 AND school_id = $2 RETURNING *`,
+    [String(req.params.id), req.school!.id, ...fields.map((f) => (parsed.data as any)[f])],
+  );
+  if (!result.rows[0]) return res.status(404).end();
+  res.json(result.rows[0]);
+});
+
+setupRouter.delete("/fee-structure/:id", writeGuard, async (req, res) => {
+  // Amounts already charged to a student are frozen onto their own Charge
+  // row when the admission happened (see billing.generateCharges) — this
+  // only removes the price-list entry going forward, never touches a
+  // charge that already exists.
+  const result = await pool.query(
+    `DELETE FROM fee_structures WHERE id = $1 AND school_id = $2 RETURNING id`,
+    [String(req.params.id), req.school!.id],
+  );
+  if (!result.rows[0]) return res.status(404).end();
+  res.status(204).end();
+});

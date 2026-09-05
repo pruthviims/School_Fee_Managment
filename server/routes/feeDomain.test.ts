@@ -74,6 +74,66 @@ describe("setup routes", () => {
     expect(list.body).toHaveLength(1);
   });
 
+  it("can update and delete an existing fee-structure line", async () => {
+    const cookie = await loginAs("owner@http.test");
+    const year = await request(app).post("/api/setup/academic-years").set("Cookie", cookie)
+      .send({ name: "2026-27", starts_on: "2026-06-01", ends_on: "2027-03-31" });
+    const classLevel = await request(app).post("/api/setup/class-levels").set("Cookie", cookie)
+      .send({ name: "VIII", ladder_order: 8, stage: "middle" });
+    const feeHead = await request(app).post("/api/setup/fee-heads").set("Cookie", cookie)
+      .send({ name: "Tuition fee" });
+    const line = await request(app).post("/api/setup/fee-structure").set("Cookie", cookie).send({
+      academic_year_id: year.body.id, class_level_id: classLevel.body.id,
+      fee_head_id: feeHead.body.id, amount: 4000000, due_on: "2026-06-15",
+    });
+
+    const updated = await request(app).patch(`/api/setup/fee-structure/${line.body.id}`)
+      .set("Cookie", cookie).send({ amount: 4500000 });
+    expect(updated.status).toBe(200);
+    expect(updated.body.amount).toBe(4500000);
+
+    const deleted = await request(app).delete(`/api/setup/fee-structure/${line.body.id}`)
+      .set("Cookie", cookie);
+    expect(deleted.status).toBe(204);
+
+    const list = await request(app).get(`/api/setup/fee-structure?academic_year_id=${year.body.id}`)
+      .set("Cookie", cookie);
+    expect(list.body).toHaveLength(0);
+  });
+
+  it("front desk cannot update or delete a fee-structure line", async () => {
+    const ownerCookie = await loginAs("owner@http.test");
+    const year = await request(app).post("/api/setup/academic-years").set("Cookie", ownerCookie)
+      .send({ name: "2026-27", starts_on: "2026-06-01", ends_on: "2027-03-31" });
+    const classLevel = await request(app).post("/api/setup/class-levels").set("Cookie", ownerCookie)
+      .send({ name: "VIII", ladder_order: 8, stage: "middle" });
+    const feeHead = await request(app).post("/api/setup/fee-heads").set("Cookie", ownerCookie)
+      .send({ name: "Tuition fee" });
+    const line = await request(app).post("/api/setup/fee-structure").set("Cookie", ownerCookie).send({
+      academic_year_id: year.body.id, class_level_id: classLevel.body.id,
+      fee_head_id: feeHead.body.id, amount: 4000000, due_on: "2026-06-15",
+    });
+
+    const deskCookie = await loginAs("desk@http.test");
+    const patchRes = await request(app).patch(`/api/setup/fee-structure/${line.body.id}`)
+      .set("Cookie", deskCookie).send({ amount: 1 });
+    expect(patchRes.status).toBe(403);
+    const deleteRes = await request(app).delete(`/api/setup/fee-structure/${line.body.id}`)
+      .set("Cookie", deskCookie);
+    expect(deleteRes.status).toBe(403);
+  });
+
+  it("404s updating or deleting a fee-structure line that doesn't exist", async () => {
+    const cookie = await loginAs("owner@http.test");
+    const fakeId = "00000000-0000-0000-0000-000000000000";
+    const patchRes = await request(app).patch(`/api/setup/fee-structure/${fakeId}`)
+      .set("Cookie", cookie).send({ amount: 1000 });
+    expect(patchRes.status).toBe(404);
+    const deleteRes = await request(app).delete(`/api/setup/fee-structure/${fakeId}`)
+      .set("Cookie", cookie);
+    expect(deleteRes.status).toBe(404);
+  });
+
   it("front desk cannot write to fee structure but can read it", async () => {
     const ownerCookie = await loginAs("owner@http.test");
     const year = await request(app).post("/api/setup/academic-years").set("Cookie", ownerCookie)
