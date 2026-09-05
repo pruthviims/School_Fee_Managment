@@ -310,6 +310,127 @@ describe("admission -> billing -> collection, end to end", () => {
   });
 });
 
+describe("concessions and enrollment editing", () => {
+  async function setUpAdmittedStudent(cookie: string) {
+    const year = await request(app).post("/api/setup/academic-years").set("Cookie", cookie)
+      .send({ name: "2026-27", starts_on: "2026-06-01", ends_on: "2027-03-31", status: "active" });
+    const classLevel = await request(app).post("/api/setup/class-levels").set("Cookie", cookie)
+      .send({ name: "VIII", ladder_order: 8, stage: "middle" });
+    const sectionA = await request(app).post("/api/setup/sections").set("Cookie", cookie).send({
+      academic_year_id: year.body.id, class_level_id: classLevel.body.id, name: "A",
+    });
+    const sectionB = await request(app).post("/api/setup/sections").set("Cookie", cookie).send({
+      academic_year_id: year.body.id, class_level_id: classLevel.body.id, name: "B",
+    });
+    const feeHead = await request(app).post("/api/setup/fee-heads").set("Cookie", cookie)
+      .send({ name: "Tuition fee" });
+    await request(app).post("/api/setup/fee-structure").set("Cookie", cookie).send({
+      academic_year_id: year.body.id, class_level_id: classLevel.body.id,
+      fee_head_id: feeHead.body.id, amount: 4000000, due_on: "2026-06-15",
+    });
+    const admission = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
+      admission_no: "2026/800", full_name: "Test Student",
+      academic_year_id: year.body.id, class_level_id: classLevel.body.id,
+      section_id: sectionA.body.id,
+    });
+    return { year: year.body, sectionA: sectionA.body, sectionB: sectionB.body,
+             enrollment: admission.body.enrollment };
+  }
+
+  it("granting a concession reduces the ledger balance", async () => {
+    const cookie = await loginAs("owner@http.test");
+    const { enrollment } = await setUpAdmittedStudent(cookie);
+
+    const concession = await request(app)
+      .post(`/api/students/enrollments/${enrollment.id}/concessions`).set("Cookie", cookie)
+      .send({ amount: 1000000, reason: "sibling", note: "10% sibling discount" });
+    expect(concession.status).toBe(201);
+
+    const ledger = await request(app).get(`/api/students/enrollments/${enrollment.id}/ledger`)
+      .set("Cookie", cookie);
+    expect(ledger.body.charged).toBe(4000000);
+    expect(ledger.body.conceded).toBe(1000000);
+    expect(ledger.body.balance).toBe(3000000);
+  });
+
+  it("reversing a concession restores the balance without deleting the original record", async () => {
+    const cookie = await loginAs("owner@http.test");
+    const { enrollment } = await setUpAdmittedStudent(cookie);
+    const concession = await request(app)
+      .post(`/api/students/enrollments/${enrollment.id}/concessions`).set("Cookie", cookie)
+      .send({ amount: 1000000, reason: "merit" });
+
+    const reversed = await request(app)
+      .post(`/api/students/concessions/${concession.body.id}/reverse`).set("Cookie", cookie)
+      .send({ reason: "Approved in error" });
+    expect(reversed.status).toBe(204);
+
+    const ledger = await request(app).get(`/api/students/enrollments/${enrollment.id}/ledger`)
+      .set("Cookie", cookie);
+    expect(ledger.body.conceded).toBe(0); // no longer counted
+    expect(ledger.body.balance).toBe(4000000);
+
+    const list = await request(app).get(`/api/students/enrollments/${enrollment.id}/concessions`)
+      .set("Cookie", cookie);
+    expect(list.body).toHaveLength(2); // original + reversal marker, both still visible
+    const original = list.body.find((c: any) => c.id === concession.body.id);
+    expect(original.reversed_by).not.toBeNull();
+    expect(original.reversal_reason).toBe("Approved in error");
+  });
+
+  it("cannot reverse the same concession twice", async () => {
+    const cookie = await loginAs("owner@http.test");
+    const { enrollment } = await setUpAdmittedStudent(cookie);
+    const concession = await request(app)
+      .post(`/api/students/enrollments/${enrollment.id}/concessions`).set("Cookie", cookie)
+      .send({ amount: 500000, reason: "hardship" });
+
+    await request(app).post(`/api/students/concessions/${concession.body.id}/reverse`)
+      .set("Cookie", cookie).send({});
+    const second = await request(app).post(`/api/students/concessions/${concession.body.id}/reverse`)
+      .set("Cookie", cookie).send({});
+    expect(second.status).toBe(400);
+  });
+
+  it("front desk cannot grant or reverse a concession", async () => {
+    const ownerCookie = await loginAs("owner@http.test");
+    const { enrollment } = await setUpAdmittedStudent(ownerCookie);
+
+    const deskCookie = await loginAs("desk@http.test");
+    const grant = await request(app)
+      .post(`/api/students/enrollments/${enrollment.id}/concessions`).set("Cookie", deskCookie)
+      .send({ amount: 500000, reason: "other" });
+    expect(grant.status).toBe(403);
+  });
+
+  it("front desk can move a student to a real section (assigning it later, as designed)", async () => {
+    const ownerCookie = await loginAs("owner@http.test");
+    const { enrollment, sectionB } = await setUpAdmittedStudent(ownerCookie);
+
+    const deskCookie = await loginAs("desk@http.test");
+    const patch = await request(app).patch(`/api/students/enrollments/${enrollment.id}`)
+      .set("Cookie", deskCookie).send({ section_id: sectionB.id, roll_no: 7 });
+    expect(patch.status).toBe(200);
+    expect(patch.body.section_id).toBe(sectionB.id);
+    expect(patch.body.roll_no).toBe(7);
+  });
+
+  it("rejects a duplicate roll number within the same section", async () => {
+    const cookie = await loginAs("owner@http.test");
+    const { year, sectionA, enrollment } = await setUpAdmittedStudent(cookie);
+    await request(app).patch(`/api/students/enrollments/${enrollment.id}`)
+      .set("Cookie", cookie).send({ roll_no: 1 });
+
+    const admission2 = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
+      admission_no: "2026/801", full_name: "Second Student",
+      academic_year_id: year.id, class_level_id: enrollment.class_level_id, section_id: sectionA.id,
+    });
+    const dup = await request(app).patch(`/api/students/enrollments/${admission2.body.enrollment.id}`)
+      .set("Cookie", cookie).send({ roll_no: 1 });
+    expect(dup.status).toBe(409);
+  });
+});
+
 describe("gateway webhook", () => {
   it("accepts a correctly signed payload and is idempotent on retry", async () => {
     const ownerCookie = await loginAs("owner@http.test");

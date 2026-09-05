@@ -111,6 +111,136 @@ studentsRouter.get("/enrollments/:id/ledger", async (req, res) => {
   res.json(ledger);
 });
 
+const enrollmentUpdateSchema = z.object({
+  section_id: z.string().uuid().optional(),
+  stream_id: z.string().uuid().nullable().optional(),
+  roll_no: z.number().int().positive().nullable().optional(),
+}).refine((v) => Object.keys(v).length > 0, { message: "Nothing to update." });
+
+studentsRouter.patch(
+  "/enrollments/:id", requireCapability("manage_admissions"),
+  async (req, res) => {
+    const parsed = enrollmentUpdateSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ detail: parsed.error.issues[0]?.message });
+
+    const fields = Object.keys(parsed.data);
+    const setClause = fields.map((f, i) => `${f} = $${i + 3}`).join(", ");
+    try {
+      const result = await pool.query(
+        `UPDATE enrollments SET ${setClause} WHERE id = $1 AND school_id = $2 RETURNING *`,
+        [req.params.id, req.school!.id, ...fields.map((f) => (parsed.data as any)[f])],
+      );
+      if (!result.rows[0]) return res.status(404).end();
+      res.json(result.rows[0]);
+    } catch (err) {
+      if ((err as { code?: string }).code === "23505") {
+        return res.status(409).json({ detail: "That roll number is already used in this section." });
+      }
+      throw err;
+    }
+  },
+);
+
+// ---------------------------------------------------------------------
+// Concessions — an append-only ledger, same as charges and payments.
+// Reversing one never deletes or edits the original: a new, zero-amount
+// row is created, and the original's reversed_by is pointed at it, so
+// both the grant and its reversal stay visible to an auditor. Gated
+// under manage_concessions (accountant/owner), not manage_admissions —
+// front desk can admit a student and collect a payment, but approving a
+// fee waiver is a different, deliberately narrower kind of decision.
+// ---------------------------------------------------------------------
+
+const concessionSchema = z.object({
+  amount: z.number().int().positive(), // paise — the computed rupee amount, not a percentage
+  reason: z.enum(["sibling", "staff_ward", "rte", "merit", "hardship", "other"]),
+  note: z.string().max(500).optional().default(""),
+  fee_head_id: z.string().uuid().nullable().optional().default(null),
+  is_government_reimbursed: z.boolean().optional().default(false),
+});
+
+studentsRouter.get("/enrollments/:id/concessions", async (req, res) => {
+  const result = await pool.query(
+    `SELECT c.*, u.full_name AS approved_by_name, u.email AS approved_by_email
+     FROM concessions c LEFT JOIN users u ON u.id = c.approved_by
+     WHERE c.enrollment_id = $1 AND c.school_id = $2
+     ORDER BY c.created_at DESC`,
+    [req.params.id, req.school!.id],
+  );
+  res.json(result.rows);
+});
+
+studentsRouter.post(
+  "/enrollments/:id/concessions", requireCapability("manage_concessions"),
+  async (req, res) => {
+    const parsed = concessionSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ detail: parsed.error.issues[0]?.message });
+    const d = parsed.data;
+
+    const enrollment = await pool.query(
+      `SELECT id FROM enrollments WHERE id = $1 AND school_id = $2`,
+      [req.params.id, req.school!.id],
+    );
+    if (!enrollment.rows[0]) return res.status(404).end();
+
+    const result = await pool.query(
+      `INSERT INTO concessions
+         (school_id, enrollment_id, fee_head_id, reason, note, amount,
+          is_government_reimbursed, approved_by, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8) RETURNING *`,
+      [req.school!.id, req.params.id, d.fee_head_id, d.reason, d.note, d.amount,
+       d.is_government_reimbursed, req.user!.id],
+    );
+    res.status(201).json(result.rows[0]);
+  },
+);
+
+const reverseConcessionSchema = z.object({
+  reason: z.string().max(500).optional().default("Reversed"),
+});
+
+studentsRouter.post(
+  "/concessions/:id/reverse", requireCapability("manage_concessions"),
+  async (req, res) => {
+    const parsed = reverseConcessionSchema.safeParse(req.body ?? {});
+    const reason = parsed.success ? parsed.data.reason : "Reversed";
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const original = await client.query(
+        `SELECT * FROM concessions WHERE id = $1 AND school_id = $2 FOR UPDATE`,
+        [req.params.id, req.school!.id],
+      );
+      const row = original.rows[0];
+      if (!row) { await client.query("ROLLBACK"); return res.status(404).end(); }
+      if (row.reversed_by) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({ detail: "That concession has already been reversed." });
+      }
+
+      const marker = await client.query(
+        `INSERT INTO concessions
+           (school_id, enrollment_id, fee_head_id, reason, note, amount, approved_by, created_by)
+         VALUES ($1, $2, $3, $4, $5, 0, $6, $6) RETURNING id`,
+        [req.school!.id, row.enrollment_id, row.fee_head_id, row.reason,
+         `Reversal of ${row.id}: ${reason}`, req.user!.id],
+      );
+      await client.query(
+        `UPDATE concessions SET reversed_by = $1, reversal_reason = $2 WHERE id = $3`,
+        [marker.rows[0].id, reason, row.id],
+      );
+      await client.query("COMMIT");
+      res.status(204).end();
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+  },
+);
+
 studentsRouter.get("/enrollments", async (req, res) => {
   const { academic_year_id, class_level_id, section_id } = req.query;
   const params: unknown[] = [req.school!.id];
