@@ -539,12 +539,11 @@ export default function App() {
             ensureUnassignedSection={ensureUnassignedSection} />
         )}
         {step === "bulkimport" && <ImportScreen state={state} save={setState} />}
-        {/* onPaid disabled for now: Promote Students still writes local-only
-            records with no real enrollment id, and the real PaymentModal
-            (now owned internally by ConcessionScreen) needs one. Collect
-            a just-promoted student's payment from Fee Collection instead,
-            until Promote Students itself is wired to the real backend. */}
-        {step === "promote" && <PromoteTab state={state} save={setState} onPaid={() => {}} />}
+        {step === "promote" && (
+          <PromoteTab state={state} save={setState}
+            academicYears={academicYears} classLevels={classLevels}
+            ensureUnassignedSection={ensureUnassignedSection} />
+        )}
 
         <p className="text-xs text-slate-400 mt-12 max-w-2xl leading-relaxed">
           A working prototype. Everything you enter stays in this browser — it is not

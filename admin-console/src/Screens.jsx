@@ -928,94 +928,107 @@ function CopyPanel({ active, classLevels, onCopy, onCancel }) {
 /* Admissions — promote from the previous year, or add a new student   */
 /* ================================================================== */
 
-export function PromoteTab({ state, save, onPaid }) {
-  const years = useMemo(
-    () => [...new Set(state.students.map((s) => s.year).filter((y) => y && y !== state.year))]
-      .sort().reverse(),
-    [state.students, state.year],
-  );
+// Mirrors server/services/promotion.ts::isActionable — the server
+// recomputes this from the same fields regardless of what's sent, so
+// this is purely for deciding what the UI shows as ready, not a
+// security boundary duplicated insecurely on the client.
+function isActionable(move) {
+  return move.kind === "promote" && move.toClassId !== null && !move.blockedReason &&
+    !move.needsOptin && !(move.needsStream && !move.streamId);
+}
+
+/**
+ * Real preview -> assign-sections -> commit against the backend, kept to
+ * one move at a time to match the existing "promote whoever's at the
+ * counter right now" workflow rather than a batch operation. Two
+ * deliberate scope limits, not oversights: a class requiring a stream
+ * (1st PU -> 2nd PU) shows but isn't actionable yet — the old app never
+ * had a stream concept at all, so this isn't a regression, just not
+ * built out yet; and graduating (terminal-class) students are shown for
+ * visibility only — the backend's commit() refuses a batch with no
+ * promotable move in it, so processing a graduation with nobody else to
+ * promote alongside it needs its own follow-up.
+ */
+export function PromoteTab({ state, save, academicYears, classLevels, ensureUnassignedSection }) {
+  const toYear = academicYears.find((y) => y.name === state.year);
+  const priorYears = academicYears
+    .filter((y) => toYear && y.starts_on < toYear.starts_on)
+    .sort((a, b) => (a.starts_on < b.starts_on ? 1 : -1));
+
   const [sourceYearPick, setSourceYearPick] = useState("");
-  const sourceYear = sourceYearPick || years[0] || "";
+  const sourceYearName = sourceYearPick || priorYears[0]?.name || "";
+  const fromYear = academicYears.find((y) => y.name === sourceYearName);
+
   const [classFilter, setClassFilter] = useState("");
   const [query, setQuery] = useState("");
+  const [preview, setPreview] = useState(null); // {moves, graduating, blocked, summary}
+  const [loading, setLoading] = useState(false);
+  const [busyId, setBusyId] = useState(null);
   const [justPromoted, setJustPromoted] = useState(null);
+  const [error, setError] = useState("");
 
-  // "To" is the same working year used everywhere else in the app. Changing
-  // it here writes straight back to it, so the From/To pair never drifts
-  // out of sync with a second selector somewhere else on the page.
+  async function refetchPreview() {
+    if (!fromYear || !toYear) { setPreview(null); return; }
+    setLoading(true);
+    setError("");
+    try {
+      const result = await api.post("/promotion/preview", {
+        from_year_id: fromYear.id, to_year_id: toYear.id,
+      });
+      setPreview(result);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not load the promotion preview.");
+      setPreview(null);
+    } finally {
+      setLoading(false);
+    }
+  }
+  useEffect(() => { refetchPreview(); }, [fromYear?.id, toYear?.id]); // eslint-disable-line
+
   function changeToYear(next) {
     save({ ...state, year: next });
     if (sourceYearPick === next) setSourceYearPick("");
   }
 
-  const candidates = useMemo(
-    () => state.students.filter((s) => s.year === sourceYear),
-    [state.students, sourceYear],
-  );
-
-  const sourceClasses = useMemo(
-    () => [...new Set(candidates.map((s) => s.className))]
-      .sort((a, b) => CLASSES.findIndex((c) => c.name === a) - CLASSES.findIndex((c) => c.name === b)),
-    [candidates],
-  );
-
-  const byClass = classFilter ? candidates.filter((s) => s.className === classFilter) : candidates;
-  const graduatingAll = byClass.filter((s) => isTerminalClass(s.className));
-
-  // Every non-terminal candidate stays visible whether or not they've
-  // already been promoted this cycle — closing the payment modal by
-  // accident used to make a promoted student vanish from this screen
-  // entirely, with no way back to their payment short of hunting for them
-  // on Fee Collection. Now the row just switches from "Promote" to a
-  // "Pay" action for whatever's still outstanding.
-  const rows = byClass.filter((s) => !isTerminalClass(s.className)).map((s) => {
-    const target = nextClassName(s.className);
-    const newRecord = state.students.find(
-      (ns) => ns.year === state.year && ns.admissionNo === s.admissionNo,
-    );
-    return { student: s, target, decisionNeeded: needsOptIn(target), newRecord };
-  });
-
-  const promotableAll = rows.filter((r) => !r.newRecord);
-  const promotedAll = rows.filter((r) => r.newRecord);
-
-  // A parent is standing at the counter for one child, not a batch — search
-  // narrows straight to that student rather than scrolling a whole roll.
-  const q = query.trim().toLowerCase();
-  const matches = (s) => !q || s.name.toLowerCase().includes(q) || s.admissionNo.toLowerCase().includes(q);
-  const visibleRows = rows.filter((r) => matches(r.student));
-  const graduating = graduatingAll.filter(matches);
-
-  function promoteOne(s, target) {
-    const record = {
-      id: uid(),
-      admissionNo: s.admissionNo,
-      name: s.name,
-      className: target,
-      // Carried forward silently — section reshuffling, if the school
-      // does it, happens later as its own step, not at the point of
-      // promotion, so there's nothing to ask for here.
-      section: s.section,
-      rollNo: "",
-      dob: s.dob,
-      guardianName: s.guardianName,
-      phone: s.phone,
-      email: s.email,
-      stopId: s.stopId,
-      admissionType: "continuing",
-      year: state.year,
-      // A new academic year is a fresh decision, not a silent carry-forward
-      // of last year's waiver.
-      concession: { type: "percent", value: 0, reason: "", includeTransport: false },
-    };
-    save({ ...state, students: [...state.students, record] });
-    setJustPromoted({ name: s.name, target });
-    // Take the payment right here rather than sending staff off to hunt
-    // for this student again on a different screen.
-    if (onPaid) onPaid(record);
+  async function promoteOne(move, confirmOptIn) {
+    setBusyId(move.enrollmentId);
+    setError("");
+    try {
+      // The target class may never have had a section created in the
+      // target year at all yet (no admission has landed there either) —
+      // the same "Unassigned" placeholder New Admission uses covers this,
+      // rather than assign-sections failing outright with nowhere to put
+      // the very first student promoted into a class.
+      await ensureUnassignedSection(move.toClassId, toYear.id);
+      const toConfirm = confirmOptIn ? { ...move, needsOptin: false } : move;
+      const assigned = await api.post("/promotion/assign-sections", {
+        to_year_id: toYear.id, moves: [toConfirm],
+      });
+      await api.post("/promotion/commit", {
+        from_year_id: fromYear.id, to_year_id: toYear.id, moves: assigned.moves,
+      });
+      setJustPromoted({ name: move.studentName, target: move.toClassName });
+      await refetchPreview();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not promote that student.");
+    } finally {
+      setBusyId(null);
+    }
   }
 
-  if (!years.length) {
+  const classNamesInPreview = preview
+    ? [...new Set(preview.moves.concat(preview.blocked).map((m) => m.fromClassName))]
+        .sort((a, b) => (classLevels.find((c) => c.name === a)?.ladder_order ?? 0)
+                       - (classLevels.find((c) => c.name === b)?.ladder_order ?? 0))
+    : [];
+
+  const q = query.trim().toLowerCase();
+  const matches = (m) => !q || m.studentName.toLowerCase().includes(q) || m.admissionNo.toLowerCase().includes(q);
+  const byClass = (list) => classFilter ? list.filter((m) => m.fromClassName === classFilter) : list;
+  const visibleMoves = preview ? byClass(preview.moves).filter(matches) : [];
+  const graduating = preview ? byClass(preview.graduating).filter(matches) : [];
+
+  if (!priorYears.length) {
     return (
       <div>
         <PageHead title="Class Promotion"
@@ -1043,14 +1056,19 @@ export function PromoteTab({ state, save, onPaid }) {
           Promoted {justPromoted.name} to {justPromoted.target}.
         </div>
       )}
+      {error && (
+        <div className="mb-5 flex items-start gap-2 bg-red-50 border border-red-200 text-red-700 rounded-2xl px-5 py-4 text-sm font-semibold">
+          <AlertTriangle size={15} className="mt-0.5 shrink-0" /> {error}
+        </div>
+      )}
 
       <div className={`${panel} p-5 mb-5 flex flex-wrap items-end gap-4`}>
         <div className="min-w-[150px]">
           <label className={eyebrow}>From</label>
-          <FilterSelect value={sourceYear} active
+          <FilterSelect value={sourceYearName} active
             onChange={(e) => { setSourceYearPick(e.target.value); setClassFilter(""); setJustPromoted(null); }}
             className="mt-2">
-            {years.map((y) => <option key={y} value={y}>{y}</option>)}
+            {priorYears.map((y) => <option key={y.id} value={y.name}>{y.name}</option>)}
           </FilterSelect>
         </div>
         <ArrowRight size={16} className="text-slate-300 mb-3 shrink-0" />
@@ -1058,7 +1076,7 @@ export function PromoteTab({ state, save, onPaid }) {
           <label className={eyebrow}>To</label>
           <FilterSelect value={state.year} active
             onChange={(e) => changeToYear(e.target.value)} className="mt-2">
-            {ACADEMIC_YEARS.map((y) => <option key={y} value={y}>{y}</option>)}
+            {academicYears.map((y) => <option key={y.id} value={y.name}>{y.name}</option>)}
           </FilterSelect>
         </div>
         <div className="min-w-[160px]">
@@ -1066,46 +1084,38 @@ export function PromoteTab({ state, save, onPaid }) {
           <FilterSelect value={classFilter} onChange={(e) => setClassFilter(e.target.value)}
             active={Boolean(classFilter)} className="mt-2">
             <option value="">All classes</option>
-            {sourceClasses.map((c) => <option key={c} value={c}>{c}</option>)}
+            {classNamesInPreview.map((c) => <option key={c} value={c}>{c}</option>)}
           </FilterSelect>
         </div>
-        <div className="flex gap-5 text-sm sm:ml-auto">
-          <div>
-            <p className="text-[22px] font-extrabold tabular-nums leading-none">{promotableAll.length}</p>
-            <p className="eyebrow text-slate-400 mt-1">Pending</p>
-          </div>
-          <div>
-            <p className="text-[22px] font-extrabold tabular-nums leading-none text-slate-400">{graduatingAll.length}</p>
-            <p className="eyebrow text-slate-400 mt-1">Completing school</p>
-          </div>
-          {promotedAll.length > 0 && (
+        {preview && (
+          <div className="flex gap-5 text-sm sm:ml-auto">
             <div>
-              <p className="text-[22px] font-extrabold tabular-nums leading-none text-emerald-600">{promotedAll.length}</p>
-              <p className="eyebrow text-slate-400 mt-1">Already in {state.year}</p>
+              <p className="text-[22px] font-extrabold tabular-nums leading-none">{preview.summary.promotable}</p>
+              <p className="eyebrow text-slate-400 mt-1">Pending</p>
             </div>
-          )}
-        </div>
+            <div>
+              <p className="text-[22px] font-extrabold tabular-nums leading-none text-slate-400">{preview.summary.graduating}</p>
+              <p className="eyebrow text-slate-400 mt-1">Completing school</p>
+            </div>
+          </div>
+        )}
       </div>
 
-      {rows.length > 0 || graduatingAll.length > 0 ? (
-        <input className={`${field} max-w-sm mb-5`} value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Find the student at the counter — name or admission no." />
-      ) : null}
-
-      {rows.length === 0 && graduatingAll.length === 0 ? (
+      {loading ? (
+        <div className={`${panel} border-dashed p-12 text-center text-slate-400 font-semibold`}>Loading…</div>
+      ) : !preview || (preview.moves.length === 0 && preview.graduating.length === 0 && preview.blocked.length === 0) ? (
         <div className={`${panel} border-dashed p-10 text-center text-slate-400 font-semibold`}>
-          {classFilter
-            ? `No students from ${classFilter} in ${sourceYear}.`
-            : `Everyone from ${sourceYear} is already accounted for in ${state.year}.`}
-        </div>
-      ) : visibleRows.length === 0 && graduating.length === 0 ? (
-        <div className={`${panel} border-dashed p-10 text-center text-slate-400 font-semibold`}>
-          No one in {sourceYear} matches "{query}".
+          Everyone from {sourceYearName} is already accounted for in {state.year}.
         </div>
       ) : (
         <>
-          {visibleRows.length > 0 && (
+          {(preview.moves.length > 0 || preview.blocked.length > 0) && (
+            <input className={`${field} max-w-sm mb-5`} value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Find the student at the counter — name or admission no." />
+          )}
+
+          {visibleMoves.length > 0 && (
             <div className={`${panel} overflow-hidden mb-5`}>
               <div className="px-6 py-4 border-b border-slate-100">
                 <h2 className="font-extrabold">Promote to the next class</h2>
@@ -1120,51 +1130,33 @@ export function PromoteTab({ state, save, onPaid }) {
                     </tr>
                   </thead>
                   <tbody>
-                    {visibleRows.map(({ student: s, target, decisionNeeded, newRecord }) => {
-                      const fee = newRecord ? computeFee(newRecord, state) : null;
-                      const paid = newRecord ? paidByStudent(state, newRecord) : 0;
-                      const balance = fee ? fee.net - paid : 0;
+                    {visibleMoves.map((m) => {
+                      const busy = busyId === m.enrollmentId;
+                      const needsStreamPick = m.needsStream && !m.streamId;
                       return (
-                        <tr key={s.admissionNo} className="border-b border-slate-50 text-sm">
+                        <tr key={m.enrollmentId} className="border-b border-slate-50 text-sm">
                           <td className="px-4 py-2.5">
-                            <div className="font-bold">{s.name}</div>
-                            <div className="text-xs text-slate-400 tabular-nums">{s.admissionNo}</div>
+                            <div className="font-bold">{m.studentName}</div>
+                            <div className="text-xs text-slate-400 tabular-nums">{m.admissionNo}</div>
                           </td>
                           <td className="px-4 py-2.5 whitespace-nowrap">
-                            <span className="font-semibold text-slate-500">
-                              {s.className}{s.section ? `-${s.section}` : ""}
-                            </span>
+                            <span className="font-semibold text-slate-500">{m.fromClassName}</span>
                             <ArrowRight size={13} className="inline mx-1.5 text-slate-300" />
-                            <span className="font-bold">{target}{s.section ? `-${s.section}` : ""}</span>
-                            {!s.section && (
-                              <span className="ml-2 text-[11px] font-semibold text-slate-400">
-                                (section not yet assigned)
-                              </span>
-                            )}
-                            {newRecord && (
-                              <span className="ml-2 inline-flex items-center gap-1 text-[11px] font-bold text-emerald-600">
-                                <Check size={11} /> Promoted
+                            <span className="font-bold">{m.toClassName}</span>
+                            {needsStreamPick && (
+                              <span className="ml-2 text-[11px] font-semibold text-amber-600">
+                                (needs a stream — not supported here yet)
                               </span>
                             )}
                           </td>
                           <td className="px-4 py-2.5 text-right">
-                            {!newRecord ? (
-                              <button onClick={() => promoteOne(s, target)}
-                                className={decisionNeeded
-                                  ? "text-xs font-bold rounded-lg px-3 py-2 border-2 border-amber-300 bg-amber-50 text-amber-700 hover:border-amber-400 whitespace-nowrap"
-                                  : "text-xs font-bold rounded-lg px-3 py-2 bg-brand-600 text-white hover:bg-brand-700 whitespace-nowrap"}>
-                                {decisionNeeded ? `Confirm ${target} & Promote` : "Promote"}
-                              </button>
-                            ) : balance > 0 ? (
-                              <button onClick={() => onPaid && onPaid(newRecord)}
-                                className="text-xs font-bold rounded-lg px-3 py-2 bg-brand-600 text-white hover:bg-brand-700 whitespace-nowrap flex items-center gap-1.5 ml-auto">
-                                <Wallet size={13} /> Pay {inr(balance)}
-                              </button>
-                            ) : (
-                              <span className="text-xs font-bold rounded-lg px-3 py-2 border border-emerald-200 bg-emerald-50 text-emerald-700 whitespace-nowrap">
-                                Paid
-                              </span>
-                            )}
+                            <button disabled={busy || needsStreamPick}
+                              onClick={() => promoteOne(m, m.needsOptin)}
+                              className={m.needsOptin
+                                ? "text-xs font-bold rounded-lg px-3 py-2 border-2 border-amber-300 bg-amber-50 text-amber-700 hover:border-amber-400 whitespace-nowrap disabled:opacity-50"
+                                : "text-xs font-bold rounded-lg px-3 py-2 bg-brand-600 text-white hover:bg-brand-700 whitespace-nowrap disabled:opacity-50"}>
+                              {busy ? "Promoting…" : m.needsOptin ? `Confirm ${m.toClassName} & Promote` : "Promote"}
+                            </button>
                           </td>
                         </tr>
                       );
@@ -1173,11 +1165,8 @@ export function PromoteTab({ state, save, onPaid }) {
                 </table>
               </div>
               <p className="px-6 py-3 text-xs text-slate-500 border-t border-slate-100 max-w-2xl">
-                Section carries forward automatically — reassign it later from
-                Fee Collection if the school reshuffles sections. A promoted
-                row stays here with a Pay button until it's settled, so
-                closing the payment window by accident never loses track of
-                who still owes.
+                Section carries forward automatically where one exists with room —
+                reassign it later from Fee Collection if the school reshuffles sections.
               </p>
             </div>
           )}
@@ -1197,23 +1186,23 @@ export function PromoteTab({ state, save, onPaid }) {
                     </tr>
                   </thead>
                   <tbody>
-                    {graduating.map((s) => (
-                      <tr key={s.admissionNo} className="border-b border-slate-50 text-sm">
+                    {graduating.map((m) => (
+                      <tr key={m.enrollmentId} className="border-b border-slate-50 text-sm">
                         <td className="px-4 py-2.5">
-                          <div className="font-bold">{s.name}</div>
-                          <div className="text-xs text-slate-400 tabular-nums">{s.admissionNo}</div>
+                          <div className="font-bold">{m.studentName}</div>
+                          <div className="text-xs text-slate-400 tabular-nums">{m.admissionNo}</div>
                         </td>
-                        <td className="px-4 py-2.5 text-slate-500 font-semibold">
-                          {s.className}{s.section ? `-${s.section}` : ""}
-                        </td>
+                        <td className="px-4 py-2.5 text-slate-500 font-semibold">{m.fromClassName}</td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
               <p className="px-6 py-3 text-xs text-slate-400 border-t border-slate-100">
-                2nd PU has no class above it — these students finish school rather than
-                promote. No admission action is needed here.
+                The top class has no class above it — these students finish school
+                rather than promote. Marking them as graduated needs at least one
+                other promotion in the same batch and isn't wired up from this
+                screen yet.
               </p>
             </div>
           )}
