@@ -19,7 +19,6 @@ import {
   FilterSelect,
   ImportScreen,
   NewAdmissionTab,
-  PaymentModal,
   PromoteTab,
   QuickBalanceSearch,
   SchoolScreen,
@@ -167,10 +166,6 @@ export default function App() {
   // so collapsing it doesn't navigate away from whatever sub-screen is
   // currently open.
   const [studentsExpanded, setStudentsExpanded] = useState(false);
-  // Set the moment a student is added or promoted, from Admissions, so the
-  // payment window opens right there instead of sending staff off to find
-  // that student again on the Fees & Concessions screen.
-  const [payFor, setPayFor] = useState(null);
   // The real, backend-backed list of academic years for this school —
   // never persisted locally, always fetched fresh, since these are the
   // first genuinely shared, multi-user data this app manages. state.year
@@ -389,7 +384,11 @@ export default function App() {
           <p className="eyebrow text-brand-600 mt-1.5">Fee Portal</p>
         </div>
 
-        <QuickBalanceSearch state={state} onSelect={(s) => setPayFor(s)} />
+        {/* Searches state.students, which stays empty for anyone admitted
+            through the real backend now — a known gap until Quick Balance
+            Check itself is wired to real enrollments. Selecting a result
+            just goes to Fee Collection, where a real search still works. */}
+        <QuickBalanceSearch state={state} onSelect={() => setStep("roll")} />
 
         <nav className="flex lg:flex-col overflow-x-auto px-3 pb-3 gap-1.5">
           {NAV.map((n) => {
@@ -533,25 +532,25 @@ export default function App() {
             refreshFeeHeads={refreshFeeHeads} />
         )}
 
-        {step === "roll" && <ConcessionScreen state={state} save={setState} />}
+        {step === "roll" && <ConcessionScreen academicYears={academicYears} state={state} />}
         {step === "newadm" && (
           <NewAdmissionTab state={state} save={setState}
             classLevels={classLevels} academicYears={academicYears}
             ensureUnassignedSection={ensureUnassignedSection} />
         )}
         {step === "bulkimport" && <ImportScreen state={state} save={setState} />}
-        {step === "promote" && <PromoteTab state={state} save={setState} onPaid={setPayFor} />}
+        {/* onPaid disabled for now: Promote Students still writes local-only
+            records with no real enrollment id, and the real PaymentModal
+            (now owned internally by ConcessionScreen) needs one. Collect
+            a just-promoted student's payment from Fee Collection instead,
+            until Promote Students itself is wired to the real backend. */}
+        {step === "promote" && <PromoteTab state={state} save={setState} onPaid={() => {}} />}
 
         <p className="text-xs text-slate-400 mt-12 max-w-2xl leading-relaxed">
           A working prototype. Everything you enter stays in this browser — it is not
           sent anywhere and will not appear on another device.
         </p>
       </main>
-
-      {payFor && (
-        <PaymentModal state={state} save={setState} student={payFor}
-          onClose={() => setPayFor(null)} />
-      )}
     </div>
   );
 }

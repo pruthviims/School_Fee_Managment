@@ -418,7 +418,12 @@ function iso(y, m, d) {
 
 export function displayDate(v) {
   if (!v) return "";
-  const [y, m, d] = v.split("-");
+  // Accepts either a plain "2026-09-05" (typed into <input type=date>) or
+  // a full ISO timestamp like "2026-09-05T00:00:00.000Z" — pg parses date
+  // columns into JS Date objects, which JSON.stringify renders with a
+  // full timestamp, so any date coming from the real backend needs this
+  // sliced down first rather than split on "-" directly.
+  const [y, m, d] = v.slice(0, 10).split("-");
   const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
                   "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   return `${d} ${months[+m - 1]} ${y}`;

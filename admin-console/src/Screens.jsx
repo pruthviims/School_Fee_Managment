@@ -135,15 +135,89 @@ export function FilterSelect({ value, onChange, disabled, active, className = ""
  * table; `compact` only changes sizing, never the fields or the update
  * logic, so the two surfaces can't drift out of sync with each other.
  */
-export function ConcessionEditor({ student, state, save, fee, compact = false }) {
-  const c = student.concession || { type: "percent", value: 0, reason: "", includeTransport: false };
+// Concession reasons shown in the UI map onto the backend's fixed enum,
+// with the fuller label kept as the concession's note — "Single parent"
+// and "Financial hardship" both land on the "hardship" enum value, so
+// the note is what actually distinguishes them again on redisplay.
+const REASON_TO_ENUM = {
+  "Sibling discount": "sibling",
+  "Staff ward": "staff_ward",
+  "RTE quota": "rte",
+  "Merit scholarship": "merit",
+  "Single parent": "hardship",
+  "Financial hardship": "hardship",
+  "Other": "other",
+};
 
-  function patch(changes) {
-    save({
-      ...state,
-      students: state.students.map((s) =>
-        s.id === student.id ? { ...s, concession: { ...c, ...changes } } : s),
-    });
+function reasonLabelForConcession(row) {
+  if (row?.note && CONCESSION_REASONS.includes(row.note)) return row.note;
+  const fallback = Object.entries(REASON_TO_ENUM).find(([, enumValue]) => enumValue === row?.reason);
+  return fallback ? fallback[0] : "";
+}
+
+/**
+ * A concession is an append-only grant/reversal ledger on the backend,
+ * not a single mutable value — see server/routes/students.ts. This
+ * editor still presents it as "one concession per student", matching
+ * how the office actually thinks about it, but underneath: changing the
+ * amount or reason reverses whatever's currently active and grants a
+ * new one, rather than editing history in place. Percent-vs-flat and
+ * "include transport" are pure client-side entry conveniences — only
+ * the resulting rupee amount is ever sent to the backend, and once
+ * granted, that amount is frozen (the same property charges already
+ * have), so editing later is a real reverse-and-regrant, not a silent
+ * recompute against today's fee.
+ */
+export function ConcessionEditor({ enrollmentId, grossPaise, transportPaise, onChanged, compact = false }) {
+  const [active, setActive] = useState(null);
+  const [type, setType] = useState("percent");
+  const [value, setValue] = useState("");
+  const [reasonLabel, setReasonLabel] = useState("");
+  const [includeTransport, setIncludeTransport] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  async function refetch() {
+    const list = await api.get(`/students/enrollments/${enrollmentId}/concessions`);
+    const current = list.find((c) => !c.reversed_by) || null;
+    setActive(current);
+    if (current) {
+      // Always shown back as a flat amount — that's what's actually
+      // stored. Percent is only ever a way of computing a new grant.
+      setType("amount");
+      setValue(String(Math.round(current.amount / 100)));
+      setReasonLabel(reasonLabelForConcession(current));
+    } else {
+      setType("percent"); setValue(""); setReasonLabel(""); setIncludeTransport(false);
+    }
+  }
+  useEffect(() => { refetch(); }, [enrollmentId]); // eslint-disable-line
+
+  const appliedPaise = active ? active.amount : 0;
+
+  async function commit(nextValue, nextReasonLabel, nextIncludeTransport, nextType) {
+    const numeric = Math.max(0, +nextValue || 0);
+    const base = nextIncludeTransport ? grossPaise : grossPaise - transportPaise;
+    const amountPaise = nextType === "percent"
+      ? Math.round((base * Math.min(100, numeric)) / 100)
+      : Math.min(base, Math.round(numeric * 100));
+
+    setBusy(true);
+    try {
+      if (active) await api.post(`/students/concessions/${active.id}/reverse`, {});
+      if (amountPaise > 0) {
+        await api.post(`/students/enrollments/${enrollmentId}/concessions`, {
+          amount: amountPaise,
+          reason: REASON_TO_ENUM[nextReasonLabel] || "other",
+          note: nextReasonLabel,
+        });
+      }
+      await refetch();
+      if (onChanged) onChanged();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Could not update the concession.");
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
@@ -151,39 +225,44 @@ export function ConcessionEditor({ student, state, save, fee, compact = false })
       {!compact && (
         <div className="flex items-center justify-between mb-2">
           <label className="eyebrow text-slate-400">Concession</label>
-          {fee.concession > 0 && (
-            <span className="text-xs font-bold text-amber-600">−{inr(fee.concession)} applied</span>
+          {appliedPaise > 0 && (
+            <span className="text-xs font-bold text-amber-600">−{inr(appliedPaise / 100)} applied</span>
           )}
         </div>
       )}
       <div className="flex items-center gap-1.5">
-        <button onClick={() => patch({ type: c.type === "percent" ? "amount" : "percent" })}
+        <button disabled={busy}
+          onClick={() => { setType(type === "percent" ? "amount" : "percent"); setValue(""); }}
           className={`shrink-0 rounded-lg border text-slate-500 font-bold hover:border-brand-500 hover:text-brand-600 ${
             compact ? "w-8 h-8 border-slate-200 text-xs" : "w-10 h-10 border-2 border-slate-200 text-sm"}`}
           title="Switch between a percentage and a flat amount">
-          {c.type === "amount" ? "₹" : "%"}
+          {type === "amount" ? "₹" : "%"}
         </button>
-        <input inputMode="numeric" value={c.value || ""} placeholder="0"
+        <input inputMode="numeric" value={value} placeholder="0" disabled={busy}
           className={`border rounded-lg text-right tabular-nums outline-none focus:border-brand-500 font-semibold ${
             compact ? "w-20 border-slate-200 px-2.5 py-1.5 text-sm" : "w-24 border-2 border-slate-200 px-3 py-2.5 text-sm font-bold"}`}
           onChange={(e) => {
             let v = Math.max(0, +e.target.value || 0);
-            if (c.type !== "amount") v = Math.min(100, v);
-            patch({ value: v });
-          }} />
+            if (type !== "amount") v = Math.min(100, v);
+            setValue(v || "");
+          }}
+          onBlur={(e) => commit(e.target.value, reasonLabel, includeTransport, type)} />
         <select
           className={`bg-white border rounded-lg outline-none focus:border-brand-500 text-sm font-medium flex-1 min-w-0 ${
             compact ? "border-slate-200 px-2 py-1.5" : "border-2 border-slate-200 px-3 py-2.5"}`}
-          value={c.reason || ""} disabled={!(c.value > 0)}
-          onChange={(e) => patch({ reason: e.target.value })}>
+          value={reasonLabel} disabled={!(+value > 0) || busy}
+          onChange={(e) => { setReasonLabel(e.target.value); commit(value, e.target.value, includeTransport, type); }}>
           <option value="">{compact ? "Reason —" : "Reason (optional)"}</option>
           {CONCESSION_REASONS.map((r) => <option key={r}>{r}</option>)}
         </select>
       </div>
-      {c.value > 0 && fee.transport > 0 && (
+      {+value > 0 && transportPaise > 0 && (
         <label className="flex items-center gap-1.5 mt-1.5 text-[11px] font-semibold text-slate-400">
-          <input type="checkbox" checked={!!c.includeTransport}
-            onChange={(e) => patch({ includeTransport: e.target.checked })} />
+          <input type="checkbox" checked={includeTransport} disabled={busy}
+            onChange={(e) => {
+              setIncludeTransport(e.target.checked);
+              commit(value, reasonLabel, e.target.checked, type);
+            }} />
           Also discount transport
         </label>
       )}
@@ -1696,59 +1775,50 @@ function ClassImport({ state, save, klass, setKlass }) {
 /* Concessions                                                         */
 /* ================================================================== */
 
-export function ConcessionScreen({ state, save }) {
-  const [query, setQuery] = useState("");
-  const [onlyWith, setOnlyWith] = useState(false);
-  const [classFilter, setClassFilter] = useState("");
-  const [sectionFilter, setSectionFilter] = useState("");
-  const [payingFor, setPayingFor] = useState(null);
-  const stops = allStops(state.routes);
-  const currentYearStudents = state.students.filter((s) => inYear(s, state.year));
+/**
+ * Minimal, real first pass: lists actual enrollments for the current
+ * year with their real balances, and opens the real PaymentModal. Not
+ * yet the full richness of the old localStorage version (filters,
+ * inline concession editing in the table, editable section/bus-stop
+ * columns) — that's follow-up work; this exists to close the loop from
+ * New Admission through to an actual payment against real data.
+ */
+export function ConcessionScreen({ academicYears, state }) {
+  const [enrollments, setEnrollments] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [payingFor, setPayingFor] = useState(null); // {enrollmentId, student}
 
-  const patchStudent = (id, changes) =>
-    save({ ...state, students: state.students.map((s) => (s.id === id ? { ...s, ...changes } : s)) });
+  const year = academicYears.find((y) => y.name === state.year);
 
-  // Sections are free text from import, not a fixed list, so they are
-  // derived from whoever is actually on the roll for the chosen class —
-  // narrower once a class is picked, so the list never shows a section
-  // that doesn't exist in that class.
-  const sectionsForClass = classFilter
-    ? [...new Set(
-        currentYearStudents.filter((s) => s.className === classFilter).map((s) => s.section),
-      )].sort()
-    : [];
-
-  function changeClass(next) {
-    setClassFilter(next);
-    setSectionFilter("");
+  async function refetch() {
+    if (!year) { setEnrollments([]); setLoading(false); return; }
+    setLoading(true);
+    const list = await api.get(`/students/enrollments?academic_year_id=${year.id}`);
+    const withLedgers = await Promise.all(list.map(async (e) => ({
+      ...e, ledger: await api.get(`/students/enrollments/${e.id}/ledger`),
+    })));
+    setEnrollments(withLedgers);
+    setLoading(false);
   }
+  useEffect(() => { refetch(); }, [year?.id]); // eslint-disable-line
 
-  const shown = currentYearStudents.filter((s) => {
-    if (classFilter && s.className !== classFilter) return false;
-    if (sectionFilter && s.section !== sectionFilter) return false;
-    if (onlyWith && !(s.concession?.value > 0)) return false;
-    if (!query) return true;
-    const q = query.toLowerCase();
-    return s.name.toLowerCase().includes(q) || s.admissionNo.toLowerCase().includes(q);
-  });
-
-  // Totals reflect the same filters as the table, so the numbers above
-  // always describe what's actually listed below.
-  const totals = shown.reduce((a, s) => {
-    const f = computeFee(s, state);
-    const paid = paidByStudent(state, s);
-    return { gross: a.gross + f.gross, concession: a.concession + f.concession,
-             net: a.net + f.net, paid: a.paid + paid,
-             count: a.count + (f.concession > 0 ? 1 : 0) };
-  }, { gross: 0, concession: 0, net: 0, paid: 0, count: 0 });
-
-  if (!currentYearStudents.length) {
+  if (loading) {
     return (
       <div>
         <PageHead title="Fee Collection"
-          subtitle="Every enrolled student for the year, with fees, concessions, and payment status in one place." />
+          subtitle="Every enrolled student for the year, with fees and payment status in one place." />
+        <div className={`${panel} p-12 text-center text-slate-400 font-semibold`}>Loading…</div>
+      </div>
+    );
+  }
+
+  if (!enrollments.length) {
+    return (
+      <div>
+        <PageHead title="Fee Collection"
+          subtitle="Every enrolled student for the year, with fees and payment status in one place." />
         <div className={`${panel} border-dashed p-12 text-center text-slate-400 font-semibold`}>
-          No students in {state.year} yet. Add them under New Admission or Class Promotion.
+          No students in {state.year} yet. Add them under New Admission.
         </div>
       </div>
     );
@@ -1757,141 +1827,52 @@ export function ConcessionScreen({ state, save }) {
   return (
     <div>
       <PageHead title="Fee Collection"
-        subtitle="Each fee is the class structure plus transport for the student's stop, less any concession. Collect payments and print receipts from the same row." />
-
-      <div className="grid sm:grid-cols-2 lg:grid-cols-5 gap-5 mb-6">
-        <StatCard icon={Users} tint="bg-brand-50 text-brand-600" label="Students"
-          value={shown.length}
-          note={shown.length === currentYearStudents.length ? `On the ${state.year} roll` : `Of ${currentYearStudents.length} in ${state.year}`} />
-        <StatCard icon={IndianRupee} tint="bg-slate-100 text-slate-500" label="Gross fees"
-          value={inr(totals.gross)} note="Before concessions" />
-        <StatCard icon={Percent} tint="bg-amber-50 text-amber-600" label="Concessions"
-          value={inr(totals.concession)} note={`${totals.count} students`} noteTint="text-amber-600" />
-        <StatCard icon={Wallet} tint="bg-emerald-50 text-emerald-600" label="Collected"
-          value={inr(totals.paid)} note={`Of ${inr(totals.net)} net`} noteTint="text-emerald-600" />
-        <StatCard icon={Check} tint="bg-slate-100 text-slate-500" label="Outstanding"
-          value={inr(Math.max(0, totals.net - totals.paid))} note="Still to collect" />
-      </div>
-
-      <div className="flex flex-wrap gap-2.5 mb-5">
-        <FilterSelect value={classFilter} onChange={(e) => changeClass(e.target.value)}
-          active={Boolean(classFilter)} className="min-w-[170px]">
-          <option value="">All classes</option>
-          {CLASSES.map((c) => (
-            <option key={c.name} value={c.name}>{c.name}</option>
-          ))}
-        </FilterSelect>
-        <FilterSelect value={sectionFilter} onChange={(e) => setSectionFilter(e.target.value)}
-          disabled={!classFilter} active={Boolean(sectionFilter)} className="min-w-[170px]">
-          <option value="">{classFilter ? "All sections" : "Select a class first"}</option>
-          {sectionsForClass.map((sec) => (
-            <option key={sec} value={sec}>Section {sec}</option>
-          ))}
-        </FilterSelect>
-        <input className={`${field} max-w-xs`} value={query} placeholder="Find by name or admission no."
-          onChange={(e) => setQuery(e.target.value)} />
-        <button onClick={() => setOnlyWith(!onlyWith)}
-          className={`text-sm font-bold rounded-xl px-4 py-2.5 border-2 transition ${
-            onlyWith ? "bg-brand-50 border-brand-400 text-brand-700"
-                     : "bg-white border-slate-200 text-slate-600 hover:border-brand-300"}`}>
-          With a concession
-        </button>
-        {(classFilter || sectionFilter || query || onlyWith) && (
-          <button onClick={() => { setClassFilter(""); setSectionFilter(""); setQuery(""); setOnlyWith(false); }}
-            className="text-sm font-semibold rounded-xl px-4 py-2.5 text-slate-400 hover:text-red-500">
-            Clear filters
-          </button>
-        )}
-      </div>
+        subtitle="Every enrolled student for the year, with fees and payment status in one place." />
 
       <div className={`${panel} overflow-hidden`}>
         <div className="px-6 py-5 border-b border-slate-100">
-          <h2 className="text-lg font-extrabold">
-            Student Fee Records
-            {(classFilter || sectionFilter) && (
-              <span className="font-semibold text-slate-400 text-base">
-                {" "}— {classFilter || "all classes"}{sectionFilter ? `-${sectionFilter}` : ""}
-              </span>
-            )}
-          </h2>
+          <h2 className="text-lg font-extrabold">Student Fee Records</h2>
         </div>
-        {shown.length === 0 ? (
-          <p className="px-6 py-10 text-center text-slate-400 font-semibold">
-            No students match {classFilter ? `${classFilter}${sectionFilter ? `-${sectionFilter}` : ""}` : "these filters"}.
-          </p>
-        ) : (
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[1420px]">
+          <table className="w-full min-w-[900px]">
             <thead className="bg-slate-50/70">
               <tr>
                 <th className={`${th} min-w-[190px]`}>Student info</th>
                 <th className={`${th} min-w-[70px]`}>Class</th>
                 <th className={`${th} min-w-[90px]`}>Section</th>
-                <th className={`${th} min-w-[190px]`}>Bus stop</th>
-                <th className={`${th} text-right min-w-[90px]`}>Transport</th>
                 <th className={`${th} text-right min-w-[90px]`}>Gross fee</th>
-                <th className={`${th} min-w-[240px]`}>Concession</th>
-                <th className={`${th} text-right min-w-[90px]`}>Discount</th>
-                <th className={`${th} text-right min-w-[110px]`}>Net payable</th>
                 <th className={`${th} text-right min-w-[90px]`}>Paid</th>
                 <th className={`${th} text-right min-w-[100px]`}>Balance</th>
                 <th className={`${th} min-w-[110px]`} />
               </tr>
             </thead>
             <tbody>
-              {shown.map((s) => {
-                const fee = computeFee(s, state);
-                const paid = paidByStudent(state, s);
-                const balance = fee.net - paid;
-                const receiptCount = state.payments.filter(
-                  (p) => p.studentId === s.id && p.year === state.year,
-                ).length;
+              {enrollments.map((e) => {
+                const balance = e.ledger.balance / 100;
                 return (
-                  <tr key={s.id} className="border-b border-slate-50 text-sm font-medium">
+                  <tr key={e.id} className="border-b border-slate-50 text-sm font-medium">
                     <td className="px-5 py-3">
                       <div className="flex items-center gap-3">
                         <span className="w-9 h-9 rounded-full bg-brand-50 text-brand-600 grid place-items-center font-bold text-xs shrink-0">
-                          {s.name.charAt(0).toUpperCase()}
+                          {e.full_name.charAt(0).toUpperCase()}
                         </span>
                         <span>
-                          <span className="block font-bold">{s.name}</span>
-                          <span className="block eyebrow text-slate-400">ID: {s.admissionNo}</span>
+                          <span className="block font-bold">{e.full_name}</span>
+                          <span className="block eyebrow text-slate-400">ID: {e.admission_no}</span>
                         </span>
                       </div>
                     </td>
-                    <td className="px-5 py-3 whitespace-nowrap font-semibold">{s.className}</td>
-                    <td className="px-5 py-1.5">
-                      <input value={s.section} placeholder="Assign"
-                        onChange={(e) => patchStudent(s.id, { section: e.target.value.toUpperCase().slice(0, 10) })}
-                        className={`w-16 border rounded-lg px-2 py-1.5 text-sm font-bold text-center outline-none focus:border-brand-500 ${
-                          s.section ? "border-slate-200" : "border-amber-300 placeholder:text-amber-400 placeholder:font-semibold"}`} />
+                    <td className="px-5 py-3 whitespace-nowrap font-semibold">{e.class_name}</td>
+                    <td className="px-5 py-3 whitespace-nowrap">
+                      {e.section_name === "Unassigned"
+                        ? <span className="text-amber-600 font-bold text-xs">Unassigned</span>
+                        : e.section_name}
                     </td>
-                    <td className="px-5 py-3">
-                      <select className={`${cellInput} border-slate-100 w-full`} value={s.stopId || ""}
-                        onChange={(e) => patchStudent(s.id, { stopId: e.target.value || null })}>
-                        <option value="">No bus</option>
-                        {stops.map((st) => (
-                          <option key={st.id} value={st.id}>{st.routeCode} · {st.name}</option>
-                        ))}
-                      </select>
+                    <td className="px-5 py-3 text-right tabular-nums font-semibold">
+                      {inr(e.ledger.charged / 100)}
                     </td>
                     <td className="px-5 py-3 text-right tabular-nums text-slate-500">
-                      {fee.transport ? inr(fee.transport) : <span className="text-slate-300">—</span>}
-                    </td>
-                    <td className="px-5 py-3 text-right tabular-nums font-semibold">{inr(fee.gross)}</td>
-                    <td className="px-5 py-2">
-                      <ConcessionEditor student={s} state={state} save={save} fee={fee} compact />
-                    </td>
-                    <td className="px-5 py-3 text-right tabular-nums font-semibold text-red-500">
-                      {fee.concession ? `−${inr(fee.concession)}` : <span className="text-slate-300">—</span>}
-                    </td>
-                    <td className="px-5 py-3 text-right">
-                      <span className="inline-block bg-emerald-50 text-emerald-700 font-bold tabular-nums rounded-lg px-3 py-1.5">
-                        {inr(fee.net)}
-                      </span>
-                    </td>
-                    <td className="px-5 py-3 text-right tabular-nums text-slate-500">
-                      {paid ? inr(paid) : <span className="text-slate-300">—</span>}
+                      {e.ledger.paid ? inr(e.ledger.paid / 100) : <span className="text-slate-300">—</span>}
                     </td>
                     <td className="px-5 py-3 text-right tabular-nums font-semibold">
                       {balance > 0
@@ -1901,12 +1882,16 @@ export function ConcessionScreen({ state, save }) {
                           : <span className="text-emerald-600">Paid up</span>}
                     </td>
                     <td className="px-5 py-3 text-right">
-                      <button onClick={() => setPayingFor(s)}
+                      <button
+                        onClick={() => setPayingFor({
+                          enrollmentId: e.id,
+                          student: { name: e.full_name, admissionNo: e.admission_no,
+                                     classLabel: `${e.class_name}-${e.section_name}` },
+                        })}
                         className={balance > 0
                           ? "text-xs font-bold rounded-lg px-3 py-2 bg-brand-600 text-white hover:bg-brand-700 whitespace-nowrap flex items-center gap-1.5 ml-auto"
                           : "text-xs font-bold rounded-lg px-3 py-2 border border-slate-200 text-slate-500 hover:border-slate-300 whitespace-nowrap flex items-center gap-1.5 ml-auto"}>
-                        {balance > 0 ? <Wallet size={13} /> : <History size={13} />}
-                        {balance > 0 ? "Collect" : receiptCount ? `Receipts (${receiptCount})` : "—"}
+                        <Wallet size={13} /> {balance > 0 ? "Collect" : "View"}
                       </button>
                     </td>
                   </tr>
@@ -1915,103 +1900,121 @@ export function ConcessionScreen({ state, save }) {
             </tbody>
           </table>
         </div>
-        )}
       </div>
 
-      <p className="text-xs text-slate-400 mt-5 max-w-3xl leading-relaxed">
-        A percentage applies only to the components the student is actually charged.
-        Transport is excluded by default, because it is money the school passes to the
-        bus operator rather than its own income — tick the box on a row to include it.
-        A flat amount is capped at the fee, so a concession can take a bill to zero but
-        never below it.
-      </p>
-
       {payingFor && (
-        <PaymentModal state={state} save={save} student={payingFor}
-          onClose={() => setPayingFor(null)} />
+        <PaymentModal enrollmentId={payingFor.enrollmentId} student={payingFor.student}
+          onClose={() => { setPayingFor(null); refetch(); }} onPaid={() => {}} />
       )}
     </div>
   );
 }
 
-export function PaymentModal({ state, save, student, onClose }) {
-  // Re-derive from state rather than trusting the prop as-is: a concession
-  // edited inside this modal updates state.students, and the fee
-  // calculation below needs to see that update immediately, not the
-  // snapshot the modal happened to open with.
-  const liveStudent = state.students.find((s) => s.id === student.id) || student;
-  const fee = computeFee(liveStudent, state);
-  const classLabel = liveStudent.section ? `${liveStudent.className}-${liveStudent.section}` : liveStudent.className;
+// Maps the backend's getReceiptData response onto the shape
+// downloadReceipt (receipt.js) already expects — built for the old flat
+// payment-snapshot object, not the backend's normalised ledger response.
+// Paise -> rupees happens here, once, at the boundary.
+function adaptReceiptData(data) {
+  return {
+    receiptNo: data.docNo,
+    receivedOn: data.docDate,
+    studentName: data.student.fullName,
+    admissionNo: data.student.admissionNo,
+    classAtPayment: data.classLabel,
+    year: data.academicYear,
+    feeLines: data.lines.map((l) => ({ name: l.name, amount: l.amountPaise / 100 })),
+    priorPayments: data.priorPayments.map((p) => ({
+      receiptNo: p.receiptNo, receivedOn: p.receivedOn, amount: p.amountPaise / 100,
+    })),
+    grossAtPayment: data.grossPaise / 100,
+    concessionAtPayment: data.concessionPaise / 100,
+    netAtPayment: data.netPaise / 100,
+    amount: data.totalPaise / 100,
+    balanceAfterAtPayment: data.balanceAfterPaise / 100,
+    mode: data.mode,
+    reference: data.instrumentRef,
+    collectedBy: data.collectedBy,
+  };
+}
 
-  const payments = state.payments
-    .filter((p) => p.studentId === liveStudent.id && p.year === state.year)
-    .sort((a, b) => b.receivedOn.localeCompare(a.receivedOn));
-  const paid = payments.reduce((a, p) => a + p.amount, 0);
-  const rawBalance = fee.net - paid;
+export function PaymentModal({ enrollmentId, student, onClose, onPaid }) {
+  const [ledger, setLedger] = useState(null); // {charged, conceded, paid, balance}, paise
+  const [payments, setPayments] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  async function refetch() {
+    const [ledgerResult, paymentsResult] = await Promise.all([
+      api.get(`/students/enrollments/${enrollmentId}/ledger`),
+      api.get(`/collection/enrollments/${enrollmentId}/payments`),
+    ]);
+    setLedger(ledgerResult);
+    setPayments(paymentsResult);
+    setLoading(false);
+  }
+  useEffect(() => { refetch(); }, [enrollmentId]); // eslint-disable-line
+
+  const rawBalance = ledger ? ledger.balance / 100 : 0; // rupees, for display and the amount field
   const dueNow = Math.max(0, rawBalance);
 
-  const [amount, setAmount] = useState(dueNow ? String(dueNow) : "");
+  const [amount, setAmount] = useState("");
   const [amountTouched, setAmountTouched] = useState(false);
   const [mode, setMode] = useState("cash");
   const [reference, setReference] = useState("");
   const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
   const [justRecorded, setJustRecorded] = useState(null);
 
   // Applying or changing a concession changes what's owed — keep the
   // amount field tracking that automatically, right up until the office
   // starts typing their own figure into it.
   const prevDueNow = useRef(dueNow);
-  if (prevDueNow.current !== dueNow) {
-    prevDueNow.current = dueNow;
-    if (!amountTouched) {
-      // Deferred so this reads as "sync on the next render", not a set
-      // during render itself.
-      queueMicrotask(() => setAmount(dueNow ? String(dueNow) : ""));
+  useEffect(() => {
+    if (prevDueNow.current !== dueNow) {
+      prevDueNow.current = dueNow;
+      if (!amountTouched) setAmount(dueNow ? String(dueNow) : "");
     }
-  }
+  }, [dueNow]); // eslint-disable-line
 
-  function record() {
+  async function record() {
     setError("");
     const amt = Math.round(parseFloat(amount) || 0);
     if (!(amt > 0)) return setError("Enter an amount greater than zero.");
     if (amt > rawBalance) return setError(`That's more than the balance of ₹${inr(rawBalance)}.`);
 
-    const payment = {
-      id: uid(),
-      studentId: liveStudent.id,
-      admissionNo: liveStudent.admissionNo,
-      studentName: liveStudent.name,
-      classAtPayment: classLabel,
-      year: state.year,
-      receiptNo: nextReceiptNo(state),
-      amount: amt,
-      mode,
-      reference: reference.trim(),
-      receivedOn: new Date().toISOString().slice(0, 10),
-      collectedBy: state.school.adminName,
-      // Snapshot the breakdown as it stood at the moment of payment, so a
-      // reprint later — after the fee structure or concession has changed —
-      // still shows what was actually charged and collected that day.
-      feeLines: fee.lines,
-      grossAtPayment: fee.gross,
-      concessionAtPayment: fee.concession,
-      netAtPayment: fee.net,
-      balanceBeforeAtPayment: rawBalance,
-      balanceAfterAtPayment: rawBalance - amt,
-      // Every earlier instalment this year, oldest first, snapshotted onto
-      // this record so the printed receipt is a full ledger — "last time
-      // you paid X, this time Y, balance Z" — not just a single running
-      // total that loses the trail once the next payment is added.
-      priorPayments: [...payments].reverse().map((p) => ({
-        receiptNo: p.receiptNo, receivedOn: p.receivedOn, amount: p.amount,
-      })),
-    };
-    save({ ...state, payments: [...state.payments, payment] });
-    downloadReceipt({ school: state.school, payment, duplicate: false });
-    setJustRecorded(payment);
-    setAmount("");
-    setAmountTouched(false);
-    setReference("");
+    setBusy(true);
+    try {
+      const payment = await api.post("/collection/payments", {
+        enrollment_id: enrollmentId, amount: amt * 100, mode, instrument_ref: reference.trim(),
+      });
+      const receiptData = await api.get(`/collection/payments/${payment.id}/receipt-data`);
+      const adapted = adaptReceiptData(receiptData);
+      downloadReceipt({ school: receiptData.school, payment: adapted, duplicate: false });
+      setJustRecorded(adapted);
+      setAmount(""); setAmountTouched(false); setReference("");
+      await refetch();
+      if (onPaid) onPaid();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not record that payment.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function reprint(paymentId) {
+    try {
+      const receiptData = await api.get(`/collection/payments/${paymentId}/receipt-data`);
+      downloadReceipt({ school: receiptData.school, payment: adaptReceiptData(receiptData), duplicate: true });
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Could not fetch that receipt.");
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="fixed inset-0 bg-slate-900/40 flex items-center justify-center p-4 z-50">
+        <div className={`${panel} w-full max-w-lg p-10 text-center text-slate-400`}>Loading…</div>
+      </div>
+    );
   }
 
   return (
@@ -2021,10 +2024,9 @@ export function PaymentModal({ state, save, student, onClose }) {
         onClick={(e) => e.stopPropagation()}>
         <div className="px-6 py-5 border-b border-slate-100 flex items-start justify-between gap-4">
           <div>
-            <h2 className="text-lg font-extrabold">{liveStudent.name}</h2>
+            <h2 className="text-lg font-extrabold">{student.name}</h2>
             <p className="text-sm text-slate-500">
-              {liveStudent.admissionNo} · {classLabel}
-              {!liveStudent.section && " · section not yet assigned"}
+              {student.admissionNo} · {student.classLabel}
             </p>
           </div>
           <button onClick={onClose} className="text-slate-400 hover:text-slate-600 shrink-0">
@@ -2032,16 +2034,21 @@ export function PaymentModal({ state, save, student, onClose }) {
           </button>
         </div>
 
-        <ConcessionEditor student={liveStudent} state={state} save={save} fee={fee} />
+        <ConcessionEditor enrollmentId={enrollmentId} grossPaise={ledger.charged}
+          transportPaise={0} onChanged={refetch} />
 
         <div className="px-6 py-5 grid grid-cols-3 gap-4 border-b border-slate-100 text-sm">
           <div>
             <p className="eyebrow text-slate-400">Net payable</p>
-            <p className="text-lg font-extrabold tabular-nums mt-1">{inr(fee.net)}</p>
+            <p className="text-lg font-extrabold tabular-nums mt-1">
+              {inr((ledger.charged - ledger.conceded) / 100)}
+            </p>
           </div>
           <div>
             <p className="eyebrow text-slate-400">Paid so far</p>
-            <p className="text-lg font-extrabold tabular-nums mt-1 text-emerald-600">{inr(paid)}</p>
+            <p className="text-lg font-extrabold tabular-nums mt-1 text-emerald-600">
+              {inr(ledger.paid / 100)}
+            </p>
           </div>
           <div>
             <p className="eyebrow text-slate-400">Balance</p>
@@ -2054,7 +2061,7 @@ export function PaymentModal({ state, save, student, onClose }) {
 
         {justRecorded && (
           <div className="mx-6 mt-5 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl px-4 py-3 text-sm font-semibold">
-            Recorded {justRecorded.receiptNo} for ₹{inr(justRecorded.amount)}. The receipt PDF
+            Recorded {justRecorded.receiptNo} for {inr(justRecorded.amount)}. The receipt PDF
             has started downloading.
           </div>
         )}
@@ -2062,13 +2069,13 @@ export function PaymentModal({ state, save, student, onClose }) {
         {dueNow > 0 ? (
           <div className="px-6 py-5">
             <label className={eyebrow}>Amount received</label>
-            <input inputMode="numeric" value={amount}
+            <input inputMode="numeric" value={amount} disabled={busy}
               onChange={(e) => { setAmount(e.target.value); setAmountTouched(true); }}
               className="w-full mt-2 border-2 border-slate-200 focus:border-brand-500 rounded-xl px-3.5 py-3 text-xl font-extrabold tabular-nums outline-none" />
             <div className="flex gap-2 mt-2">
               <button onClick={() => { setAmount(String(dueNow)); setAmountTouched(false); }}
                 className="text-xs font-bold rounded-lg px-3 py-1.5 border border-slate-200 text-slate-500 hover:border-brand-300">
-                Full balance ₹{inr(dueNow)}
+                Full balance {inr(dueNow)}
               </button>
               <button onClick={() => { setAmount(""); setAmountTouched(true); }}
                 className="text-xs font-bold rounded-lg px-3 py-1.5 border border-slate-200 text-slate-500 hover:border-brand-300">
@@ -2106,8 +2113,8 @@ export function PaymentModal({ state, save, student, onClose }) {
               </div>
             )}
 
-            <button onClick={record} className={`${primary} w-full justify-center mt-4`}>
-              <Wallet size={16} /> Record payment & download receipt
+            <button onClick={record} disabled={busy} className={`${primary} w-full justify-center mt-4`}>
+              <Wallet size={16} /> {busy ? "Recording…" : "Record payment & download receipt"}
             </button>
           </div>
         ) : (
@@ -2129,16 +2136,16 @@ export function PaymentModal({ state, save, student, onClose }) {
               {payments.map((p) => (
                 <li key={p.id} className="py-2.5 flex items-center justify-between gap-3 text-sm">
                   <div>
-                    <p className="font-bold">{inr(p.amount)}
+                    <p className="font-bold">{inr(p.amount / 100)}
                       <span className="font-normal text-slate-400"> · {p.mode === "cash" ? "Cash" :
                         p.mode === "upi" ? "UPI" : p.mode === "card" ? "Card" :
                         p.mode === "netbanking" ? "Net banking" : "Cheque"}</span>
                     </p>
                     <p className="eyebrow text-slate-400 mt-0.5">
-                      {p.receiptNo} · {displayDate(p.receivedOn)}
+                      {p.receipt_no} · {displayDate(p.received_on)}
                     </p>
                   </div>
-                  <button onClick={() => downloadReceipt({ school: state.school, payment: p, duplicate: true })}
+                  <button onClick={() => reprint(p.id)}
                     className="text-xs font-bold rounded-lg px-3 py-1.5 border border-slate-200 text-slate-500 hover:border-brand-300 flex items-center gap-1.5 shrink-0">
                     <Download size={13} /> PDF
                   </button>
