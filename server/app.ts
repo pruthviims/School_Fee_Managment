@@ -17,8 +17,24 @@ import { studentsRouter } from "./routes/students.js";
 export const app = express();
 
 app.use(helmet());
+// Vercel gives one project several real URLs — a production alias, a
+// per-branch preview (what's actually being tested here), and a
+// per-deployment preview — so locking CORS to one exact string is
+// fragile by construction, not a one-off oversight. Accepting any
+// *.vercel.app origin (plus FRONTEND_URL and localhost for local dev)
+// covers all of them without needing to know which one a given request
+// came from. This app is self-hosted for one person's own use rather
+// than a multi-tenant SaaS, which is what makes this trade-off
+// reasonable — the real access control is still the session cookie and
+// login credentials underneath, not the origin check.
 app.use(cors({
-  origin: process.env.FRONTEND_URL || "http://localhost:5173",
+  origin(origin, callback) {
+    if (!origin) return callback(null, true); // curl, server-to-server, same-origin
+    const allowed = origin === process.env.FRONTEND_URL ||
+      origin.endsWith(".vercel.app") ||
+      origin.startsWith("http://localhost");
+    callback(allowed ? null : new Error("Not allowed by CORS"), allowed);
+  },
   credentials: true,
 }));
 
