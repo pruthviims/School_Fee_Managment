@@ -1144,52 +1144,88 @@ export function PromoteTab({ state, save, onPaid }) {
   );
 }
 
-export function NewAdmissionTab({ state, save, onPaid }) {
-  const blank = { name: "", className: "", dob: "",
+export function NewAdmissionTab({ state, save, classLevels, academicYears, ensureUnassignedSection }) {
+  const blank = { name: "", classLevelId: "", dob: "",
     guardianName: "", phone: "", email: "", stopId: "" };
   const [f, setF] = useState(blank);
   const [error, setError] = useState("");
   const [done, setDone] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [previewAdmissionNo, setPreviewAdmissionNo] = useState("");
+  // Local only, not persisted — students admitted through this real flow
+  // live on the backend now, not in state.students, so "recent" here
+  // genuinely means "since this browser tab opened this screen".
+  const [addedThisSession, setAddedThisSession] = useState([]);
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
   const stops = allStops(state.routes);
 
-  // Recomputed live as the class changes, so staff sees the number that
-  // will actually be assigned before they submit — nothing to type, and
-  // nothing that can collide with what another admission just used.
-  const previewAdmissionNo = nextAdmissionNo(state, f.className);
+  const year = academicYears.find((y) => y.name === state.year);
+  const activeClass = classLevels.find((c) => c.id === f.classLevelId);
 
-  function submit(e) {
+  async function refreshAdmissionNoPreview(classLevelId, yearId, className) {
+    if (!classLevelId || !yearId) { setPreviewAdmissionNo(""); return; }
+    try {
+      const enrollments = await api.get(
+        `/students/enrollments?academic_year_id=${yearId}&class_level_id=${classLevelId}`);
+      const prefix = `${state.year}/${className}/`;
+      setPreviewAdmissionNo(`${prefix}${String(enrollments.length + 1).padStart(3, "0")}`);
+    } catch {
+      setPreviewAdmissionNo("");
+    }
+  }
+
+  // Recomputed from the real backend roster whenever the class changes —
+  // sourced from what's actually there now, not this browser's own local
+  // list, since another staff member could have admitted into the same
+  // class since this page loaded. The backend's own unique constraint on
+  // admission_no is still the real safety net if two people submit at
+  // almost the same moment; this is a best-effort preview, not a lock.
+  useEffect(() => {
+    refreshAdmissionNoPreview(f.classLevelId, year?.id, activeClass?.name);
+  }, [f.classLevelId, year?.id]); // eslint-disable-line
+
+  async function submit(e) {
     e.preventDefault();
     setError(""); setDone(null);
     const name = f.name.trim();
-    if (!f.className) return setError("Choose a class.");
+    if (!f.classLevelId) return setError("Choose a class.");
     if (!name || name.length < 2) return setError("Enter the student's full name.");
+    if (!year) return setError("No academic year is set up yet.");
 
-    const student = {
-      id: uid(), admissionNo: nextAdmissionNo(state, f.className), name,
-      className: f.className,
-      // Not known at admission time — assigned later as its own step,
-      // once class rosters are settled.
-      section: "",
-      rollNo: "", dob: f.dob || null,
-      guardianName: f.guardianName.trim(), phone: f.phone.trim(), email: f.email.trim(),
-      stopId: f.stopId || null,
-      admissionType: "new", year: state.year,
-      concession: { type: "percent", value: 0, reason: "", includeTransport: false },
-    };
-    save({ ...state, students: [...state.students, student] });
-    setDone(student);
-    // Class is sticky for rapid back-to-back entry from the same
-    // admission form; everything specific to one child is cleared.
-    setF({ ...blank, className: f.className });
-    // Straight into payment collection — the parent is standing right
-    // there, no reason to make staff go find this student again.
-    if (onPaid) onPaid(student);
+    setBusy(true);
+    try {
+      const sectionId = await ensureUnassignedSection(f.classLevelId, year.id);
+      const result = await api.post("/students/admit", {
+        admission_no: previewAdmissionNo,
+        full_name: name,
+        date_of_birth: f.dob || null,
+        guardian_name: f.guardianName.trim(),
+        guardian_phone: f.phone.trim(),
+        guardian_email: f.email.trim(),
+        academic_year_id: year.id,
+        class_level_id: f.classLevelId,
+        section_id: sectionId,
+        admission_type: "new",
+      });
+      setDone({ name: result.student.full_name, admissionNo: result.student.admission_no });
+      setAddedThisSession((prev) => [
+        { id: result.student.id, name: result.student.full_name,
+          admissionNo: result.student.admission_no, className: activeClass.name },
+        ...prev,
+      ]);
+      // Class is sticky for rapid back-to-back entry from the same
+      // admission form; everything specific to one child is cleared.
+      setF({ ...blank, classLevelId: f.classLevelId });
+      // The class stays selected, so the effect above won't re-run on
+      // its own (same dependencies) — refresh explicitly, or the next
+      // preview would still show the number just used.
+      await refreshAdmissionNoPreview(f.classLevelId, year.id, activeClass.name);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not add that student.");
+    } finally {
+      setBusy(false);
+    }
   }
-
-  const recent = state.students
-    .filter((s) => inYear(s, state.year) && s.admissionType === "new")
-    .slice(-8).reverse();
 
   return (
     <div>
@@ -1203,7 +1239,7 @@ export function NewAdmissionTab({ state, save, onPaid }) {
             <label className={eyebrow}>Admitting into</label>
             <FilterSelect value={state.year} active className="mt-1.5"
               onChange={(e) => save({ ...state, year: e.target.value })}>
-              {ACADEMIC_YEARS.map((y) => <option key={y} value={y}>{y}</option>)}
+              {academicYears.map((y) => <option key={y.id} value={y.name}>{y.name}</option>)}
             </FilterSelect>
           </div>
         </div>
@@ -1220,25 +1256,26 @@ export function NewAdmissionTab({ state, save, onPaid }) {
         )}
         {done && (
           <div className="mb-4 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl px-4 py-3 text-sm font-semibold">
-            Added {done.name} — admission no. {done.admissionNo}.
+            Added {done.name} — admission no. {done.admissionNo}. Collect their first
+            payment from Fee Collection & Roll.
           </div>
         )}
 
         <form onSubmit={submit} className="grid sm:grid-cols-2 gap-4">
           <div>
             <label className={eyebrow}>Class<span className="text-red-500"> *</span></label>
-            <FilterSelect value={f.className} active={Boolean(f.className)} className="mt-2"
-              onChange={(e) => setF({ ...f, className: e.target.value })}>
+            <FilterSelect value={f.classLevelId} active={Boolean(f.classLevelId)} className="mt-2"
+              onChange={(e) => setF({ ...f, classLevelId: e.target.value })}>
               <option value="">Choose a class</option>
-              {CLASSES.map((c) => <option key={c.name} value={c.name}>{c.name} — {c.stage}</option>)}
+              {classLevels.map((c) => <option key={c.id} value={c.id}>{c.name} — {c.stage}</option>)}
             </FilterSelect>
           </div>
           <div>
             <label className={eyebrow}>Admission no.</label>
             <div className={`mt-2 rounded-xl px-3.5 py-2.5 text-sm font-bold tabular-nums border-2 ${
-              f.className ? "bg-brand-50 border-brand-200 text-brand-700"
+              f.classLevelId ? "bg-brand-50 border-brand-200 text-brand-700"
                           : "bg-slate-50 border-slate-100 text-slate-300"}`}>
-              {f.className ? previewAdmissionNo : "Choose a class first"}
+              {f.classLevelId ? (previewAdmissionNo || "Working it out…") : "Choose a class first"}
             </div>
           </div>
           <div className="sm:col-span-2">
@@ -1271,8 +1308,8 @@ export function NewAdmissionTab({ state, save, onPaid }) {
             <input className={`${field} mt-2`} value={f.email} onChange={set("email")} type="email" />
           </div>
           <div className="sm:col-span-2">
-            <button type="submit" className={primary}>
-              <UserPlus size={16} /> Add student
+            <button type="submit" disabled={busy} className={primary}>
+              <UserPlus size={16} /> {busy ? "Adding…" : "Add student"}
             </button>
           </div>
         </form>
@@ -1282,18 +1319,16 @@ export function NewAdmissionTab({ state, save, onPaid }) {
         <div className="px-5 py-4 border-b border-slate-100">
           <h2 className="font-extrabold text-sm">Added this session</h2>
         </div>
-        {recent.length === 0 ? (
+        {addedThisSession.length === 0 ? (
           <p className="px-5 py-8 text-center text-sm text-slate-400 font-semibold">
             New admissions will appear here as you add them.
           </p>
         ) : (
           <ul className="divide-y divide-slate-50">
-            {recent.map((s) => (
+            {addedThisSession.map((s) => (
               <li key={s.id} className="px-5 py-3">
                 <p className="font-bold text-sm">{s.name}</p>
-                <p className="eyebrow text-slate-400 mt-0.5">
-                  {s.className}{s.section ? `-${s.section}` : ""} · {s.admissionNo}
-                </p>
+                <p className="eyebrow text-slate-400 mt-0.5">{s.className} · {s.admissionNo}</p>
               </li>
             ))}
           </ul>

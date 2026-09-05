@@ -74,6 +74,28 @@ describe("setup routes", () => {
     expect(list.body).toHaveLength(1);
   });
 
+  it("lists sections filtered by academic year without an ambiguous-column error", async () => {
+    // A real bug this specific test exists to catch: sections and
+    // class_levels both have a school_id column, and the filtered GET
+    // previously left it unqualified in the WHERE clause, which Postgres
+    // correctly refuses to guess at once the query joins both tables —
+    // every prior test only ever exercised POST, never this filtered list.
+    const cookie = await loginAs("owner@http.test");
+    const year = await request(app).post("/api/setup/academic-years").set("Cookie", cookie)
+      .send({ name: "2026-27", starts_on: "2026-06-01", ends_on: "2027-03-31" });
+    const classLevel = await request(app).post("/api/setup/class-levels").set("Cookie", cookie)
+      .send({ name: "VIII", ladder_order: 8, stage: "middle" });
+    await request(app).post("/api/setup/sections").set("Cookie", cookie).send({
+      academic_year_id: year.body.id, class_level_id: classLevel.body.id, name: "A",
+    });
+
+    const list = await request(app).get(`/api/setup/sections?academic_year_id=${year.body.id}`)
+      .set("Cookie", cookie);
+    expect(list.status).toBe(200);
+    expect(list.body).toHaveLength(1);
+    expect(list.body[0].class_name).toBe("VIII");
+  });
+
   it("can update a fee head's one-time flag (shared across every class)", async () => {
     const cookie = await loginAs("owner@http.test");
     const feeHead = await request(app).post("/api/setup/fee-heads").set("Cookie", cookie)

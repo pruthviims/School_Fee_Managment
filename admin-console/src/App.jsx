@@ -226,6 +226,24 @@ export default function App() {
     setFeeHeads(await api.get("/setup/fee-heads"));
   }
 
+  // Section isn't asked at admission time by design (assigned later once
+  // class rosters are settled), but the backend's enrollments.section_id
+  // is required — so every class/year gets one real, very-high-capacity
+  // "Unassigned" section to admit into, created once and reused, rather
+  // than asking for a real section up front and losing that deferred
+  // workflow the screen was built around.
+  async function ensureUnassignedSection(classLevelId, academicYearId) {
+    const sections = await api.get(
+      `/setup/sections?academic_year_id=${academicYearId}`);
+    const existing = sections.find((s) => s.class_level_id === classLevelId && s.name === "Unassigned");
+    if (existing) return existing.id;
+    const created = await api.post("/setup/sections", {
+      academic_year_id: academicYearId, class_level_id: classLevelId,
+      name: "Unassigned", capacity: 9999,
+    });
+    return created.id;
+  }
+
   // Fetches the school's real academic years, creating a sensible first
   // one automatically if none exist yet — the same zero-friction default
   // freshWorkspace() used to hardcode, now actually persisted.
@@ -516,7 +534,11 @@ export default function App() {
         )}
 
         {step === "roll" && <ConcessionScreen state={state} save={setState} />}
-        {step === "newadm" && <NewAdmissionTab state={state} save={setState} onPaid={setPayFor} />}
+        {step === "newadm" && (
+          <NewAdmissionTab state={state} save={setState}
+            classLevels={classLevels} academicYears={academicYears}
+            ensureUnassignedSection={ensureUnassignedSection} />
+        )}
         {step === "bulkimport" && <ImportScreen state={state} save={setState} />}
         {step === "promote" && <PromoteTab state={state} save={setState} onPaid={setPayFor} />}
 
