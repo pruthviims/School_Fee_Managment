@@ -1,4 +1,5 @@
-import React, { useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { api } from "./api";
 import {
   AlertTriangle,
   ArrowRight,
@@ -530,27 +531,163 @@ export function TransportScreen({ state, save }) {
 /* Fee structure                                                       */
 /* ================================================================== */
 
-export function FeeScreen({ state, save }) {
-  const [active, setActive] = useState(CLASSES[10].name);
+function dueOnForTerm(termNo, year) {
+  // year.starts_on may come back as a plain "2026-06-01" or a full ISO
+  // timestamp like "2026-06-01T00:00:00.000Z" (pg parses date columns as
+  // JS Date objects, which JSON.stringify renders as a full timestamp) —
+  // slicing to the date portion first handles either shape correctly.
+  const datePart = String(year.starts_on).slice(0, 10);
+  const start = new Date(`${datePart}T00:00:00Z`);
+  start.setUTCMonth(start.getUTCMonth() + (termNo - 1) * 4);
+  return start.toISOString().slice(0, 10);
+}
+
+export function FeeScreen({ state, save, classLevels, feeHeads, academicYears, refreshFeeHeads }) {
+  const [active, setActive] = useState(classLevels[10]?.name || classLevels[0]?.name || "");
+  const [rawLines, setRawLines] = useState([]);
+  const [loading, setLoading] = useState(true);
   const [copyOpen, setCopyOpen] = useState(false);
-  const rows = state.structure[active] || [];
+
+  const activeClass = classLevels.find((c) => c.name === active);
+  const year = academicYears.find((y) => y.name === state.year);
   const range = fareRange(state.routes);
+  // Transport still lives in local state — bus fares aren't wired to the
+  // real backend yet (transport_fares has no frontend screen of its own
+  // so far), so this one row is deliberately still the old behavior.
+  const localRows = state.structure[active] || [];
+  const hasTransport = localRows.some((r) => r.id === TRANSPORT_ID);
 
-  const update = (next) => save({ ...state, structure: { ...state.structure, [active]: next } });
-  const patchRow = (id, changes) => update(rows.map((r) => (r.id === id ? { ...r, ...changes } : r)));
-  const hasTransport = rows.some((r) => r.id === TRANSPORT_ID);
+  async function refetch() {
+    if (!activeClass || !year) return;
+    setLoading(true);
+    try {
+      const lines = await api.get(
+        `/setup/fee-structure?academic_year_id=${year.id}&class_level_id=${activeClass.id}`);
+      setRawLines(lines);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Could not load the fee structure.");
+    } finally {
+      setLoading(false);
+    }
+  }
+  useEffect(() => { refetch(); }, [active, state.year, classLevels, academicYears]); // eslint-disable-line
 
-  function toggleTransport() {
-    if (hasTransport) update(rows.filter((r) => r.id !== TRANSPORT_ID));
-    else update([...rows, { id: TRANSPORT_ID, name: "Transport fee", terms: [0, 0, 0], oneTime: false }]);
+  // The same {id, name, terms, oneTime} shape this screen has always
+  // rendered — id is the fee_head's id (shared across classes), each
+  // term entry carries both the rupee amount for display and the real
+  // line's id underneath, so an edit knows whether to PATCH or POST.
+  const rows = feeHeads.map((head) => ({
+    id: head.id,
+    name: head.name,
+    oneTime: head.is_one_time,
+    terms: [1, 2, 3].map((t) => {
+      const line = rawLines.find((l) => l.fee_head_id === head.id && l.term_no === t);
+      return { amount: line ? line.amount / 100 : 0, lineId: line?.id ?? null };
+    }),
+  }));
+
+  async function setTermAmount(headId, termIdx, rupees) {
+    const amount = Math.max(0, Math.round(rupees || 0));
+    const row = rows.find((r) => r.id === headId);
+    const cell = row.terms[termIdx];
+    try {
+      if (cell.lineId && amount === 0) {
+        await api.delete(`/setup/fee-structure/${cell.lineId}`);
+      } else if (cell.lineId) {
+        await api.patch(`/setup/fee-structure/${cell.lineId}`, { amount: amount * 100 });
+      } else if (amount > 0) {
+        await api.post("/setup/fee-structure", {
+          academic_year_id: year.id, class_level_id: activeClass.id, fee_head_id: headId,
+          amount: amount * 100, term_no: termIdx + 1, due_on: dueOnForTerm(termIdx + 1, year),
+        });
+      } else {
+        return; // nothing to do — was 0, still 0
+      }
+      await refetch();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Could not save that amount.");
+    }
   }
 
-  function copyTo(targets) {
-    const next = { ...state.structure };
-    for (const t of targets)
-      next[t] = rows.map((r) => (r.id === TRANSPORT_ID ? { ...r } : { ...r, id: uid() }));
-    save({ ...state, structure: next });
-    setCopyOpen(false);
+  async function toggleOneTime(headId, current) {
+    try {
+      await api.patch(`/setup/fee-heads/${headId}`, { is_one_time: !current });
+      await refreshFeeHeads();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Could not update that fee.");
+    }
+  }
+
+  async function renameHead(headId, name) {
+    if (!name.trim()) return;
+    try {
+      await api.patch(`/setup/fee-heads/${headId}`, { name: name.trim() });
+      await refreshFeeHeads();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Could not rename that fee.");
+    }
+  }
+
+  async function addComponent() {
+    const name = window.prompt("Name this fee component (e.g. \"Computer lab fee\"):");
+    if (!name || !name.trim()) return;
+    try {
+      await api.post("/setup/fee-heads", { name: name.trim(), display_order: feeHeads.length + 1 });
+      await refreshFeeHeads();
+      await refetch();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Could not add that component.");
+    }
+  }
+
+  async function removeComponent(row) {
+    // Removes this class's amounts for the head — the head itself (and
+    // its amounts for other classes) is untouched, since it's shared.
+    try {
+      for (const t of row.terms) if (t.lineId) await api.delete(`/setup/fee-structure/${t.lineId}`);
+      await refetch();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Could not remove that component.");
+    }
+  }
+
+  function toggleTransport() {
+    if (hasTransport) save({ ...state, structure: { ...state.structure, [active]: localRows.filter((r) => r.id !== TRANSPORT_ID) } });
+    else save({ ...state, structure: { ...state.structure, [active]: [...localRows, { id: TRANSPORT_ID, name: "Transport fee", terms: [0, 0, 0], oneTime: false }] } });
+  }
+
+  async function copyTo(targetNames) {
+    try {
+      for (const targetName of targetNames) {
+        const targetClass = classLevels.find((c) => c.name === targetName);
+        if (!targetClass) continue;
+        for (const row of rows) {
+          for (let i = 0; i < 3; i++) {
+            const rupees = row.terms[i].amount;
+            if (rupees <= 0) continue;
+            try {
+              await api.post("/setup/fee-structure", {
+                academic_year_id: year.id, class_level_id: targetClass.id, fee_head_id: row.id,
+                amount: rupees * 100, term_no: i + 1, due_on: dueOnForTerm(i + 1, year),
+              });
+            } catch { /* a line may already exist for that class — skip it, not fatal */ }
+          }
+        }
+      }
+      setCopyOpen(false);
+      await refetch();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Could not copy to those classes.");
+    }
+  }
+
+  if (!year || classLevels.length === 0) {
+    return (
+      <div>
+        <PageHead title="Fee Structure" subtitle="Setting up…" />
+        <div className={`${panel} p-10 text-center text-slate-400`}>Loading class list…</div>
+      </div>
+    );
   }
 
   return (
@@ -560,22 +697,20 @@ export function FeeScreen({ state, save }) {
         <button className={ghost} onClick={() => setCopyOpen(!copyOpen)}>Copy to other classes</button>
       </PageHead>
 
-      {copyOpen && <CopyPanel active={active} onCopy={copyTo} onCancel={() => setCopyOpen(false)} />}
+      {copyOpen && (
+        <CopyPanel active={active} classLevels={classLevels} onCopy={copyTo} onCancel={() => setCopyOpen(false)} />
+      )}
 
       <div className="grid lg:grid-cols-[200px_1fr] gap-5 items-start">
         <nav className={`${panel} p-2 max-h-[70vh] overflow-y-auto`}>
-          {CLASSES.map((c) => {
-            const list = state.structure[c.name] || [];
+          {classLevels.map((c) => {
             const on = c.name === active;
             return (
-              <button key={c.name} onClick={() => setActive(c.name)}
+              <button key={c.id} onClick={() => setActive(c.name)}
                 className={`w-full flex justify-between items-center gap-2 px-3 py-2 rounded-xl text-left text-sm transition ${
                   on ? "bg-brand-600 text-white font-bold shadow-[0_6px_16px_-8px_rgba(91,61,245,0.9)]"
                      : "text-slate-600 font-semibold hover:bg-slate-50"}`}>
                 <span>{c.name}</span>
-                <span className={`text-[11px] tabular-nums ${on ? "text-brand-100" : "text-slate-400"}`}>
-                  {inr(recurringTotal(list))}
-                </span>
               </button>
             );
           })}
@@ -585,11 +720,10 @@ export function FeeScreen({ state, save }) {
           <div className="px-6 py-5 border-b border-slate-100">
             <h2 className="text-lg font-extrabold">{active}</h2>
             <p className="text-sm text-slate-500 mt-0.5">
-              {CLASSES.find((c) => c.name === active).stage} ·{" "}
-              <b className="text-slate-700 tabular-nums">{inr(recurringTotal(rows))}</b> a year
-              {oneTimeTotal(rows) > 0 && (
-                <> · <span className="tabular-nums">{inr(oneTimeTotal(rows))}</span> once, on first admission</>
-              )}
+              {activeClass?.stage} ·{" "}
+              <b className="text-slate-700 tabular-nums">
+                {inr(rows.filter((r) => !r.oneTime).reduce((sum, r) => sum + r.terms.reduce((s, t) => s + t.amount, 0), 0))}
+              </b> a year
             </p>
           </div>
 
@@ -605,48 +739,46 @@ export function FeeScreen({ state, save }) {
                 </tr>
               </thead>
               <tbody>
+                {hasTransport && (
+                  <tr className="border-b border-slate-50 bg-amber-50/40">
+                    <td className="px-5 py-3">
+                      <span className="text-sm font-bold flex items-center gap-2">
+                        <Bus size={15} className="text-amber-500" /> Transport fee
+                      </span>
+                    </td>
+                    <td colSpan={3} className="px-5 py-3 text-sm font-semibold text-amber-700">
+                      Set per bus stop, not per class
+                    </td>
+                    <td className="px-5 py-3 text-right text-sm font-bold tabular-nums text-amber-700">
+                      {range ? `${inr(range.min)}–${inr(range.max)}` : "no fares set"}
+                    </td>
+                    <td className="px-5 py-3 text-xs font-semibold text-slate-400">Riders only</td>
+                    <td className="px-5 py-3 text-right">
+                      <button className="text-slate-300 hover:text-red-500" onClick={toggleTransport}
+                        aria-label="Remove transport component"><Trash2 size={15} /></button>
+                    </td>
+                  </tr>
+                )}
                 {rows.map((r) => {
-                  if (r.id === TRANSPORT_ID) {
-                    return (
-                      <tr key={r.id} className="border-b border-slate-50 bg-amber-50/40">
-                        <td className="px-5 py-3">
-                          <span className="text-sm font-bold flex items-center gap-2">
-                            <Bus size={15} className="text-amber-500" /> {r.name}
-                          </span>
-                        </td>
-                        <td colSpan={3} className="px-5 py-3 text-sm font-semibold text-amber-700">
-                          Set per bus stop, not per class
-                        </td>
-                        <td className="px-5 py-3 text-right text-sm font-bold tabular-nums text-amber-700">
-                          {range ? `${inr(range.min)}–${inr(range.max)}` : "no fares set"}
-                        </td>
-                        <td className="px-5 py-3 text-xs font-semibold text-slate-400">Riders only</td>
-                        <td className="px-5 py-3 text-right">
-                          <button className="text-slate-300 hover:text-red-500" onClick={toggleTransport}
-                            aria-label="Remove transport component"><Trash2 size={15} /></button>
-                        </td>
-                      </tr>
-                    );
-                  }
-                  const total = r.terms.reduce((a, b) => a + (b || 0), 0);
+                  const total = r.terms.reduce((a, t) => a + t.amount, 0);
                   return (
                     <tr key={r.id} className="border-b border-slate-50">
                       <td className="px-5 py-1.5">
-                        <input className={cellInput} value={r.name} placeholder="Name this component"
-                          onChange={(e) => patchRow(r.id, { name: e.target.value })} />
+                        <input className={cellInput} defaultValue={r.name} placeholder="Name this component"
+                          key={`${r.id}-name-${r.name}`}
+                          onBlur={(e) => renameHead(r.id, e.target.value)} />
                       </td>
                       {TERMS.map((t, i) => (
                         <td key={t} className="px-5 py-1.5">
                           <input className={`${cellInput} text-right tabular-nums`} inputMode="numeric"
-                            value={r.terms[i] || ""} placeholder="0"
-                            onChange={(e) => patchRow(r.id, {
-                              terms: r.terms.map((x, j) =>
-                                j === i ? Math.max(0, Math.round(+e.target.value || 0)) : x) })} />
+                            defaultValue={r.terms[i].amount || ""} placeholder="0"
+                            key={`${r.id}-${i}-${r.terms[i].amount}`}
+                            onBlur={(e) => setTermAmount(r.id, i, +e.target.value)} />
                         </td>
                       ))}
                       <td className="px-5 py-1.5 text-right text-sm font-bold tabular-nums">{inr(total)}</td>
                       <td className="px-5 py-1.5">
-                        <button onClick={() => patchRow(r.id, { oneTime: !r.oneTime })}
+                        <button onClick={() => toggleOneTime(r.id, r.oneTime)}
                           className={`text-[11px] font-bold rounded-lg px-2.5 py-1 border whitespace-nowrap ${
                             r.oneTime ? "border-brand-200 bg-brand-50 text-brand-600"
                                       : "border-slate-200 text-slate-400 hover:border-slate-300"}`}>
@@ -655,19 +787,21 @@ export function FeeScreen({ state, save }) {
                       </td>
                       <td className="px-5 py-1.5 text-right">
                         <button className="text-slate-300 hover:text-red-500"
-                          onClick={() => update(rows.filter((x) => x.id !== r.id))}
+                          onClick={() => removeComponent(r)}
                           aria-label={`Remove ${r.name}`}><Trash2 size={15} /></button>
                       </td>
                     </tr>
                   );
                 })}
+                {loading && (
+                  <tr><td colSpan={6} className="px-5 py-6 text-center text-sm text-slate-400">Loading…</td></tr>
+                )}
               </tbody>
             </table>
           </div>
 
           <div className="flex flex-wrap gap-2 px-5 py-4 border-t border-slate-100">
-            <button className={ghost}
-              onClick={() => update([...rows, { id: uid(), name: "", terms: [0, 0, 0], oneTime: false }])}>
+            <button className={ghost} onClick={addComponent}>
               <Plus size={15} /> Add component
             </button>
             {!hasTransport && (
@@ -682,16 +816,16 @@ export function FeeScreen({ state, save }) {
   );
 }
 
-function CopyPanel({ active, onCopy, onCancel }) {
+function CopyPanel({ active, classLevels, onCopy, onCancel }) {
   const [picked, setPicked] = useState([]);
   return (
     <div className={`${panel} p-5 mb-5`}>
       <p className="text-sm font-semibold text-slate-600 mb-3">
-        Replace the structure of these classes with {active}'s:
+        Copy {active}'s amounts onto these classes (existing lines for a class/term already set are left alone):
       </p>
       <div className="flex flex-wrap gap-2 mb-4">
-        {CLASSES.filter((c) => c.name !== active).map((c) => (
-          <button key={c.name}
+        {classLevels.filter((c) => c.name !== active).map((c) => (
+          <button key={c.id}
             onClick={() => setPicked(picked.includes(c.name)
               ? picked.filter((x) => x !== c.name) : [...picked, c.name])}
             className={`text-xs font-bold rounded-lg px-3 py-1.5 border ${

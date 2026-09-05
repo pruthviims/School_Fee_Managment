@@ -179,6 +179,53 @@ export default function App() {
   // unchanged until each of them is wired up in turn.
   const [academicYears, setAcademicYears] = useState([]);
 
+  // Same idea as academicYears: real, backend-backed, never persisted
+  // locally. Seeded once from the same canonical ladder the app already
+  // hardcoded in lib.js, so a brand-new school's Fee Structure screen
+  // looks identical to before — the classes just come from real rows now.
+  const [classLevels, setClassLevels] = useState([]);
+  const [feeHeads, setFeeHeads] = useState([]);
+
+  const STAGE_MAP = {
+    "Pre-primary": "pre_primary", Primary: "primary", Middle: "middle",
+    Secondary: "secondary", "Pre-university": "puc",
+  };
+
+  async function ensureClassLevelsAndFeeHeads() {
+    let levels = await api.get("/setup/class-levels");
+    if (levels.length === 0) {
+      levels = [];
+      for (let i = 0; i < CLASSES.length; i++) {
+        const c = CLASSES[i];
+        levels.push(await api.post("/setup/class-levels", {
+          name: c.name, ladder_order: i + 1, stage: STAGE_MAP[c.stage],
+          requires_stream: c.name === "1st PU" || c.name === "2nd PU",
+          requires_explicit_optin: c.name === "1st PU",
+          is_terminal: c.name === "2nd PU",
+        }));
+      }
+    }
+    setClassLevels(levels);
+
+    let heads = await api.get("/setup/fee-heads");
+    if (heads.length === 0) {
+      const defaults = [
+        { name: "Tuition fee", display_order: 1 },
+        { name: "Admission fee", is_one_time: true, display_order: 2 },
+        { name: "Development fee", display_order: 3 },
+        { name: "Library fee", display_order: 4 },
+        { name: "Exam fee", display_order: 5 },
+      ];
+      heads = [];
+      for (const d of defaults) heads.push(await api.post("/setup/fee-heads", d));
+    }
+    setFeeHeads(heads);
+  }
+
+  async function refreshFeeHeads() {
+    setFeeHeads(await api.get("/setup/fee-heads"));
+  }
+
   // Fetches the school's real academic years, creating a sensible first
   // one automatically if none exist yet — the same zero-friction default
   // freshWorkspace() used to hardcode, now actually persisted.
@@ -195,9 +242,10 @@ export default function App() {
 
   function pickCurrentYearName(years) {
     const today = new Date().toISOString().slice(0, 10);
-    const current = years.find((y) => y.starts_on <= today && today <= y.ends_on);
+    const current = years.find((y) =>
+      String(y.starts_on).slice(0, 10) <= today && today <= String(y.ends_on).slice(0, 10));
     if (current) return current.name;
-    return [...years].sort((a, b) => (a.starts_on < b.starts_on ? 1 : -1))[0]?.name;
+    return [...years].sort((a, b) => (String(a.starts_on) < String(b.starts_on) ? 1 : -1))[0]?.name;
   }
 
   // Shared by setup, login, and session-restore: once we know who's
@@ -210,6 +258,7 @@ export default function App() {
     const years = await ensureAcademicYears();
     const yearName = pickCurrentYearName(years);
     if (yearName) setState((prev) => (prev.year === yearName ? prev : { ...prev, year: yearName }));
+    await ensureClassLevelsAndFeeHeads();
     setSignedIn(true);
   }
 
@@ -460,7 +509,11 @@ export default function App() {
           </div>
         )}
         {step === "transport" && <TransportScreen state={state} save={setState} />}
-        {step === "fees" && <FeeScreen state={state} save={setState} />}
+        {step === "fees" && (
+          <FeeScreen state={state} save={setState}
+            classLevels={classLevels} feeHeads={feeHeads} academicYears={academicYears}
+            refreshFeeHeads={refreshFeeHeads} />
+        )}
 
         {step === "roll" && <ConcessionScreen state={state} save={setState} />}
         {step === "newadm" && <NewAdmissionTab state={state} save={setState} onPaid={setPayFor} />}
