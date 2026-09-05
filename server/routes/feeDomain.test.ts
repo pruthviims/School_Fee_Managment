@@ -74,6 +74,16 @@ describe("setup routes", () => {
     expect(list.body).toHaveLength(1);
   });
 
+  it("can update a fee head's one-time flag (shared across every class)", async () => {
+    const cookie = await loginAs("owner@http.test");
+    const feeHead = await request(app).post("/api/setup/fee-heads").set("Cookie", cookie)
+      .send({ name: "Admission fee" });
+    const updated = await request(app).patch(`/api/setup/fee-heads/${feeHead.body.id}`)
+      .set("Cookie", cookie).send({ is_one_time: true });
+    expect(updated.status).toBe(200);
+    expect(updated.body.is_one_time).toBe(true);
+  });
+
   it("can update and delete an existing fee-structure line", async () => {
     const cookie = await loginAs("owner@http.test");
     const year = await request(app).post("/api/setup/academic-years").set("Cookie", cookie)

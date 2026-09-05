@@ -202,6 +202,28 @@ setupRouter.post("/fee-heads", writeGuard, async (req, res) => {
   }
 });
 
+const feeHeadUpdateSchema = feeHeadSchema.partial()
+  .refine((v) => Object.keys(v).length > 0, { message: "Nothing to update." });
+
+setupRouter.patch("/fee-heads/:id", writeGuard, async (req, res) => {
+  // A fee head (e.g. "Admission fee") is shared across every class that
+  // charges it, so editing it here — including the one-time/recurring
+  // flag — is a school-wide decision, not a per-class one. That's a
+  // deliberate difference from how this screen used to let each class
+  // keep its own independent copy of a component with the same name.
+  const parsed = feeHeadUpdateSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ detail: parsed.error.issues[0]?.message });
+
+  const fields = Object.keys(parsed.data);
+  const setClause = fields.map((f, i) => `${f} = $${i + 3}`).join(", ");
+  const result = await pool.query(
+    `UPDATE fee_heads SET ${setClause} WHERE id = $1 AND school_id = $2 RETURNING *`,
+    [String(req.params.id), req.school!.id, ...fields.map((f) => (parsed.data as any)[f])],
+  );
+  if (!result.rows[0]) return res.status(404).end();
+  res.json(result.rows[0]);
+});
+
 const feeStructureSchema = z.object({
   academic_year_id: z.string().uuid(),
   class_level_id: z.string().uuid(),
