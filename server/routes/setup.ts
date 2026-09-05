@@ -17,6 +17,77 @@ setupRouter.use(requireMember);
 
 const writeGuard = requireCapability("manage_fee_structure");
 
+// The canonical 15-class Indian school ladder + a handful of common fee
+// heads, created in one transaction rather than the frontend making 20
+// sequential round trips (one per row) to seed a brand-new school — each
+// of those round trips is a full serverless-function invocation with its
+// own database connection, and 20 of them back to back was slow enough
+// on a cold deployment to look like the app had hung. Idempotent: safe
+// to call again, existing rows are left alone.
+const DEFAULT_CLASS_LEVELS = [
+  { name: "Pre-LKG", ladder_order: 1, stage: "pre_primary" },
+  { name: "LKG", ladder_order: 2, stage: "pre_primary" },
+  { name: "UKG", ladder_order: 3, stage: "pre_primary" },
+  { name: "I", ladder_order: 4, stage: "primary" },
+  { name: "II", ladder_order: 5, stage: "primary" },
+  { name: "III", ladder_order: 6, stage: "primary" },
+  { name: "IV", ladder_order: 7, stage: "primary" },
+  { name: "V", ladder_order: 8, stage: "primary" },
+  { name: "VI", ladder_order: 9, stage: "middle" },
+  { name: "VII", ladder_order: 10, stage: "middle" },
+  { name: "VIII", ladder_order: 11, stage: "middle" },
+  { name: "IX", ladder_order: 12, stage: "secondary" },
+  { name: "X", ladder_order: 13, stage: "secondary" },
+  { name: "1st PU", ladder_order: 14, stage: "puc", requires_stream: true, requires_explicit_optin: true },
+  { name: "2nd PU", ladder_order: 15, stage: "puc", requires_stream: true, is_terminal: true },
+];
+const DEFAULT_FEE_HEADS = [
+  { name: "Tuition fee", display_order: 1 },
+  { name: "Admission fee", is_one_time: true, display_order: 2 },
+  { name: "Development fee", display_order: 3 },
+  { name: "Library fee", display_order: 4 },
+  { name: "Exam fee", display_order: 5 },
+];
+
+setupRouter.post("/seed-defaults", writeGuard, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    for (const c of DEFAULT_CLASS_LEVELS) {
+      await client.query(
+        `INSERT INTO class_levels
+           (school_id, name, ladder_order, stage, requires_stream, requires_explicit_optin, is_terminal)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT DO NOTHING`,
+        [req.school!.id, c.name, c.ladder_order, c.stage,
+         c.requires_stream ?? false, c.requires_explicit_optin ?? false, c.is_terminal ?? false],
+      );
+    }
+    for (const h of DEFAULT_FEE_HEADS) {
+      await client.query(
+        `INSERT INTO fee_heads (school_id, name, is_one_time, display_order)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT DO NOTHING`,
+        [req.school!.id, h.name, h.is_one_time ?? false, h.display_order],
+      );
+    }
+
+    await client.query("COMMIT");
+
+    const [levels, heads] = await Promise.all([
+      pool.query(`SELECT * FROM class_levels WHERE school_id = $1 ORDER BY ladder_order`, [req.school!.id]),
+      pool.query(`SELECT * FROM fee_heads WHERE school_id = $1 ORDER BY display_order`, [req.school!.id]),
+    ]);
+    res.json({ classLevels: levels.rows, feeHeads: heads.rows });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+});
+
 // ---------------------------------------------------------------------
 // Academic years
 // ---------------------------------------------------------------------

@@ -181,40 +181,23 @@ export default function App() {
   const [classLevels, setClassLevels] = useState([]);
   const [feeHeads, setFeeHeads] = useState([]);
 
-  const STAGE_MAP = {
-    "Pre-primary": "pre_primary", Primary: "primary", Middle: "middle",
-    Secondary: "secondary", "Pre-university": "puc",
-  };
-
   async function ensureClassLevelsAndFeeHeads() {
-    let levels = await api.get("/setup/class-levels");
-    if (levels.length === 0) {
-      levels = [];
-      for (let i = 0; i < CLASSES.length; i++) {
-        const c = CLASSES[i];
-        levels.push(await api.post("/setup/class-levels", {
-          name: c.name, ladder_order: i + 1, stage: STAGE_MAP[c.stage],
-          requires_stream: c.name === "1st PU" || c.name === "2nd PU",
-          requires_explicit_optin: c.name === "1st PU",
-          is_terminal: c.name === "2nd PU",
-        }));
-      }
+    const levels = await api.get("/setup/class-levels");
+    const heads = await api.get("/setup/fee-heads");
+    if (levels.length > 0 || heads.length > 0) {
+      setClassLevels(levels);
+      setFeeHeads(heads);
+      return;
     }
-    setClassLevels(levels);
-
-    let heads = await api.get("/setup/fee-heads");
-    if (heads.length === 0) {
-      const defaults = [
-        { name: "Tuition fee", display_order: 1 },
-        { name: "Admission fee", is_one_time: true, display_order: 2 },
-        { name: "Development fee", display_order: 3 },
-        { name: "Library fee", display_order: 4 },
-        { name: "Exam fee", display_order: 5 },
-      ];
-      heads = [];
-      for (const d of defaults) heads.push(await api.post("/setup/fee-heads", d));
-    }
-    setFeeHeads(heads);
+    // One request, one transaction on the server — not 20 sequential
+    // round trips (one per class, one per fee head), which is what this
+    // used to do here. Each of those was a full serverless-function
+    // invocation with its own database connection; twenty of them back
+    // to back was slow enough on a cold deployment to look like Setup
+    // had simply hung.
+    const seeded = await api.post("/setup/seed-defaults", {});
+    setClassLevels(seeded.classLevels);
+    setFeeHeads(seeded.feeHeads);
   }
 
   async function refreshFeeHeads() {

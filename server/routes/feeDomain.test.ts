@@ -182,6 +182,32 @@ describe("setup routes", () => {
     void year;
   });
 
+  it("seed-defaults creates the full class ladder and fee heads in one call", async () => {
+    const cookie = await loginAs("owner@http.test");
+    const res = await request(app).post("/api/setup/seed-defaults").set("Cookie", cookie).send({});
+    expect(res.status).toBe(200);
+    expect(res.body.classLevels).toHaveLength(15);
+    expect(res.body.feeHeads).toHaveLength(5);
+    expect(res.body.classLevels[0].name).toBe("Pre-LKG");
+    expect(res.body.classLevels[14].name).toBe("2nd PU");
+    expect(res.body.classLevels[13].requires_explicit_optin).toBe(true); // 1st PU
+  });
+
+  it("seed-defaults is idempotent — calling it twice never duplicates rows", async () => {
+    const cookie = await loginAs("owner@http.test");
+    await request(app).post("/api/setup/seed-defaults").set("Cookie", cookie).send({});
+    const second = await request(app).post("/api/setup/seed-defaults").set("Cookie", cookie).send({});
+    expect(second.status).toBe(200);
+    expect(second.body.classLevels).toHaveLength(15);
+    expect(second.body.feeHeads).toHaveLength(5);
+  });
+
+  it("front desk cannot seed defaults (manage_fee_structure required)", async () => {
+    const cookie = await loginAs("desk@http.test");
+    const res = await request(app).post("/api/setup/seed-defaults").set("Cookie", cookie).send({});
+    expect(res.status).toBe(403);
+  });
+
   it("rejects a duplicate class ladder position with 409", async () => {
     const cookie = await loginAs("owner@http.test");
     await request(app).post("/api/setup/class-levels").set("Cookie", cookie)
