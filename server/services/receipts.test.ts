@@ -3,7 +3,7 @@ import { pool } from "../db/index.js";
 import { generateCharges, issueInvoice } from "./billing.js";
 import { recordPayment } from "./collection.js";
 import { ReceiptError, amountInWords, formatInr, getInvoiceData, getReceiptData } from "./receipts.js";
-import { createSchool, resetDb } from "../tests/helpers.js";
+import { createSchool, createUser, resetDb } from "../tests/helpers.js";
 import {
   createAcademicYear, createClassLevel, createEnrollment, createFeeHead,
   createFeeStructureLine, createSection, createStudent, resetFeeDomain,
@@ -85,6 +85,25 @@ describe("getReceiptData", () => {
     expect(data.lines[0].name).toBe("Tuition fee");
     expect(data.lines[0].amountPaise).toBe(1500000); // the allocated amount, not the full charge
     expect(data.priorPayments).toHaveLength(0);
+  });
+
+  it("includes the year's gross fee and any concession, alongside the payment itself", async () => {
+    const enrollment = await newEnrollment();
+    await generateCharges(enrollment.id); // 40,000 gross
+    const approver = await createUser("owner@receipt-test.example", "x".repeat(14));
+    await pool.query(
+      `INSERT INTO concessions (school_id, enrollment_id, reason, amount, approved_by)
+       VALUES ($1, $2, 'sibling', 1000000, $3)`,
+      [school.id, enrollment.id, approver.id],
+    ); // 10,000 concession
+    const payment = await recordPayment({
+      enrollmentId: enrollment.id, amount: 1500000, mode: "cash",
+    }) as any;
+
+    const data = await getReceiptData(payment.id);
+    expect(data.grossPaise).toBe(4000000);
+    expect(data.concessionPaise).toBe(1000000);
+    expect(data.netPaise).toBe(3000000);
   });
 
   it("shows an unallocated remainder as an Advance line", async () => {

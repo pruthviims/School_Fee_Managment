@@ -116,6 +116,9 @@ export interface ReceiptData {
   classLabel: string;
   academicYear: string;
   lines: ReceiptLine[];
+  grossPaise: number;
+  concessionPaise: number;
+  netPaise: number;
   totalPaise: number;
   totalDisplay: string;
   totalWords: string;
@@ -223,6 +226,14 @@ export async function getReceiptData(paymentId: string): Promise<ReceiptData> {
     classLabel: enrollment.class_label,
     academicYear: enrollment.year_name,
     lines,
+    // The year's total price and total waiver, not "as of this payment" —
+    // unlike balanceAfterPaise, these don't meaningfully drift over time
+    // once charges are generated and concessions granted, so today's
+    // ledger totals are what a reprint should show regardless of when
+    // the payment happened.
+    grossPaise: charged,
+    concessionPaise: conceded,
+    netPaise: charged - conceded,
     totalPaise: payment.amount,
     totalDisplay: formatInr(payment.amount),
     totalWords: amountInWords(payment.amount),
