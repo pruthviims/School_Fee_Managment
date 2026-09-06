@@ -295,6 +295,32 @@ setupRouter.patch("/fee-heads/:id", writeGuard, async (req, res) => {
   res.json(result.rows[0]);
 });
 
+setupRouter.delete("/fee-heads/:id", writeGuard, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `DELETE FROM fee_heads WHERE id = $1 AND school_id = $2 RETURNING id`,
+      [String(req.params.id), req.school!.id],
+    );
+    if (!result.rows[0]) return res.status(404).end();
+    res.status(204).end();
+  } catch (err) {
+    // Every foreign key pointing at fee_heads (fee_structures, charges,
+    // concessions) is ON DELETE RESTRICT — Postgres itself refuses this
+    // once the head has ever actually been priced or charged, which is
+    // exactly the protection wanted here: a head that's only ever
+    // existed as an empty, unpriced row (added by mistake, never given
+    // an amount for any class) can go; one that's already real school
+    // history can't, silently or otherwise.
+    if ((err as { code?: string }).code === "23503") {
+      return res.status(409).json({
+        detail: "This fee is already priced or has been charged to a student, so it can't be deleted. " +
+          "Remove its prices from every class instead if it's no longer needed.",
+      });
+    }
+    throw err;
+  }
+});
+
 const feeStructureSchema = z.object({
   academic_year_id: z.string().uuid(),
   class_level_id: z.string().uuid(),

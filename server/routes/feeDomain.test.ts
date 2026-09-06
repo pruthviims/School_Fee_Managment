@@ -96,6 +96,46 @@ describe("setup routes", () => {
     expect(list.body[0].class_name).toBe("VIII");
   });
 
+  it("deletes a fee head that was never priced or charged anywhere", async () => {
+    const cookie = await loginAs("owner@http.test");
+    const feeHead = await request(app).post("/api/setup/fee-heads").set("Cookie", cookie)
+      .send({ name: "Computer lab fee (added by mistake)" });
+    const res = await request(app).delete(`/api/setup/fee-heads/${feeHead.body.id}`).set("Cookie", cookie);
+    expect(res.status).toBe(204);
+
+    const list = await request(app).get("/api/setup/fee-heads").set("Cookie", cookie);
+    expect(list.body.find((h: any) => h.id === feeHead.body.id)).toBeUndefined();
+  });
+
+  it("refuses to delete a fee head that's already priced for a class", async () => {
+    const cookie = await loginAs("owner@http.test");
+    const year = await request(app).post("/api/setup/academic-years").set("Cookie", cookie)
+      .send({ name: "2026-27", starts_on: "2026-06-01", ends_on: "2027-03-31" });
+    const classLevel = await request(app).post("/api/setup/class-levels").set("Cookie", cookie)
+      .send({ name: "VIII", ladder_order: 8, stage: "middle" });
+    const feeHead = await request(app).post("/api/setup/fee-heads").set("Cookie", cookie)
+      .send({ name: "Tuition fee" });
+    await request(app).post("/api/setup/fee-structure").set("Cookie", cookie).send({
+      academic_year_id: year.body.id, class_level_id: classLevel.body.id,
+      fee_head_id: feeHead.body.id, amount: 4000000, due_on: "2026-06-15",
+    });
+
+    const res = await request(app).delete(`/api/setup/fee-heads/${feeHead.body.id}`).set("Cookie", cookie);
+    expect(res.status).toBe(409);
+
+    const stillThere = await request(app).get("/api/setup/fee-heads").set("Cookie", cookie);
+    expect(stillThere.body.find((h: any) => h.id === feeHead.body.id)).toBeDefined();
+  });
+
+  it("front desk cannot delete a fee head", async () => {
+    const ownerCookie = await loginAs("owner@http.test");
+    const feeHead = await request(app).post("/api/setup/fee-heads").set("Cookie", ownerCookie)
+      .send({ name: "Some fee" });
+    const deskCookie = await loginAs("desk@http.test");
+    const res = await request(app).delete(`/api/setup/fee-heads/${feeHead.body.id}`).set("Cookie", deskCookie);
+    expect(res.status).toBe(403);
+  });
+
   it("can update a fee head's one-time flag (shared across every class)", async () => {
     const cookie = await loginAs("owner@http.test");
     const feeHead = await request(app).post("/api/setup/fee-heads").set("Cookie", cookie)

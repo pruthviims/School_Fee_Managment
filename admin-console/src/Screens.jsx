@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { api } from "./api";
+import { ApiError, api } from "./api";
 import {
   AlertTriangle,
   ArrowRight,
@@ -720,10 +720,26 @@ export function FeeScreen({ state, save, classLevels, feeHeads, academicYears, r
   }
 
   async function removeComponent(row) {
-    // Removes this class's amounts for the head — the head itself (and
-    // its amounts for other classes) is untouched, since it's shared.
     try {
-      for (const t of row.terms) if (t.lineId) await api.delete(`/setup/fee-structure/${t.lineId}`);
+      // Try to remove the fee head entirely first — if it's never been
+      // priced for any class or charged to any student, this really is a
+      // full delete (the backend's own foreign keys guarantee that, not
+      // a check duplicated here). If something else does depend on it —
+      // another class still prices it, or it's already real school
+      // history — the backend correctly refuses with 409, and this
+      // falls back to just clearing THIS class's own price lines,
+      // leaving the shared head alone for whoever still needs it.
+      let fullyDeleted = true;
+      try {
+        await api.delete(`/setup/fee-heads/${row.id}`);
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 409) fullyDeleted = false;
+        else throw err;
+      }
+      if (!fullyDeleted) {
+        for (const t of row.terms) if (t.lineId) await api.delete(`/setup/fee-structure/${t.lineId}`);
+      }
+      await refreshFeeHeads();
       await refetch();
     } catch (err) {
       alert(err instanceof Error ? err.message : "Could not remove that component.");
