@@ -11,6 +11,7 @@ import { collectionRouter, webhookHandler } from "./routes/collection.js";
 import { importRouter } from "./routes/import.js";
 import { promotionRouter } from "./routes/promotion.js";
 import { schoolRouter } from "./routes/school.js";
+import { transportRouter } from "./routes/transport.js";
 import { setupRouter } from "./routes/setup.js";
 import { staffRouter } from "./routes/staff.js";
 import { studentsRouter } from "./routes/students.js";
@@ -78,6 +79,7 @@ app.use("/api/billing", billingRouter);
 app.use("/api/collection", collectionRouter);
 app.use("/api/promotion", promotionRouter);
 app.use("/api/school", schoolRouter);
+app.use("/api/transport", transportRouter);
 app.use("/api/import", importRouter);
 
 // Keep error details out of responses — logged server-side only, since a
