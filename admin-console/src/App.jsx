@@ -529,7 +529,7 @@ export default function App() {
             })}
           </div>
         )}
-        {step === "transport" && <TransportScreen state={state} save={setState} />}
+        {step === "transport" && <TransportScreen state={state} academicYears={academicYears} />}
         {step === "fees" && (
           <FeeScreen state={state} save={setState}
             classLevels={classLevels} feeHeads={feeHeads} academicYears={academicYears}

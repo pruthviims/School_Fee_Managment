@@ -477,39 +477,148 @@ export function SchoolScreen({ state, save }) {
 /* Transport                                                           */
 /* ================================================================== */
 
-export function TransportScreen({ state, save }) {
-  const [openId, setOpenId] = useState(state.routes[0]?.id || null);
-  const routes = state.routes;
-  const setRoutes = (next) => save({ ...state, routes: next });
-  const patch = (id, changes) => setRoutes(routes.map((r) => (r.id === id ? { ...r, ...changes } : r)));
+export function TransportScreen({ state, academicYears }) {
+  const [routes, setRoutes] = useState([]);
+  const [openId, setOpenId] = useState(null);
+  const [stopsByRoute, setStopsByRoute] = useState({}); // routeId -> stops[]
+  const [fares, setFares] = useState([]); // every fare for the current year
+  const [riders, setRiders] = useState([]); // [{stop_id, riders}]
+  const [loading, setLoading] = useState(true);
 
-  function addRoute() {
-    const r = { id: uid(), code: `R-${String(routes.length + 1).padStart(2, "0")}`,
-      name: "", vehicleNo: "", driverName: "", driverPhone: "", seats: 40, stops: [] };
-    setRoutes([...routes, r]);
-    setOpenId(r.id);
+  const year = academicYears.find((y) => y.name === state.year);
+
+  async function refetchFaresAndRiders(yearId) {
+    if (!yearId) { setFares([]); setRiders([]); return; }
+    const [f, r] = await Promise.all([
+      api.get(`/transport/fares?academic_year_id=${yearId}`),
+      api.get(`/transport/riders?academic_year_id=${yearId}`),
+    ]);
+    setFares(f);
+    setRiders(r);
   }
 
-  const currentYearStudents = state.students.filter((s) => inYear(s, state.year));
-  const riders = (stopId) => currentYearStudents.filter((s) => s.stopId === stopId).length;
-  const stops = allStops(routes);
-  const range = fareRange(routes);
-  const totalRiders = currentYearStudents.filter((s) => s.stopId).length;
+  useEffect(() => {
+    (async () => {
+      setLoading(true);
+      await Promise.all([
+        api.get("/transport/routes").then(setRoutes),
+        refetchFaresAndRiders(year?.id),
+      ]);
+      setLoading(false);
+    })();
+  }, [year?.id]); // eslint-disable-line
 
-  function patchStop(routeId, stopId, changes) {
-    const route = routes.find((r) => r.id === routeId);
-    patch(routeId, { stops: route.stops.map((s) => (s.id === stopId ? { ...s, ...changes } : s)) });
+  async function fetchStopsFor(routeId) {
+    const stops = await api.get(`/transport/routes/${routeId}/stops`);
+    setStopsByRoute((prev) => ({ ...prev, [routeId]: stops }));
   }
 
-  function removeStop(routeId, stopId) {
-    if (riders(stopId) > 0 &&
-        !confirm("Students board at this stop. Removing it clears their transport fee. Continue?")) return;
-    save({
-      ...state,
-      routes: routes.map((r) =>
-        r.id === routeId ? { ...r, stops: r.stops.filter((s) => s.id !== stopId) } : r),
-      students: state.students.map((s) => (s.stopId === stopId ? { ...s, stopId: null } : s)),
-    });
+  function toggleOpen(routeId) {
+    if (openId === routeId) { setOpenId(null); return; }
+    setOpenId(routeId);
+    if (!stopsByRoute[routeId]) fetchStopsFor(routeId);
+  }
+
+  async function addRoute() {
+    try {
+      const created = await api.post("/transport/routes", {
+        code: `R-${String(routes.length + 1).padStart(2, "0")}`, name: "",
+      });
+      setRoutes((prev) => [...prev, created]);
+      setStopsByRoute((prev) => ({ ...prev, [created.id]: [] }));
+      setOpenId(created.id);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Could not add that route.");
+    }
+  }
+
+  async function patchRoute(routeId, changes) {
+    try {
+      const updated = await api.patch(`/transport/routes/${routeId}`, changes);
+      setRoutes((prev) => prev.map((r) => (r.id === routeId ? updated : r)));
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Could not update that route.");
+    }
+  }
+
+  async function removeRoute(routeId) {
+    try {
+      await api.delete(`/transport/routes/${routeId}`);
+      setRoutes((prev) => prev.filter((r) => r.id !== routeId));
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Could not remove that route.");
+    }
+  }
+
+  async function addStop(routeId) {
+    try {
+      const stops = stopsByRoute[routeId] || [];
+      const created = await api.post(`/transport/routes/${routeId}/stops`, {
+        name: "", sequence: stops.length + 1,
+      });
+      setStopsByRoute((prev) => ({ ...prev, [routeId]: [...(prev[routeId] || []), created] }));
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Could not add that stop.");
+    }
+  }
+
+  async function patchStop(routeId, stopId, changes) {
+    try {
+      const updated = await api.patch(`/transport/stops/${stopId}`, changes);
+      setStopsByRoute((prev) => ({
+        ...prev, [routeId]: prev[routeId].map((s) => (s.id === stopId ? updated : s)),
+      }));
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Could not update that stop.");
+    }
+  }
+
+  async function removeStop(routeId, stopId) {
+    try {
+      await api.delete(`/transport/stops/${stopId}`);
+      setStopsByRoute((prev) => ({ ...prev, [routeId]: prev[routeId].filter((s) => s.id !== stopId) }));
+      setFares((prev) => prev.filter((f) => f.stop_id !== stopId));
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Could not remove that stop.");
+    }
+  }
+
+  // Fares are a separate, year-scoped backend concept now — not a flat
+  // property on the stop — since the same stop can (and does) cost a
+  // different amount from one academic year to the next. Create-or-
+  // update based on whether one already exists for this stop and year.
+  async function setFare(stopId, rupees) {
+    if (!year) return;
+    const amount = Math.max(0, Math.round(rupees || 0)) * 100;
+    const existing = fares.find((f) => f.stop_id === stopId);
+    try {
+      if (existing) {
+        const updated = await api.patch(`/transport/fares/${existing.id}`, { amount });
+        setFares((prev) => prev.map((f) => (f.id === existing.id ? updated : f)));
+      } else if (amount > 0) {
+        const created = await api.post("/transport/fares", {
+          academic_year_id: year.id, stop_id: stopId, amount,
+          due_on: String(year.starts_on).slice(0, 10),
+        });
+        setFares((prev) => [...prev, created]);
+      }
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Could not save that fare.");
+    }
+  }
+
+  const riderCountFor = (stopId) => riders.find((r) => r.stop_id === stopId)?.riders || 0;
+  const fareFor = (stopId) => fares.find((f) => f.stop_id === stopId)?.amount || 0;
+  const allFares = fares.map((f) => f.amount).filter(Boolean);
+  const totalRiders = riders.reduce((sum, r) => sum + r.riders, 0);
+
+  if (loading) {
+    return (
+      <div>
+        <PageHead title="Bus Routes" subtitle="Loading…" />
+        <div className={`${panel} p-16 text-center text-slate-400 font-semibold`}>Loading…</div>
+      </div>
+    );
   }
 
   return (
@@ -523,10 +632,10 @@ export function TransportScreen({ state, save }) {
         <StatCard icon={Bus} tint="bg-brand-50 text-brand-600" label="Routes"
           value={routes.length} note="In service" />
         <StatCard icon={Users} tint="bg-emerald-50 text-emerald-600" label="Riders"
-          value={totalRiders} note={`Across ${stops.length} stops`} noteTint="text-emerald-600" />
+          value={totalRiders} note={`This year (${state.year})`} noteTint="text-emerald-600" />
         <StatCard icon={IndianRupee} tint="bg-amber-50 text-amber-600" label="Fare range"
-          value={range ? `${inr(range.min)}–${inr(range.max)}` : "—"} note="Yearly, per stop"
-          noteTint="text-amber-600" />
+          value={allFares.length ? `${inr(Math.min(...allFares) / 100)}–${inr(Math.max(...allFares) / 100)}` : "—"}
+          note="Yearly, per stop" noteTint="text-amber-600" />
       </div>
 
       {routes.length === 0 ? (
@@ -542,11 +651,12 @@ export function TransportScreen({ state, save }) {
         <div className="space-y-3">
           {routes.map((r) => {
             const open = openId === r.id;
-            const fares = r.stops.map((s) => s.fare || 0).filter(Boolean);
+            const stops = stopsByRoute[r.id] || [];
+            const routeFares = stops.map((s) => fareFor(s.id)).filter(Boolean);
             return (
               <div key={r.id} className={`${panel} overflow-hidden ${open ? "border-brand-200" : ""}`}>
                 <button className="w-full flex items-center gap-3 px-5 py-4 hover:bg-slate-50/70 text-left"
-                  onClick={() => setOpenId(open ? null : r.id)}>
+                  onClick={() => toggleOpen(r.id)}>
                   {open ? <ChevronDown size={17} className="text-slate-300" />
                         : <ChevronRight size={17} className="text-slate-300" />}
                   <span className="w-10 h-10 rounded-xl bg-brand-50 text-brand-600 grid place-items-center font-bold text-xs tabular-nums">
@@ -554,8 +664,8 @@ export function TransportScreen({ state, save }) {
                   </span>
                   <span className="font-bold flex-1">{r.name || "Untitled route"}</span>
                   <span className="text-xs font-semibold text-slate-400">
-                    {r.stops.length} {r.stops.length === 1 ? "stop" : "stops"}
-                    {fares.length > 0 && ` · ${inr(Math.min(...fares))}–${inr(Math.max(...fares))}`}
+                    {open ? `${stops.length} ${stops.length === 1 ? "stop" : "stops"}` : ""}
+                    {routeFares.length > 0 && ` · ${inr(Math.min(...routeFares) / 100)}–${inr(Math.max(...routeFares) / 100)}`}
                   </span>
                 </button>
 
@@ -563,13 +673,16 @@ export function TransportScreen({ state, save }) {
                   <div className="border-t border-slate-100 p-5">
                     <div className="grid sm:grid-cols-3 gap-4 mb-5">
                       {[["Route code", "code", "R-01"], ["Route name", "name", "Kanakapura Road"],
-                        ["Vehicle number", "vehicleNo", "KA 01 AB 1234"], ["Driver", "driverName", ""],
-                        ["Driver phone", "driverPhone", ""], ["Seats", "seats", "40"]].map(([lbl, key, ph]) => (
+                        ["Vehicle number", "vehicle_no", "KA 01 AB 1234"], ["Driver", "driver_name", ""],
+                        ["Driver phone", "driver_phone", ""], ["Seats", "seats", "40"]].map(([lbl, key, ph]) => (
                         <div key={key}>
                           <label className={eyebrow}>{lbl}</label>
-                          <input className={`${field} mt-2`} value={r[key]} placeholder={ph}
-                            onChange={(e) => patch(r.id, {
-                              [key]: key === "seats" ? +e.target.value || 0 : e.target.value })} />
+                          <input className={`${field} mt-2`} defaultValue={r[key]} placeholder={ph}
+                            key={`${r.id}-${key}-${r[key]}`}
+                            onBlur={(e) => {
+                              const next = key === "seats" ? +e.target.value || 0 : e.target.value;
+                              if (next !== r[key]) patchRoute(r.id, { [key]: next });
+                            }} />
                         </div>
                       ))}
                     </div>
@@ -586,23 +699,29 @@ export function TransportScreen({ state, save }) {
                           </tr>
                         </thead>
                         <tbody>
-                          {r.stops.map((s) => (
+                          {stops.map((s) => (
                             <tr key={s.id} className="border-b border-slate-50 last:border-0">
                               <td className="px-4 py-1.5">
-                                <input className={cellInput} value={s.name} placeholder="Jayanagar 4th Block"
-                                  onChange={(e) => patchStop(r.id, s.id, { name: e.target.value })} />
+                                <input className={cellInput} defaultValue={s.name} placeholder="Jayanagar 4th Block"
+                                  key={`${s.id}-name-${s.name}`}
+                                  onBlur={(e) => { if (e.target.value !== s.name) patchStop(r.id, s.id, { name: e.target.value }); }} />
                               </td>
                               <td className="px-4 py-1.5">
-                                <input className={cellInput} value={s.time} placeholder="7:20 am"
-                                  onChange={(e) => patchStop(r.id, s.id, { time: e.target.value })} />
+                                <input className={cellInput} defaultValue={s.pickup_time || ""} placeholder="7:20 am"
+                                  key={`${s.id}-time-${s.pickup_time}`}
+                                  onBlur={(e) => {
+                                    const next = e.target.value || null;
+                                    if (next !== s.pickup_time) patchStop(r.id, s.id, { pickup_time: next });
+                                  }} />
                               </td>
                               <td className="px-4 py-1.5">
                                 <input className={`${cellInput} text-right tabular-nums`} inputMode="numeric"
-                                  value={s.fare || ""} placeholder="0"
-                                  onChange={(e) => patchStop(r.id, s.id, { fare: +e.target.value || 0 })} />
+                                  defaultValue={fareFor(s.id) ? fareFor(s.id) / 100 : ""} placeholder="0"
+                                  key={`${s.id}-fare-${fareFor(s.id)}`}
+                                  onBlur={(e) => setFare(s.id, +e.target.value)} />
                               </td>
                               <td className="px-4 py-1.5 text-right text-sm font-semibold text-slate-400 tabular-nums">
-                                {riders(s.id) || "—"}
+                                {riderCountFor(s.id) || "—"}
                               </td>
                               <td className="px-4 py-1.5 text-right">
                                 <button className="text-slate-300 hover:text-red-500"
@@ -612,7 +731,7 @@ export function TransportScreen({ state, save }) {
                               </td>
                             </tr>
                           ))}
-                          {r.stops.length === 0 && (
+                          {stops.length === 0 && (
                             <tr><td colSpan={5} className="px-4 py-5 text-sm text-slate-400">No stops yet.</td></tr>
                           )}
                         </tbody>
@@ -620,12 +739,11 @@ export function TransportScreen({ state, save }) {
                     </div>
 
                     <div className="flex gap-2 mt-4">
-                      <button className={ghost} onClick={() => patch(r.id, {
-                        stops: [...r.stops, { id: uid(), name: "", fare: 0, time: "" }] })}>
+                      <button className={ghost} onClick={() => addStop(r.id)}>
                         <Plus size={15} /> Add stop
                       </button>
                       <button className="text-sm font-semibold text-red-500 hover:bg-red-50 border border-slate-200 hover:border-red-200 rounded-xl px-4 py-2.5 flex items-center gap-2"
-                        onClick={() => setRoutes(routes.filter((x) => x.id !== r.id))}>
+                        onClick={() => removeRoute(r.id)}>
                         <Trash2 size={15} /> Delete route
                       </button>
                     </div>
@@ -1298,7 +1416,7 @@ export function PromoteTab({ academicYears, classLevels, ensureUnassignedSection
 
 export function NewAdmissionTab({ state, save, classLevels, academicYears }) {
   const blank = { name: "", classLevelId: "", sectionId: "", dob: "",
-    guardianName: "", phone: "", email: "", address: "", stopId: "" };
+    guardianName: "", phone: "", email: "", address: "" };
   const [f, setF] = useState(blank);
   const [sections, setSections] = useState([]);
   const [error, setError] = useState("");
@@ -1310,7 +1428,6 @@ export function NewAdmissionTab({ state, save, classLevels, academicYears }) {
   // genuinely means "since this browser tab opened this screen".
   const [addedThisSession, setAddedThisSession] = useState([]);
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
-  const stops = allStops(state.routes);
 
   const year = academicYears.find((y) => y.name === state.year);
   const activeClass = classLevels.find((c) => c.id === f.classLevelId);
@@ -1489,14 +1606,6 @@ export function NewAdmissionTab({ state, save, classLevels, academicYears }) {
           <div>
             <label className={eyebrow}>Date of birth</label>
             <input type="date" className={`${field} mt-2`} value={f.dob || ""} onChange={set("dob")} />
-          </div>
-          <div>
-            <label className={eyebrow}>Bus stop</label>
-            <FilterSelect value={f.stopId} active={Boolean(f.stopId)} className="mt-2"
-              onChange={(e) => setF({ ...f, stopId: e.target.value })}>
-              <option value="">No bus</option>
-              {stops.map((st) => <option key={st.id} value={st.id}>{st.routeCode} · {st.name}</option>)}
-            </FilterSelect>
           </div>
           <div>
             <label className={eyebrow}>Guardian name</label>

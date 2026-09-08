@@ -26,7 +26,10 @@ const assignGuard = requireCapability("manage_admissions");
 
 const routeSchema = z.object({
   code: z.string().min(1).max(20),
-  name: z.string().min(1).max(150),
+  // Empty allowed deliberately: "Add Route" creates a stub with no name
+  // yet, filled in inline right after — same pattern as fee heads and
+  // sections created just-in-time elsewhere in this app.
+  name: z.string().max(150).optional().default(""),
   distance_km: z.number().nonnegative().nullable().optional().default(null),
   vehicle_no: z.string().max(30).optional().default(""),
   driver_name: z.string().max(150).optional().default(""),
@@ -104,7 +107,9 @@ transportRouter.delete("/routes/:id", configGuard, async (req, res) => {
 // ---------------------------------------------------------------------
 
 const stopSchema = z.object({
-  name: z.string().min(1).max(150),
+  // Empty allowed for the same reason as routes above — "Add stop"
+  // creates a stub filled in inline right after.
+  name: z.string().max(150).optional().default(""),
   sequence: z.number().int().positive().optional().default(1),
   pickup_time: z.string().nullable().optional().default(null),
 });
@@ -184,6 +189,23 @@ const fareSchema = z.object({
   stop_id: z.string().uuid(),
   amount: z.number().int().nonnegative(), // paise, annual
   due_on: z.string(),
+});
+
+// Riders per stop for the year — the old localStorage screen showed
+// this, and dropping it would be a visible regression, not just a
+// missing nice-to-have.
+transportRouter.get("/riders", async (req, res) => {
+  const { academic_year_id } = req.query;
+  if (!academic_year_id) return res.json([]);
+  const result = await pool.query(
+    `SELECT ta.stop_id, COUNT(*) AS riders
+     FROM transport_assignments ta
+     JOIN enrollments e ON e.id = ta.enrollment_id
+     WHERE ta.school_id = $1 AND e.academic_year_id = $2 AND ta.ended_on IS NULL
+     GROUP BY ta.stop_id`,
+    [req.school!.id, academic_year_id],
+  );
+  res.json(result.rows.map((r) => ({ stop_id: r.stop_id, riders: Number(r.riders) })));
 });
 
 transportRouter.get("/fares", async (req, res) => {

@@ -73,6 +73,19 @@ describe("bus routes", () => {
     expect(dup.status).toBe(409);
   });
 
+  it("creates a route or stop with no name yet — filled in inline right after in the UI", async () => {
+    const cookie = await loginAs("owner@transport.test");
+    const route = await request(app).post("/api/transport/routes").set("Cookie", cookie)
+      .send({ code: "R-09" }); // no name at all
+    expect(route.status).toBe(201);
+    expect(route.body.name).toBe("");
+
+    const stop = await request(app).post(`/api/transport/routes/${route.body.id}/stops`)
+      .set("Cookie", cookie).send({}); // no name at all
+    expect(stop.status).toBe(201);
+    expect(stop.body.name).toBe("");
+  });
+
   it("front desk cannot create a route (manage_fee_structure required)", async () => {
     const cookie = await loginAs("desk@transport.test");
     const res = await request(app).post("/api/transport/routes").set("Cookie", cookie)
@@ -210,6 +223,17 @@ describe("assigning a student — the actual proration", () => {
       .set("Cookie", cookie);
     expect(current.body.stop_id).toBe(stop.id);
     expect(current.body.months).toBe(4);
+  });
+
+  it("counts riders per stop for the year", async () => {
+    const cookie = await loginAs("owner@transport.test");
+    const { year, stop, enrollment } = await setUpRouteStopFareAndStudent(cookie, 5000000);
+    await request(app).post(`/api/transport/enrollments/${enrollment.id}/assign`)
+      .set("Cookie", cookie).send({ stop_id: stop.id, months: 6 });
+
+    const riders = await request(app).get(`/api/transport/riders?academic_year_id=${year.id}`)
+      .set("Cookie", cookie);
+    expect(riders.body).toEqual([{ stop_id: stop.id, riders: 1 }]);
   });
 
   it("a transport concession is a real concession tagged to the Transport fee head", async () => {
