@@ -1002,15 +1002,45 @@ function isActionable(move) {
  * promotable move in it, so processing a graduation with nobody else to
  * promote alongside it needs its own follow-up.
  */
-export function PromoteTab({ state, save, academicYears, classLevels, ensureUnassignedSection }) {
-  const toYear = academicYears.find((y) => y.name === state.year);
-  const priorYears = academicYears
-    .filter((y) => toYear && y.starts_on < toYear.starts_on)
-    .sort((a, b) => (a.starts_on < b.starts_on ? 1 : -1));
+export function PromoteTab({ academicYears, classLevels, ensureUnassignedSection, refreshAcademicYears }) {
+  // Every real year is a valid "From" candidate — "To" is no longer an
+  // independent choice, so there's nothing left to filter priorYears
+  // against. Most recent first, since that's the year promotion is
+  // almost always run from.
+  const priorYears = [...academicYears]
+    .sort((a, b) => (String(a.starts_on).slice(0, 10) < String(b.starts_on).slice(0, 10) ? 1 : -1));
 
   const [sourceYearPick, setSourceYearPick] = useState("");
   const sourceYearName = sourceYearPick || priorYears[0]?.name || "";
   const fromYear = academicYears.find((y) => y.name === sourceYearName);
+
+  // "To" is computed from "From", not picked freely — the very next
+  // year on the ladder, June to March, one calendar year after From
+  // starts. If that year doesn't exist yet, there's nothing to select
+  // until it's created — which can now happen right here, rather than
+  // sending the office to Fees Setup or the top bar first.
+  const expectedNextYear = fromYear ? (() => {
+    const startYear = Number(String(fromYear.starts_on).slice(0, 4)) + 1;
+    return {
+      name: `${startYear}-${String(startYear + 1).slice(-2)}`,
+      starts_on: `${startYear}-06-01`, ends_on: `${startYear + 1}-03-31`,
+    };
+  })() : null;
+  const toYear = expectedNextYear ? academicYears.find((y) => y.name === expectedNextYear.name) : null;
+  const [creatingYear, setCreatingYear] = useState(false);
+
+  async function createNextYear() {
+    if (!expectedNextYear) return;
+    setCreatingYear(true);
+    try {
+      await api.post("/setup/academic-years", { ...expectedNextYear, status: "planning" });
+      await refreshAcademicYears();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Could not create that academic year.");
+    } finally {
+      setCreatingYear(false);
+    }
+  }
 
   const [classFilter, setClassFilter] = useState("");
   const [query, setQuery] = useState("");
@@ -1037,11 +1067,6 @@ export function PromoteTab({ state, save, academicYears, classLevels, ensureUnas
     }
   }
   useEffect(() => { refetchPreview(); }, [fromYear?.id, toYear?.id]); // eslint-disable-line
-
-  function changeToYear(next) {
-    save({ ...state, year: next });
-    if (sourceYearPick === next) setSourceYearPick("");
-  }
 
   async function promoteOne(move, confirmOptIn) {
     setBusyId(move.enrollmentId);
@@ -1085,14 +1110,14 @@ export function PromoteTab({ state, save, academicYears, classLevels, ensureUnas
     return (
       <div>
         <PageHead title="Class Promotion"
-          subtitle={`Bring continuing students into ${state.year} from last year's roll.`} />
+          subtitle="Bring continuing students into the next year from last year's roll." />
         <div className={`${panel} border-dashed p-12 text-center`}>
           <Sparkles className="mx-auto text-slate-300 mb-3" size={26} />
           <p className="font-bold text-slate-700">No previous year to promote from</p>
           <p className="text-sm text-slate-500 mt-1 max-w-md mx-auto">
-            Promotion needs a prior year's roll already in the system. Set "To"
-            below to last year and import that roll under First Time Import, or
-            use New Admission for students joining now.
+            Promotion needs a prior year's roll already in the system. Import that
+            roll under First Time Import, or use New Admission for students
+            joining now.
           </p>
         </div>
       </div>
@@ -1102,7 +1127,7 @@ export function PromoteTab({ state, save, academicYears, classLevels, ensureUnas
   return (
     <div>
       <PageHead title="Class Promotion"
-        subtitle={`Bring continuing students into ${state.year} from last year's roll, one at a time as they're found.`} />
+        subtitle={`Bring continuing students from ${sourceYearName} into ${toYear?.name || expectedNextYear?.name}, one at a time as they're found.`} />
 
       {justPromoted && (
         <div className="mb-5 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-2xl px-5 py-4 text-sm font-semibold">
@@ -1127,10 +1152,16 @@ export function PromoteTab({ state, save, academicYears, classLevels, ensureUnas
         <ArrowRight size={16} className="text-slate-300 mb-3 shrink-0" />
         <div className="min-w-[150px]">
           <label className={eyebrow}>To</label>
-          <FilterSelect value={state.year} active
-            onChange={(e) => changeToYear(e.target.value)} className="mt-2">
-            {academicYears.map((y) => <option key={y.id} value={y.name}>{y.name}</option>)}
-          </FilterSelect>
+          {toYear ? (
+            <div className="mt-2 rounded-xl px-3.5 py-2.5 text-sm font-bold bg-brand-50 border-2 border-brand-200 text-brand-700">
+              {toYear.name}
+            </div>
+          ) : (
+            <button onClick={createNextYear} disabled={creatingYear}
+              className="mt-2 rounded-xl px-3.5 py-2.5 text-sm font-bold border-2 border-dashed border-amber-300 bg-amber-50 text-amber-700 hover:border-amber-400 disabled:opacity-50 whitespace-nowrap">
+              {creatingYear ? "Creating…" : `+ Create ${expectedNextYear?.name}`}
+            </button>
+          )}
         </div>
         <div className="min-w-[160px]">
           <label className={eyebrow}>Class</label>
@@ -1158,7 +1189,7 @@ export function PromoteTab({ state, save, academicYears, classLevels, ensureUnas
         <div className={`${panel} border-dashed p-12 text-center text-slate-400 font-semibold`}>Loading…</div>
       ) : !preview || (preview.moves.length === 0 && preview.graduating.length === 0 && preview.blocked.length === 0) ? (
         <div className={`${panel} border-dashed p-10 text-center text-slate-400 font-semibold`}>
-          Everyone from {sourceYearName} is already accounted for in {state.year}.
+          Everyone from {sourceYearName} is already accounted for in {toYear?.name || expectedNextYear?.name}.
         </div>
       ) : (
         <>
@@ -1267,7 +1298,7 @@ export function PromoteTab({ state, save, academicYears, classLevels, ensureUnas
 
 export function NewAdmissionTab({ state, save, classLevels, academicYears }) {
   const blank = { name: "", classLevelId: "", sectionId: "", dob: "",
-    guardianName: "", phone: "", email: "", stopId: "" };
+    guardianName: "", phone: "", email: "", address: "", stopId: "" };
   const [f, setF] = useState(blank);
   const [sections, setSections] = useState([]);
   const [error, setError] = useState("");
@@ -1358,6 +1389,7 @@ export function NewAdmissionTab({ state, save, classLevels, academicYears }) {
         guardian_name: f.guardianName.trim(),
         guardian_phone: f.phone.trim(),
         guardian_email: f.email.trim(),
+        address: f.address.trim(),
         academic_year_id: year.id,
         class_level_id: f.classLevelId,
         section_id: f.sectionId,
@@ -1477,6 +1509,10 @@ export function NewAdmissionTab({ state, save, classLevels, academicYears }) {
           <div className="sm:col-span-2">
             <label className={eyebrow}>Email</label>
             <input className={`${field} mt-2`} value={f.email} onChange={set("email")} type="email" />
+          </div>
+          <div className="sm:col-span-2">
+            <label className={eyebrow}>Address</label>
+            <textarea rows={2} className={`${field} mt-2`} value={f.address} onChange={set("address")} />
           </div>
           <div className="sm:col-span-2">
             <button type="submit" disabled={busy} className={primary}>

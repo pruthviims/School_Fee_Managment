@@ -545,9 +545,10 @@ export default function App() {
           <ImportScreen state={state} academicYears={academicYears} classLevels={classLevels} />
         )}
         {step === "promote" && (
-          <PromoteTab state={state} save={setState}
+          <PromoteTab
             academicYears={academicYears} classLevels={classLevels}
-            ensureUnassignedSection={ensureUnassignedSection} />
+            ensureUnassignedSection={ensureUnassignedSection}
+            refreshAcademicYears={ensureAcademicYears} />
         )}
 
         <p className="text-xs text-slate-400 mt-12 max-w-2xl leading-relaxed">
