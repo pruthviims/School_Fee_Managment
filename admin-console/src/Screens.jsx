@@ -13,9 +13,11 @@ import {
   History,
   Image as ImageIcon,
   IndianRupee,
+  Mail,
   Percent,
   Plus,
   Search,
+  ShieldCheck,
   Sparkles,
   Trash2,
   Upload,
@@ -2108,6 +2110,228 @@ export function PaymentModal({ enrollmentId, student, onClose, onPaid }) {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+const ROLE_LABEL = {
+  owner: "Owner", accountant: "Accountant", front_desk: "Front desk", viewer: "Viewer",
+};
+const ROLE_DESCRIPTION = {
+  owner: "Full access, including staff and billing",
+  accountant: "Fees, concessions, admissions, reports",
+  front_desk: "Admissions, payments — no concessions or staff",
+  viewer: "Read-only across the school",
+};
+
+/**
+ * Staff access — invite, change role, revoke/reactivate. This whole
+ * screen is only reachable by an owner (manage_staff is owner-only on
+ * the backend; the sidebar itself hides the nav entry for anyone else),
+ * so there's no separate in-screen permission check needed here beyond
+ * what the API already enforces.
+ */
+export function StaffScreen({ currentUserId }) {
+  const [staff, setStaff] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [inviting, setInviting] = useState(false);
+  const [busyId, setBusyId] = useState(null);
+
+  async function refetch() {
+    setLoading(true);
+    try {
+      setStaff(await api.get("/staff"));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not load staff.");
+    } finally {
+      setLoading(false);
+    }
+  }
+  useEffect(() => { refetch(); }, []); // eslint-disable-line
+
+  async function changeRole(member, role) {
+    setBusyId(member.id);
+    try {
+      await api.patch(`/staff/${member.id}`, { role });
+      await refetch();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Could not change that role.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function toggleActive(member) {
+    setBusyId(member.id);
+    try {
+      await api.patch(`/staff/${member.id}`, { is_active: !member.is_active });
+      await refetch();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Could not update that access.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  return (
+    <div>
+      <PageHead title="Staff Access"
+        subtitle="Who can sign in to this school's portal, and what they can do once they're in.">
+        <button className={primary} onClick={() => setInviting(true)}>
+          <UserPlus size={16} /> Invite staff
+        </button>
+      </PageHead>
+
+      {error && (
+        <div className="mb-5 flex items-start gap-2 bg-red-50 border border-red-200 text-red-700 rounded-2xl px-5 py-4 text-sm font-semibold">
+          <AlertTriangle size={15} className="mt-0.5 shrink-0" /> {error}
+        </div>
+      )}
+
+      {inviting && (
+        <InviteStaffPanel onDone={() => { setInviting(false); refetch(); }}
+          onCancel={() => setInviting(false)} />
+      )}
+
+      <div className={`${panel} overflow-hidden`}>
+        {loading ? (
+          <div className="p-12 text-center text-slate-400 font-semibold">Loading…</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[720px]">
+              <thead className="bg-slate-50/70">
+                <tr>
+                  <th className={th}>Person</th>
+                  <th className={th}>Role</th>
+                  <th className={th}>Access</th>
+                  <th className={th} />
+                </tr>
+              </thead>
+              <tbody>
+                {staff.map((m) => {
+                  const isSelf = m.user_id === currentUserId;
+                  const busy = busyId === m.id;
+                  return (
+                    <tr key={m.id} className="border-b border-slate-50 text-sm">
+                      <td className="px-5 py-3">
+                        <div className="font-bold">{m.full_name || m.email}</div>
+                        <div className="text-xs text-slate-400">{m.email}</div>
+                      </td>
+                      <td className="px-5 py-3">
+                        {isSelf ? (
+                          <span className="text-sm font-bold">{ROLE_LABEL[m.role]}</span>
+                        ) : (
+                          <select value={m.role} disabled={busy}
+                            onChange={(e) => changeRole(m, e.target.value)}
+                            className={`${cellInput} border-slate-200 font-semibold`}>
+                            {Object.keys(ROLE_LABEL).map((r) => (
+                              <option key={r} value={r}>{ROLE_LABEL[r]}</option>
+                            ))}
+                          </select>
+                        )}
+                        <p className="text-[11px] text-slate-400 mt-1 max-w-[220px]">
+                          {ROLE_DESCRIPTION[m.role]}
+                        </p>
+                      </td>
+                      <td className="px-5 py-3">
+                        {m.is_active ? (
+                          <span className="inline-flex items-center gap-1.5 text-xs font-bold text-emerald-600 bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-1">
+                            <Check size={12} /> Active
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-400 bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1">
+                            Revoked
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-5 py-3 text-right">
+                        {isSelf ? (
+                          <span className="text-xs font-semibold text-slate-300">That's you</span>
+                        ) : (
+                          <button disabled={busy} onClick={() => toggleActive(m)}
+                            className={m.is_active
+                              ? "text-xs font-bold rounded-lg px-3 py-2 border border-slate-200 text-slate-500 hover:border-red-300 hover:text-red-500 whitespace-nowrap disabled:opacity-50"
+                              : "text-xs font-bold rounded-lg px-3 py-2 bg-brand-600 text-white hover:bg-brand-700 whitespace-nowrap disabled:opacity-50"}>
+                            {busy ? "Working…" : m.is_active ? "Revoke access" : "Reactivate"}
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function InviteStaffPanel({ onDone, onCancel }) {
+  const [email, setEmail] = useState("");
+  const [fullName, setFullName] = useState("");
+  const [role, setRole] = useState("front_desk");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit(e) {
+    e.preventDefault();
+    setError("");
+    setBusy(true);
+    try {
+      await api.post("/staff", { email: email.trim(), full_name: fullName.trim(), role });
+      onDone();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not send that invite.");
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className={`${panel} p-6 mb-5`}>
+      <h2 className="font-extrabold mb-1">Invite someone new</h2>
+      <p className="text-sm text-slate-500 mb-4">
+        They'll get an email with a link to set their own password — nothing to share over
+        phone or chat.
+      </p>
+      {error && (
+        <div className="mb-4 flex items-start gap-2 bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-3 text-sm font-semibold">
+          <AlertTriangle size={15} className="mt-0.5 shrink-0" /> {error}
+        </div>
+      )}
+      <form onSubmit={submit} className="grid sm:grid-cols-2 gap-4">
+        <div>
+          <label className={eyebrow}>Email<span className="text-red-500"> *</span></label>
+          <input required type="email" value={email} onChange={(e) => setEmail(e.target.value)}
+            className={`${field} mt-2`} placeholder="accountant@school.edu.in" />
+        </div>
+        <div>
+          <label className={eyebrow}>Name</label>
+          <input value={fullName} onChange={(e) => setFullName(e.target.value)}
+            className={`${field} mt-2`} placeholder="Optional" />
+        </div>
+        <div className="sm:col-span-2">
+          <label className={eyebrow}>Role</label>
+          <div className="grid sm:grid-cols-4 gap-2 mt-2">
+            {Object.keys(ROLE_LABEL).map((r) => (
+              <button key={r} type="button" onClick={() => setRole(r)}
+                className={`text-left rounded-xl border-2 px-3 py-2.5 transition ${
+                  role === r ? "bg-brand-50 border-brand-400" : "bg-white border-slate-200 hover:border-brand-300"}`}>
+                <span className="block text-sm font-bold">{ROLE_LABEL[r]}</span>
+                <span className="block text-[11px] text-slate-400 mt-0.5">{ROLE_DESCRIPTION[r]}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="sm:col-span-2 flex gap-2.5">
+          <button type="submit" disabled={busy} className={primary}>
+            <Mail size={16} /> {busy ? "Sending…" : "Send invite"}
+          </button>
+          <button type="button" className={ghost} onClick={onCancel}>Cancel</button>
+        </div>
+      </form>
     </div>
   );
 }
