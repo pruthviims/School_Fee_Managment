@@ -39,7 +39,7 @@ export async function attachAuth(req: Request, _res: Response, next: NextFunctio
   const membershipResult = await pool.query(
     `SELECT m.id, m.role, m.is_active,
             s.id AS school_id, s.name, s.short_code, s.address,
-            s.logo_key, s.receipt_footer, s.is_active AS school_is_active
+            s.logo_key, s.logo_data_url, s.receipt_footer, s.is_active AS school_is_active
      FROM memberships m
      JOIN schools s ON s.id = m.school_id
      WHERE m.user_id = $1 AND m.is_active = true AND s.is_active = true
@@ -52,7 +52,7 @@ export async function attachAuth(req: Request, _res: Response, next: NextFunctio
     req.membership = { id: row.id, role: row.role, is_active: row.is_active };
     req.school = {
       id: row.school_id, name: row.name, short_code: row.short_code,
-      address: row.address, logo_key: row.logo_key,
+      address: row.address, logo_key: row.logo_key, logo_data_url: row.logo_data_url,
       receipt_footer: row.receipt_footer, is_active: row.school_is_active,
     };
   }

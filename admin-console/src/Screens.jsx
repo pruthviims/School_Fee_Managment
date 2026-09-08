@@ -345,18 +345,38 @@ export function SchoolScreen({ state, save }) {
   const [form, setForm] = useState({ ...state.school });
   const [saved, setSaved] = useState(false);
   const [logoError, setLogoError] = useState("");
+  const [logoBusy, setLogoBusy] = useState(false);
   const fileRef = useRef(null);
   const set = (k) => (e) => { setForm({ ...form, [k]: e.target.value }); setSaved(false); };
+
+  // Its own immediate action, not bundled into "Save changes" below —
+  // the logo is real, backend-stored data now (schools.logo_data_url,
+  // chosen over object storage for a self-hosted, few-school deployment
+  // — see server/routes/school.ts), while the rest of this form is
+  // still local-only. Uploading or removing it takes effect right away
+  // rather than waiting on a separate save click for a field that isn't
+  // even part of the same save path anymore.
+  async function uploadLogo(dataUrl) {
+    setLogoError("");
+    setLogoBusy(true);
+    try {
+      const result = await api.patch("/school/logo", { logo_data_url: dataUrl });
+      setForm((f) => ({ ...f, logo: result.logo_data_url }));
+      save({ ...state, school: { ...state.school, logo: result.logo_data_url } });
+    } catch (err) {
+      setLogoError(err instanceof Error ? err.message : "Could not save that logo.");
+    } finally {
+      setLogoBusy(false);
+    }
+  }
 
   function handleLogoFile(file) {
     setLogoError("");
     if (!file) return;
     if (!file.type.startsWith("image/")) return setLogoError("Choose an image file (PNG, JPG, SVG).");
-    // Stored as a data URL right in localStorage alongside everything else
-    // — no server to upload to — so it needs to stay small.
     if (file.size > 500 * 1024) return setLogoError("Keep the logo under 500KB.");
     const reader = new FileReader();
-    reader.onload = () => { setForm((f) => ({ ...f, logo: String(reader.result) })); setSaved(false); };
+    reader.onload = () => uploadLogo(String(reader.result));
     reader.onerror = () => setLogoError("Could not read that file.");
     reader.readAsDataURL(file);
   }
@@ -377,13 +397,14 @@ export function SchoolScreen({ state, save }) {
             </div>
             <div>
               <div className="flex items-center gap-3">
-                <button type="button" onClick={() => fileRef.current?.click()} className={ghost}>
-                  <Upload size={14} /> {form.logo ? "Change logo" : "Upload logo"}
+                <button type="button" disabled={logoBusy} onClick={() => fileRef.current?.click()}
+                  className={ghost}>
+                  <Upload size={14} /> {logoBusy ? "Saving…" : form.logo ? "Change logo" : "Upload logo"}
                 </button>
                 {form.logo && (
-                  <button type="button"
-                    onClick={() => { setForm((f) => ({ ...f, logo: "" })); setSaved(false); setLogoError(""); }}
-                    className="text-xs font-semibold text-slate-400 hover:text-red-500">
+                  <button type="button" disabled={logoBusy}
+                    onClick={() => uploadLogo("")}
+                    className="text-xs font-semibold text-slate-400 hover:text-red-500 disabled:opacity-50">
                     Remove
                   </button>
                 )}

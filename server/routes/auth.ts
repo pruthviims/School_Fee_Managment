@@ -29,7 +29,7 @@ function meResponse(
   user: { id: string; email: string; full_name: string },
   membership: { id: string; role: string; is_active: boolean } | null,
   school: { id: string; name: string; short_code: string; address: string;
-            logo_key: string; receipt_footer: string } | null,
+            logo_key: string; logo_data_url: string; receipt_footer: string } | null,
 ) {
   return {
     id: user.id,
@@ -37,7 +37,8 @@ function meResponse(
     full_name: user.full_name,
     school: school && {
       id: school.id, name: school.name, short_code: school.short_code,
-      address: school.address, logo_key: school.logo_key, receipt_footer: school.receipt_footer,
+      address: school.address, logo_key: school.logo_key,
+      logo_data_url: school.logo_data_url, receipt_footer: school.receipt_footer,
     },
     membership: membership && {
       id: membership.id,
@@ -72,7 +73,7 @@ authRouter.post("/login", async (req, res) => {
 
   const membershipResult = await pool.query(
     `SELECT m.id, m.role, m.is_active,
-            s.id AS school_id, s.name, s.short_code, s.address, s.logo_key, s.receipt_footer
+            s.id AS school_id, s.name, s.short_code, s.address, s.logo_key, s.logo_data_url, s.receipt_footer
      FROM memberships m JOIN schools s ON s.id = m.school_id
      WHERE m.user_id = $1 AND m.is_active = true AND s.is_active = true
      ORDER BY m.created_at ASC LIMIT 1`,
@@ -84,7 +85,8 @@ authRouter.post("/login", async (req, res) => {
   }
   const membership = { id: row.id, role: row.role, is_active: row.is_active };
   const school = { id: row.school_id, name: row.name, short_code: row.short_code,
-    address: row.address, logo_key: row.logo_key, receipt_footer: row.receipt_footer };
+    address: row.address, logo_key: row.logo_key, logo_data_url: row.logo_data_url,
+    receipt_footer: row.receipt_footer };
 
   const token = issueSessionToken(user.id);
   res.cookie(SESSION_COOKIE, token, cookieOptions);
@@ -107,12 +109,12 @@ authRouter.get("/schools/:shortCode", async (req, res) => {
   // a school. This exists for the login screen's live "does this School
   // ID match a real school" preview as the office types it in.
   const result = await pool.query(
-    `SELECT name, logo_key FROM schools WHERE short_code = $1 AND is_active = true`,
+    `SELECT name, logo_data_url FROM schools WHERE short_code = $1 AND is_active = true`,
     [String(req.params.shortCode).toLowerCase()],
   );
   const school = result.rows[0];
   if (!school) return res.status(404).json({ detail: "No school with that ID." });
-  res.json({ name: school.name, logo_key: school.logo_key });
+  res.json({ name: school.name, logo_data_url: school.logo_data_url });
 });
 
 const bootstrapSchema = z.object({

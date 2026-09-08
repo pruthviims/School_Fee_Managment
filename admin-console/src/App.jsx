@@ -152,7 +152,7 @@ function schoolFromSession(me) {
     name: me.school.name,
     address: me.school.address,
     code: me.school.short_code,
-    logo: "", // logo_key isn't a servable URL yet — no object storage wired up
+    logo: me.school.logo_data_url || "",
     adminName: me.full_name || me.email,
     adminEmail: me.email,
     role: me.membership?.role,
@@ -374,8 +374,10 @@ export default function App() {
       {/* ---------------- sidebar ---------------- */}
       <aside className="lg:w-[264px] shrink-0 bg-white border-b lg:border-b-0 lg:border-r border-slate-100 flex flex-col">
         <div className="px-6 pt-7 pb-5 text-center border-b border-slate-50">
-          <div className="w-[86px] h-[86px] mx-auto rounded-2xl bg-white border border-slate-100 shadow-[0_6px_18px_-10px_rgba(15,23,41,0.3)] grid place-items-center text-[34px] leading-none">
-            <span role="img" aria-hidden="true">🎓</span>
+          <div className="w-[86px] h-[86px] mx-auto rounded-2xl bg-white border border-slate-100 shadow-[0_6px_18px_-10px_rgba(15,23,41,0.3)] grid place-items-center text-[34px] leading-none overflow-hidden">
+            {state.school.logo
+              ? <img src={state.school.logo} alt="School logo" className="w-full h-full object-contain p-2" />
+              : <span role="img" aria-hidden="true">🎓</span>}
           </div>
           <p className="font-extrabold text-[15px] mt-4 leading-tight uppercase tracking-tight">
             {state.school.name}

@@ -397,7 +397,7 @@ describe("public school lookup", () => {
   it("returns display details for an exact, active short_code match", async () => {
     const res = await request(app).get("/api/auth/schools/acc-test");
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ name: school.name, logo_key: school.logo_key });
+    expect(res.body).toEqual({ name: school.name, logo_data_url: school.logo_data_url });
     expect(res.body.id).toBeUndefined(); // never leaks the id or anything beyond display fields
   });
 

@@ -10,6 +10,7 @@ import { billingRouter } from "./routes/billing.js";
 import { collectionRouter, webhookHandler } from "./routes/collection.js";
 import { importRouter } from "./routes/import.js";
 import { promotionRouter } from "./routes/promotion.js";
+import { schoolRouter } from "./routes/school.js";
 import { setupRouter } from "./routes/setup.js";
 import { staffRouter } from "./routes/staff.js";
 import { studentsRouter } from "./routes/students.js";
@@ -49,7 +50,12 @@ app.use(cookieParser());
 app.use(attachAuth);
 app.post("/api/collection/webhook/:gateway", express.raw({ type: "*/*" }), webhookHandler);
 
-app.use(express.json());
+// Default is 100kb — comfortably enough for every other route, but a
+// base64-encoded image can run to roughly 4/3 its original size before
+// JSON even wraps it, so the 500KB logo cap enforced in school.ts needs
+// real headroom above 100kb to ever reach that check at all rather than
+// being rejected by the body parser first.
+app.use(express.json({ limit: "2mb" }));
 
 // Login is the one endpoint worth a tighter, dedicated limit — it's the
 // obvious target for credential-stuffing attempts. Skipped in tests: a
@@ -71,6 +77,7 @@ app.use("/api/students", studentsRouter);
 app.use("/api/billing", billingRouter);
 app.use("/api/collection", collectionRouter);
 app.use("/api/promotion", promotionRouter);
+app.use("/api/school", schoolRouter);
 app.use("/api/import", importRouter);
 
 // Keep error details out of responses — logged server-side only, since a
@@ -79,6 +86,13 @@ app.use("/api/import", importRouter);
 app.use((err: unknown, _req: express.Request, res: express.Response,
          // eslint-disable-next-line @typescript-eslint/no-unused-vars
          _next: express.NextFunction) => {
+  // body-parser's own "payload too large" error, thrown before any
+  // route handler runs — surfaced as a real, specific response instead
+  // of falling into the generic 500 below, which would otherwise read
+  // as an unexplained server crash rather than "that request was too big".
+  if ((err as { type?: string }).type === "entity.too.large") {
+    return res.status(413).json({ detail: "That request is too large." });
+  }
   console.error(err);
   res.status(500).json({ detail: "Something went wrong." });
 });

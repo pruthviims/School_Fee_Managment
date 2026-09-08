@@ -95,7 +95,7 @@ export function Login({ onLogin, onSetupClick }) {
     <div className={shell}>
       <div className={cardCls}>
         <div className="flex flex-col items-center mb-8">
-          <Crest emoji="🎓" logo={null /* logo_key isn't a servable URL yet — no object storage wired up on the backend; falls back to the emoji until that exists */} />
+          <Crest emoji="🎓" logo={preview?.logo_data_url || null} />
           <h1 className="text-[28px] font-extrabold tracking-tight mt-5 text-center leading-tight">
             {preview ? preview.name : "School Portal"}
           </h1>

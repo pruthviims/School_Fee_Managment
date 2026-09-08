@@ -20,6 +20,7 @@ export interface RequestSchool {
   short_code: string;
   address: string;
   logo_key: string;
+  logo_data_url: string;
   receipt_footer: string;
   is_active: boolean;
 }
