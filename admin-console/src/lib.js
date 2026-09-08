@@ -2,22 +2,35 @@
 // mirror fees/services/importer.py; fee resolution mirrors billing.py.
 
 export const CLASSES = [
-  { name: "Pre-LKG", stage: "Pre-primary" },
-  { name: "LKG", stage: "Pre-primary" },
-  { name: "UKG", stage: "Pre-primary" },
+  { name: "Pre-LKG", stage: "Pre Primary" },
+  { name: "LKG", stage: "Pre Primary" },
+  { name: "UKG", stage: "Pre Primary" },
   { name: "I", stage: "Primary" },
   { name: "II", stage: "Primary" },
   { name: "III", stage: "Primary" },
   { name: "IV", stage: "Primary" },
   { name: "V", stage: "Primary" },
-  { name: "VI", stage: "Middle" },
-  { name: "VII", stage: "Middle" },
-  { name: "VIII", stage: "Middle" },
-  { name: "IX", stage: "Secondary" },
-  { name: "X", stage: "Secondary" },
-  { name: "1st PU", stage: "Pre-university" },
-  { name: "2nd PU", stage: "Pre-university" },
+  { name: "VI", stage: "Primary" },
+  { name: "VII", stage: "Primary" },
+  { name: "VIII", stage: "Higher Primary" },
+  { name: "IX", stage: "Higher Primary" },
+  { name: "X", stage: "Higher Primary" },
+  { name: "1st PU", stage: "College" },
+  { name: "2nd PU", stage: "College" },
 ];
+
+// The real class_levels rows from the backend carry the raw enum value
+// (pre_primary, primary, middle, secondary, puc) in their own `stage`
+// field — this maps that onto the same human labels used above, for
+// anywhere a real classLevels row is rendered instead of the CLASSES
+// constant.
+export const STAGE_LABELS = {
+  pre_primary: "Pre Primary",
+  primary: "Primary",
+  middle: "Higher Primary",
+  secondary: "Higher Primary",
+  puc: "College",
+};
 
 export const TERMS = [1, 2, 3];
 

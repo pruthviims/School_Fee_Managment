@@ -31,6 +31,7 @@ import {
   IMPORT_FIELDS,
   PAYMENT_MODES,
   SAMPLE_MESSY_CSV,
+  STAGE_LABELS,
   TEMPLATE_CSV,
   TERMS,
   TRANSPORT_ID,
@@ -622,7 +623,10 @@ function dueOnForTerm(termNo, year) {
 }
 
 export function FeeScreen({ state, save, classLevels, feeHeads, academicYears, refreshFeeHeads }) {
-  const [active, setActive] = useState(classLevels[10]?.name || classLevels[0]?.name || "");
+  // Pre-LKG is always ladder_order 1, so classLevels[0] — sorted by
+  // ladder_order from the backend — is always Pre-LKG, matching the
+  // requested default.
+  const [active, setActive] = useState(classLevels[0]?.name || "");
   const [rawLines, setRawLines] = useState([]);
   const [loading, setLoading] = useState(true);
   const [copyOpen, setCopyOpen] = useState(false);
@@ -815,7 +819,7 @@ export function FeeScreen({ state, save, classLevels, feeHeads, academicYears, r
           <div className="px-6 py-5 border-b border-slate-100">
             <h2 className="text-lg font-extrabold">{active}</h2>
             <p className="text-sm text-slate-500 mt-0.5">
-              {activeClass?.stage} ·{" "}
+              {STAGE_LABELS[activeClass?.stage] || activeClass?.stage} ·{" "}
               <b className="text-slate-700 tabular-nums">
                 {inr(rows.filter((r) => !r.oneTime).reduce((sum, r) => sum + r.terms.reduce((s, t) => s + t.amount, 0), 0))}
               </b> a year
@@ -1351,7 +1355,7 @@ export function NewAdmissionTab({ state, save, classLevels, academicYears, ensur
             <FilterSelect value={f.classLevelId} active={Boolean(f.classLevelId)} className="mt-2"
               onChange={(e) => setF({ ...f, classLevelId: e.target.value })}>
               <option value="">Choose a class</option>
-              {classLevels.map((c) => <option key={c.id} value={c.id}>{c.name} — {c.stage}</option>)}
+              {classLevels.map((c) => <option key={c.id} value={c.id}>{c.name} — {STAGE_LABELS[c.stage] || c.stage}</option>)}
             </FilterSelect>
           </div>
           <div>
@@ -1428,7 +1432,7 @@ export function NewAdmissionTab({ state, save, classLevels, academicYears, ensur
 /* ================================================================== */
 
 export function ImportScreen({ state, academicYears, classLevels }) {
-  const [classLevelId, setClassLevelId] = useState(classLevels[10]?.id || classLevels[0]?.id || "");
+  const [classLevelId, setClassLevelId] = useState(classLevels[0]?.id || "");
   return (
     <ClassImport state={state} academicYears={academicYears} classLevels={classLevels}
       classLevelId={classLevelId} setClassLevelId={setClassLevelId} />
@@ -1541,7 +1545,7 @@ function ClassImport({ state, academicYears, classLevels, classLevelId, setClass
         <div className="min-w-[240px]">
           <label className={eyebrow}>Importing into</label>
           <FilterSelect value={classLevelId} onChange={(e) => changeClass(e.target.value)} active className="mt-2">
-            {classLevels.map((c) => <option key={c.id} value={c.id}>{c.name} — {c.stage}</option>)}
+            {classLevels.map((c) => <option key={c.id} value={c.id}>{c.name} — {STAGE_LABELS[c.stage] || c.stage}</option>)}
           </FilterSelect>
         </div>
         <p className="text-xs text-slate-500 pb-2.5 max-w-md">

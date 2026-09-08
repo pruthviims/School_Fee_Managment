@@ -24,6 +24,12 @@ const writeGuard = requireCapability("manage_fee_structure");
 // own database connection, and 20 of them back to back was slow enough
 // on a cold deployment to look like the app had hung. Idempotent: safe
 // to call again, existing rows are left alone.
+// Requested grouping: Pre-LKG/LKG/UKG = Pre Primary, I through VII =
+// Primary (7 classes), VIII through X = Higher Primary (3 classes),
+// 1st/2nd PU = College. Reuses the existing stage enum values rather
+// than adding a new one — "middle" now covers VIII-X and is labelled
+// "Higher Primary" wherever it's shown (see STAGE_LABELS), and
+// "secondary" is simply unused rather than requiring a schema change.
 const DEFAULT_CLASS_LEVELS = [
   { name: "Pre-LKG", ladder_order: 1, stage: "pre_primary" },
   { name: "LKG", ladder_order: 2, stage: "pre_primary" },
@@ -33,11 +39,11 @@ const DEFAULT_CLASS_LEVELS = [
   { name: "III", ladder_order: 6, stage: "primary" },
   { name: "IV", ladder_order: 7, stage: "primary" },
   { name: "V", ladder_order: 8, stage: "primary" },
-  { name: "VI", ladder_order: 9, stage: "middle" },
-  { name: "VII", ladder_order: 10, stage: "middle" },
+  { name: "VI", ladder_order: 9, stage: "primary" },
+  { name: "VII", ladder_order: 10, stage: "primary" },
   { name: "VIII", ladder_order: 11, stage: "middle" },
-  { name: "IX", ladder_order: 12, stage: "secondary" },
-  { name: "X", ladder_order: 13, stage: "secondary" },
+  { name: "IX", ladder_order: 12, stage: "middle" },
+  { name: "X", ladder_order: 13, stage: "middle" },
   { name: "1st PU", ladder_order: 14, stage: "puc", requires_stream: true, requires_explicit_optin: true },
   { name: "2nd PU", ladder_order: 15, stage: "puc", requires_stream: true, is_terminal: true },
 ];

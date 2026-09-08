@@ -231,6 +231,14 @@ describe("setup routes", () => {
     expect(res.body.classLevels[0].name).toBe("Pre-LKG");
     expect(res.body.classLevels[14].name).toBe("2nd PU");
     expect(res.body.classLevels[13].requires_explicit_optin).toBe(true); // 1st PU
+
+    // Pre-LKG/LKG/UKG = pre_primary, I-VII = primary (7), VIII-X = middle
+    // (3, shown to the office as "Higher Primary"), 1st/2nd PU = puc.
+    const byName = Object.fromEntries(res.body.classLevels.map((c: any) => [c.name, c.stage]));
+    for (const n of ["Pre-LKG", "LKG", "UKG"]) expect(byName[n]).toBe("pre_primary");
+    for (const n of ["I", "II", "III", "IV", "V", "VI", "VII"]) expect(byName[n]).toBe("primary");
+    for (const n of ["VIII", "IX", "X"]) expect(byName[n]).toBe("middle");
+    for (const n of ["1st PU", "2nd PU"]) expect(byName[n]).toBe("puc");
   });
 
   it("seed-defaults is idempotent — calling it twice never duplicates rows", async () => {
