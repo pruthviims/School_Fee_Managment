@@ -451,6 +451,23 @@ describe("concessions and enrollment editing", () => {
     expect(ledger.body.balance).toBe(3000000);
   });
 
+  it("records who in management approved a concession, separate from who recorded it", async () => {
+    const cookie = await loginAs("owner@http.test");
+    const { enrollment } = await setUpAdmittedStudent(cookie);
+
+    const concession = await request(app)
+      .post(`/api/students/enrollments/${enrollment.id}/concessions`).set("Cookie", cookie)
+      .send({ amount: 500000, reason: "hardship", approver_name: "R. Krishnamurthy (Principal)" });
+    expect(concession.status).toBe(201);
+    expect(concession.body.approver_name).toBe("R. Krishnamurthy (Principal)");
+
+    const list = await request(app).get(`/api/students/enrollments/${enrollment.id}/concessions`)
+      .set("Cookie", cookie);
+    expect(list.body[0].approver_name).toBe("R. Krishnamurthy (Principal)");
+    // Genuinely separate from who was signed in and recorded it.
+    expect(list.body[0].recorded_by_name).not.toBe("R. Krishnamurthy (Principal)");
+  });
+
   it("reversing a concession restores the balance without deleting the original record", async () => {
     const cookie = await loginAs("owner@http.test");
     const { enrollment } = await setUpAdmittedStudent(cookie);

@@ -539,8 +539,7 @@ export default function App() {
         {step === "roll" && <ConcessionScreen academicYears={academicYears} state={state} />}
         {step === "newadm" && (
           <NewAdmissionTab state={state} save={setState}
-            classLevels={classLevels} academicYears={academicYears}
-            ensureUnassignedSection={ensureUnassignedSection} />
+            classLevels={classLevels} academicYears={academicYears} />
         )}
         {step === "bulkimport" && (
           <ImportScreen state={state} academicYears={academicYears} classLevels={classLevels} />

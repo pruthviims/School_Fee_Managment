@@ -173,9 +173,10 @@ function reasonLabelForConcession(row) {
  */
 export function ConcessionEditor({ enrollmentId, grossPaise, transportPaise, onChanged, compact = false }) {
   const [active, setActive] = useState(null);
-  const [type, setType] = useState("percent");
+  const [type, setType] = useState("amount");
   const [value, setValue] = useState("");
   const [reasonLabel, setReasonLabel] = useState("");
+  const [approverName, setApproverName] = useState("");
   const [includeTransport, setIncludeTransport] = useState(false);
   const [busy, setBusy] = useState(false);
 
@@ -189,15 +190,16 @@ export function ConcessionEditor({ enrollmentId, grossPaise, transportPaise, onC
       setType("amount");
       setValue(String(Math.round(current.amount / 100)));
       setReasonLabel(reasonLabelForConcession(current));
+      setApproverName(current.approver_name || "");
     } else {
-      setType("percent"); setValue(""); setReasonLabel(""); setIncludeTransport(false);
+      setType("amount"); setValue(""); setReasonLabel(""); setApproverName(""); setIncludeTransport(false);
     }
   }
   useEffect(() => { refetch(); }, [enrollmentId]); // eslint-disable-line
 
   const appliedPaise = active ? active.amount : 0;
 
-  async function commit(nextValue, nextReasonLabel, nextIncludeTransport, nextType) {
+  async function commit(nextValue, nextReasonLabel, nextIncludeTransport, nextType, nextApproverName) {
     const numeric = Math.max(0, +nextValue || 0);
     const base = nextIncludeTransport ? grossPaise : grossPaise - transportPaise;
     const amountPaise = nextType === "percent"
@@ -212,6 +214,7 @@ export function ConcessionEditor({ enrollmentId, grossPaise, transportPaise, onC
           amount: amountPaise,
           reason: REASON_TO_ENUM[nextReasonLabel] || "other",
           note: nextReasonLabel,
+          approver_name: nextApproverName.trim(),
         });
       }
       await refetch();
@@ -249,22 +252,29 @@ export function ConcessionEditor({ enrollmentId, grossPaise, transportPaise, onC
             if (type !== "amount") v = Math.min(100, v);
             setValue(v || "");
           }}
-          onBlur={(e) => commit(e.target.value, reasonLabel, includeTransport, type)} />
+          onBlur={(e) => commit(e.target.value, reasonLabel, includeTransport, type, approverName)} />
         <select
           className={`bg-white border rounded-lg outline-none focus:border-brand-500 text-sm font-medium flex-1 min-w-0 ${
             compact ? "border-slate-200 px-2 py-1.5" : "border-2 border-slate-200 px-3 py-2.5"}`}
           value={reasonLabel} disabled={!(+value > 0) || busy}
-          onChange={(e) => { setReasonLabel(e.target.value); commit(value, e.target.value, includeTransport, type); }}>
+          onChange={(e) => { setReasonLabel(e.target.value); commit(value, e.target.value, includeTransport, type, approverName); }}>
           <option value="">{compact ? "Reason —" : "Reason (optional)"}</option>
           {CONCESSION_REASONS.map((r) => <option key={r}>{r}</option>)}
         </select>
       </div>
+      {+value > 0 && (
+        <input value={approverName} placeholder="Approved by (management name)" disabled={busy}
+          className={`w-full border rounded-lg outline-none focus:border-brand-500 text-xs font-medium mt-1.5 ${
+            compact ? "border-slate-200 px-2 py-1.5" : "border-2 border-slate-200 px-3 py-2"}`}
+          onChange={(e) => setApproverName(e.target.value)}
+          onBlur={(e) => commit(value, reasonLabel, includeTransport, type, e.target.value)} />
+      )}
       {+value > 0 && transportPaise > 0 && (
         <label className="flex items-center gap-1.5 mt-1.5 text-[11px] font-semibold text-slate-400">
           <input type="checkbox" checked={includeTransport} disabled={busy}
             onChange={(e) => {
               setIncludeTransport(e.target.checked);
-              commit(value, reasonLabel, e.target.checked, type);
+              commit(value, reasonLabel, e.target.checked, type, approverName);
             }} />
           Also discount transport
         </label>
@@ -1255,10 +1265,11 @@ export function PromoteTab({ state, save, academicYears, classLevels, ensureUnas
   );
 }
 
-export function NewAdmissionTab({ state, save, classLevels, academicYears, ensureUnassignedSection }) {
-  const blank = { name: "", classLevelId: "", dob: "",
+export function NewAdmissionTab({ state, save, classLevels, academicYears }) {
+  const blank = { name: "", classLevelId: "", sectionId: "", dob: "",
     guardianName: "", phone: "", email: "", stopId: "" };
   const [f, setF] = useState(blank);
+  const [sections, setSections] = useState([]);
   const [error, setError] = useState("");
   const [done, setDone] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -1272,6 +1283,40 @@ export function NewAdmissionTab({ state, save, classLevels, academicYears, ensur
 
   const year = academicYears.find((y) => y.name === state.year);
   const activeClass = classLevels.find((c) => c.id === f.classLevelId);
+
+  // Real sections for this class/year — the school specifically wants
+  // section captured at admission time now, rather than the earlier
+  // deferred-to-Fee-Collection design. Refetched whenever the class
+  // changes; the section field resets alongside it, since a section
+  // that belonged to the previous class choice would be meaningless.
+  async function refreshSections(classLevelId, yearId) {
+    if (!classLevelId || !yearId) { setSections([]); return; }
+    try {
+      setSections(await api.get(`/setup/sections?academic_year_id=${yearId}&class_level_id=${classLevelId}`));
+    } catch {
+      setSections([]);
+    }
+  }
+  useEffect(() => {
+    refreshSections(f.classLevelId, year?.id);
+    setF((prev) => ({ ...prev, sectionId: "" }));
+  }, [f.classLevelId, year?.id]); // eslint-disable-line
+
+  async function addSection() {
+    if (!f.classLevelId || !year) return;
+    const name = window.prompt("New section name (e.g. \"A\", \"B\", \"C\"):");
+    if (!name || !name.trim()) return;
+    try {
+      const created = await api.post("/setup/sections", {
+        academic_year_id: year.id, class_level_id: f.classLevelId,
+        name: name.trim().toUpperCase().slice(0, 10),
+      });
+      setSections((prev) => [...prev, created]);
+      setF((prev) => ({ ...prev, sectionId: created.id }));
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Could not add that section.");
+    }
+  }
 
   async function refreshAdmissionNoPreview(classLevelId, yearId, className) {
     if (!classLevelId || !yearId) { setPreviewAdmissionNo(""); return; }
@@ -1300,12 +1345,12 @@ export function NewAdmissionTab({ state, save, classLevels, academicYears, ensur
     setError(""); setDone(null);
     const name = f.name.trim();
     if (!f.classLevelId) return setError("Choose a class.");
+    if (!f.sectionId) return setError("Choose a section.");
     if (!name || name.length < 2) return setError("Enter the student's full name.");
     if (!year) return setError("No academic year is set up yet.");
 
     setBusy(true);
     try {
-      const sectionId = await ensureUnassignedSection(f.classLevelId, year.id);
       const result = await api.post("/students/admit", {
         admission_no: previewAdmissionNo,
         full_name: name,
@@ -1315,7 +1360,7 @@ export function NewAdmissionTab({ state, save, classLevels, academicYears, ensur
         guardian_email: f.email.trim(),
         academic_year_id: year.id,
         class_level_id: f.classLevelId,
-        section_id: sectionId,
+        section_id: f.sectionId,
         admission_type: "new",
       });
       setDone({ name: result.student.full_name, admissionNo: result.student.admission_no });
@@ -1324,9 +1369,11 @@ export function NewAdmissionTab({ state, save, classLevels, academicYears, ensur
           admissionNo: result.student.admission_no, className: activeClass.name },
         ...prev,
       ]);
-      // Class is sticky for rapid back-to-back entry from the same
-      // admission form; everything specific to one child is cleared.
-      setF({ ...blank, classLevelId: f.classLevelId });
+      // Class and section are sticky for rapid back-to-back entry from
+      // the same admission form (most schools admit a run of children
+      // into the same class/section at once); everything specific to
+      // one child is cleared.
+      setF({ ...blank, classLevelId: f.classLevelId, sectionId: f.sectionId });
       // The class stays selected, so the effect above won't re-run on
       // its own (same dependencies) — refresh explicitly, or the next
       // preview would still show the number just used.
@@ -1379,6 +1426,19 @@ export function NewAdmissionTab({ state, save, classLevels, academicYears, ensur
               onChange={(e) => setF({ ...f, classLevelId: e.target.value })}>
               <option value="">Choose a class</option>
               {classLevels.map((c) => <option key={c.id} value={c.id}>{c.name} — {STAGE_LABELS[c.stage] || c.stage}</option>)}
+            </FilterSelect>
+          </div>
+          <div>
+            <label className={eyebrow}>Section<span className="text-red-500"> *</span></label>
+            <FilterSelect value={f.sectionId} active={Boolean(f.sectionId)} disabled={!f.classLevelId}
+              className="mt-2"
+              onChange={(e) => {
+                if (e.target.value === "__new__") return addSection();
+                setF({ ...f, sectionId: e.target.value });
+              }}>
+              <option value="">{f.classLevelId ? "Choose a section" : "Choose a class first"}</option>
+              {sections.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+              {f.classLevelId && <option value="__new__">+ Add new section</option>}
             </FilterSelect>
           </div>
           <div>
@@ -1810,12 +1870,15 @@ export function ConcessionScreen({ academicYears, state }) {
           <h2 className="text-lg font-extrabold">Student Fee Records</h2>
         </div>
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[900px]">
+          <table className="w-full min-w-[1240px]">
             <thead className="bg-slate-50/70">
               <tr>
                 <th className={`${th} min-w-[190px]`}>Student info</th>
                 <th className={`${th} min-w-[70px]`}>Class</th>
                 <th className={`${th} min-w-[90px]`}>Section</th>
+                <th className={`${th} min-w-[160px]`}>Parent / Guardian</th>
+                <th className={`${th} min-w-[110px]`}>Phone</th>
+                <th className={`${th} min-w-[200px]`}>Address</th>
                 <th className={`${th} text-right min-w-[90px]`}>Gross fee</th>
                 <th className={`${th} text-right min-w-[90px]`}>Paid</th>
                 <th className={`${th} text-right min-w-[100px]`}>Balance</th>
@@ -1843,6 +1906,15 @@ export function ConcessionScreen({ academicYears, state }) {
                       {e.section_name === "Unassigned"
                         ? <span className="text-amber-600 font-bold text-xs">Unassigned</span>
                         : e.section_name}
+                    </td>
+                    <td className="px-5 py-3">
+                      {e.guardian_name || <span className="text-slate-300">—</span>}
+                    </td>
+                    <td className="px-5 py-3 tabular-nums">
+                      {e.guardian_phone || <span className="text-slate-300">—</span>}
+                    </td>
+                    <td className="px-5 py-3 text-slate-500 max-w-[220px] truncate" title={e.address || ""}>
+                      {e.address || <span className="text-slate-300">—</span>}
                     </td>
                     <td className="px-5 py-3 text-right tabular-nums font-semibold">
                       {inr(e.ledger.charged / 100)}

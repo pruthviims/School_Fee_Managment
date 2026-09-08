@@ -204,12 +204,16 @@ const sectionSchema = z.object({
 });
 
 setupRouter.get("/sections", async (req, res) => {
-  const { academic_year_id } = req.query;
+  const { academic_year_id, class_level_id } = req.query;
   const params: unknown[] = [req.school!.id];
   let where = "s.school_id = $1";
   if (academic_year_id) {
     params.push(academic_year_id);
     where += ` AND s.academic_year_id = $${params.length}`;
+  }
+  if (class_level_id) {
+    params.push(class_level_id);
+    where += ` AND s.class_level_id = $${params.length}`;
   }
   const result = await pool.query(
     `SELECT s.*, cl.name AS class_name, cl.ladder_order FROM sections s

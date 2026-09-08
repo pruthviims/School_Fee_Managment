@@ -157,11 +157,12 @@ const concessionSchema = z.object({
   note: z.string().max(500).optional().default(""),
   fee_head_id: z.string().uuid().nullable().optional().default(null),
   is_government_reimbursed: z.boolean().optional().default(false),
+  approver_name: z.string().max(150).optional().default(""),
 });
 
 studentsRouter.get("/enrollments/:id/concessions", async (req, res) => {
   const result = await pool.query(
-    `SELECT c.*, u.full_name AS approved_by_name, u.email AS approved_by_email
+    `SELECT c.*, u.full_name AS recorded_by_name, u.email AS recorded_by_email
      FROM concessions c LEFT JOIN users u ON u.id = c.approved_by
      WHERE c.enrollment_id = $1 AND c.school_id = $2
      ORDER BY c.created_at DESC`,
@@ -186,10 +187,10 @@ studentsRouter.post(
     const result = await pool.query(
       `INSERT INTO concessions
          (school_id, enrollment_id, fee_head_id, reason, note, amount,
-          is_government_reimbursed, approved_by, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8) RETURNING *`,
+          is_government_reimbursed, approver_name, approved_by, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9) RETURNING *`,
       [req.school!.id, req.params.id, d.fee_head_id, d.reason, d.note, d.amount,
-       d.is_government_reimbursed, req.user!.id],
+       d.is_government_reimbursed, d.approver_name, req.user!.id],
     );
     res.status(201).json(result.rows[0]);
   },
@@ -251,7 +252,7 @@ studentsRouter.get("/enrollments", async (req, res) => {
 
   const result = await pool.query(
     `SELECT e.id, e.admission_type, e.outcome, e.roll_no,
-            s.admission_no, s.full_name,
+            s.admission_no, s.full_name, s.guardian_name, s.guardian_phone, s.address,
             cl.name AS class_name, sec.name AS section_name
      FROM enrollments e
      JOIN students s ON s.id = e.student_id
