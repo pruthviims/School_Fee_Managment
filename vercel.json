@@ -3,6 +3,7 @@
   "buildCommand": "npm --prefix admin-console run build",
   "outputDirectory": "admin-console/dist",
   "rewrites": [
-    { "source": "/api/(.*)", "destination": "/api" }
+    { "source": "/api/(.*)", "destination": "/api" },
+    { "source": "/(.*)", "destination": "/index.html" }
   ]
 }

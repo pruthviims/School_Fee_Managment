@@ -12,7 +12,7 @@ import {
   UserPlus,
   Users,
 } from "lucide-react";
-import { Login, Setup } from "./Auth";
+import { Login, ResetPasswordScreen, Setup } from "./Auth";
 import { api } from "./api";
 import {
   ConcessionScreen,
@@ -334,6 +334,15 @@ export default function App() {
   async function handleLogout() {
     try { await api.post("/auth/logout", {}); } catch { /* best-effort */ }
     setSignedIn(false);
+  }
+
+  // Checked before anything else, including the session-restore loading
+  // state — resetting a password is exactly what someone does when they
+  // can't get past that check at all, so it can't be gated behind it.
+  if (window.location.pathname === "/reset-password") {
+    return (
+      <ResetPasswordScreen onDone={() => { window.location.href = "/"; }} />
+    );
   }
 
   if (checkingSession) {

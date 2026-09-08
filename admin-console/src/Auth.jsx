@@ -45,6 +45,7 @@ function Crest({ emoji, logo }) {
 /* ------------------------------------------------------------------ */
 
 export function Login({ onLogin, onSetupClick }) {
+  const [mode, setMode] = useState("login"); // "login" | "forgot"
   const [schoolId, setSchoolId] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -86,6 +87,10 @@ export function Login({ onLogin, onSetupClick }) {
     }
   }
 
+  if (mode === "forgot") {
+    return <ForgotPasswordForm onBack={() => setMode("login")} />;
+  }
+
   return (
     <div className={shell}>
       <div className={cardCls}>
@@ -122,7 +127,7 @@ export function Login({ onLogin, onSetupClick }) {
             <div className="flex items-baseline justify-between">
               <label className={fieldLabel}>Password</label>
               <button type="button" className="eyebrow text-brand-600 hover:text-brand-700"
-                onClick={() => setError("Use \"Platform Setup\" if you've never signed in before, or ask whoever manages this school's account to reset it for you.")}>
+                onClick={() => setMode("forgot")}>
                 Forgot?
               </button>
             </div>
@@ -149,6 +154,155 @@ export function Login({ onLogin, onSetupClick }) {
             <ShieldCheck size={13} /> AES-256 cloud encryption active
           </p>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+
+function ForgotPasswordForm({ onBack }) {
+  const [email, setEmail] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
+  const [error, setError] = useState(null);
+
+  async function submit(e) {
+    e.preventDefault();
+    setError(null);
+    setBusy(true);
+    try {
+      await api.post("/auth/password-reset", { email: email.trim() });
+      setDone(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not send that link.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className={shell}>
+      <div className={cardCls}>
+        <button onClick={onBack}
+          className="flex items-center gap-1.5 eyebrow text-slate-400 hover:text-slate-600 mb-5">
+          <ArrowLeft size={13} /> Back to sign in
+        </button>
+
+        <div className="flex flex-col items-center mb-8">
+          <Crest emoji="🔑" />
+          <h1 className="text-[26px] font-extrabold tracking-tight mt-5 text-center">Reset your password</h1>
+          <p className="text-sm text-slate-500 mt-1 text-center">
+            Enter the email your account uses. If it has an account here, we'll send a reset link.
+          </p>
+        </div>
+
+        {error && <ErrorNote>{error}</ErrorNote>}
+
+        {done ? (
+          <div className="text-sm font-semibold bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-xl px-4 py-4 text-center">
+            If that email has an account, a reset link is on its way. It works for 24 hours.
+          </div>
+        ) : (
+          <form onSubmit={submit}>
+            <div className="mb-5">
+              <label className={fieldLabel}>Email</label>
+              <div className={fieldWrap}>
+                <Mail className={fieldIcon} size={17} />
+                <input required type="email" value={email} onChange={(e) => setEmail(e.target.value)}
+                  placeholder="you@school.edu.in" className={fieldInput} />
+              </div>
+            </div>
+            <button type="submit" disabled={busy} className={bigButton}>
+              {busy ? <Loader2 className="animate-spin" size={17} /> : null}
+              Send reset link
+            </button>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+
+/**
+ * Rendered when the URL is /reset-password?uid=...&token=..., the link
+ * a reset email actually points at — see makeAndSendCredentialEmail in
+ * server/routes/auth.ts. App.jsx checks for this path before anything
+ * else, including the signed-in-session check, since resetting a
+ * password is exactly the thing someone does when they can't sign in.
+ */
+export function ResetPasswordScreen({ onDone }) {
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [done, setDone] = useState(false);
+
+  async function submit(e) {
+    e.preventDefault();
+    setError(null);
+    if (password.length < 12) return setError("Password must be at least 12 characters.");
+    if (password !== confirm) return setError("The two passwords do not match.");
+
+    const params = new URLSearchParams(window.location.search);
+    setBusy(true);
+    try {
+      await api.post("/auth/password-reset/confirm", {
+        uid: params.get("uid"), token: params.get("token"), new_password: password,
+      });
+      setDone(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not reset your password.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className={shell}>
+      <div className={cardCls}>
+        <div className="flex flex-col items-center mb-8">
+          <Crest emoji="🔒" />
+          <h1 className="text-[26px] font-extrabold tracking-tight mt-5 text-center">Set a new password</h1>
+        </div>
+
+        {error && <ErrorNote>{error}</ErrorNote>}
+
+        {done ? (
+          <div className="text-center">
+            <div className="text-sm font-semibold bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-xl px-4 py-4 mb-6">
+              Password updated. You can sign in now.
+            </div>
+            <button onClick={onDone} className={bigButton}>Go to sign in</button>
+          </div>
+        ) : (
+          <form onSubmit={submit}>
+            <div className="mb-4">
+              <label className={fieldLabel}>New password</label>
+              <div className={fieldWrap}>
+                <Lock className={fieldIcon} size={17} />
+                <input required type="password" value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="At least 12 characters" className={fieldInput} />
+              </div>
+            </div>
+            <div>
+              <label className={fieldLabel}>Confirm password</label>
+              <div className={fieldWrap}>
+                <Lock className={fieldIcon} size={17} />
+                <input required type="password" value={confirm}
+                  onChange={(e) => setConfirm(e.target.value)}
+                  placeholder="••••••••" className={fieldInput} />
+              </div>
+            </div>
+            <button type="submit" disabled={busy} className={bigButton}>
+              {busy ? <Loader2 className="animate-spin" size={17} /> : null}
+              Set new password
+            </button>
+          </form>
+        )}
       </div>
     </div>
   );
