@@ -313,7 +313,7 @@ export function ResetPasswordScreen({ onDone }) {
 export function Setup({ onDone, onBack, canGoBack }) {
   const [f, setF] = useState({
     name: "", code: "", address: "", adminName: "",
-    email: "", password: "", confirm: "",
+    email: "", password: "", confirm: "", setupKey: "",
   });
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -326,6 +326,7 @@ export function Setup({ onDone, onBack, canGoBack }) {
       return setError("School ID needs at least 2 characters: lowercase letters, numbers, or hyphens.");
     if (f.password.length < 12) return setError("Password must be at least 12 characters.");
     if (f.password !== f.confirm) return setError("The two passwords do not match.");
+    if (!f.setupKey.trim()) return setError("Enter the setup key.");
 
     setBusy(true);
     try {
@@ -333,6 +334,7 @@ export function Setup({ onDone, onBack, canGoBack }) {
         school_name: f.name.trim(), short_code: f.code.trim().toLowerCase(),
         address: f.address.trim(), owner_full_name: f.adminName.trim(),
         owner_email: f.email.trim(), owner_password: f.password,
+        setup_key: f.setupKey.trim(),
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not create the school.");
@@ -378,6 +380,20 @@ export function Setup({ onDone, onBack, canGoBack }) {
           {row("Admin Mail ID", "email", Mail, { required: true, type: "email", placeholder: "principal@school.edu.in" })}
           {row("Password", "password", Lock, { required: true, type: "password", placeholder: "••••••••" })}
           {row("Confirm Password", "confirm", Lock, { required: true, type: "password", placeholder: "••••••••" })}
+
+          <div className="mb-1">
+            <label className={fieldLabel}>Setup Key</label>
+            <div className={fieldWrap}>
+              <ShieldCheck className={fieldIcon} size={17} />
+              <input required type="password" value={f.setupKey} onChange={set("setupKey")}
+                placeholder="Provided by whoever manages this deployment" className={fieldInput} />
+            </div>
+            <p className="text-[11px] text-slate-400 mt-2 leading-relaxed">
+              Checked against the server's own ADMIN_SETUP_TOKEN — never reaches this
+              screen from anywhere but you typing it in. Ask whoever set up this
+              deployment for it.
+            </p>
+          </div>
 
           <button type="submit" disabled={busy} className={bigButton}>
             {busy ? <Loader2 className="animate-spin" size={17} /> : null}

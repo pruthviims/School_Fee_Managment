@@ -288,6 +288,7 @@ describe("bootstrap-school", () => {
       owner_full_name: "R. Krishnamurthy",
       owner_email: "admin@vidyamandir.test",
       owner_password: "a-genuinely-strong-password-1",
+      setup_key: process.env.ADMIN_SETUP_TOKEN,
     });
     expect(res.status).toBe(201);
     expect(res.body.school.short_code).toBe("vidya-mandir");
@@ -304,12 +305,12 @@ describe("bootstrap-school", () => {
     await request(app).post("/api/auth/bootstrap-school").send({
       school_name: "First School", short_code: "dup-code",
       owner_full_name: "Owner One", owner_email: "one@dup.test",
-      owner_password: "a-genuinely-strong-password-1",
+      owner_password: "a-genuinely-strong-password-1", setup_key: process.env.ADMIN_SETUP_TOKEN,
     });
     const second = await request(app).post("/api/auth/bootstrap-school").send({
       school_name: "Second School", short_code: "dup-code",
       owner_full_name: "Owner Two", owner_email: "two@dup.test",
-      owner_password: "a-genuinely-strong-password-1",
+      owner_password: "a-genuinely-strong-password-1", setup_key: process.env.ADMIN_SETUP_TOKEN,
     });
     expect(second.status).toBe(409);
 
@@ -321,12 +322,12 @@ describe("bootstrap-school", () => {
     await request(app).post("/api/auth/bootstrap-school").send({
       school_name: "First School", short_code: "first-school",
       owner_full_name: "Owner", owner_email: "shared@dup.test",
-      owner_password: "a-genuinely-strong-password-1",
+      owner_password: "a-genuinely-strong-password-1", setup_key: process.env.ADMIN_SETUP_TOKEN,
     });
     const second = await request(app).post("/api/auth/bootstrap-school").send({
       school_name: "Second School", short_code: "second-school",
       owner_full_name: "Owner", owner_email: "shared@dup.test",
-      owner_password: "a-genuinely-strong-password-1",
+      owner_password: "a-genuinely-strong-password-1", setup_key: process.env.ADMIN_SETUP_TOKEN,
     });
     expect(second.status).toBe(409);
 
@@ -338,6 +339,7 @@ describe("bootstrap-school", () => {
     const res = await request(app).post("/api/auth/bootstrap-school").send({
       school_name: "Weak Pw School", short_code: "weak-pw-school",
       owner_full_name: "Owner", owner_email: "weak@pw.test", owner_password: "12345",
+      setup_key: process.env.ADMIN_SETUP_TOKEN,
     });
     expect(res.status).toBe(400);
   });
@@ -346,9 +348,48 @@ describe("bootstrap-school", () => {
     const res = await request(app).post("/api/auth/bootstrap-school").send({
       school_name: "Bad Code School", short_code: "Bad Code!",
       owner_full_name: "Owner", owner_email: "bad@code.test",
-      owner_password: "a-genuinely-strong-password-1",
+      owner_password: "a-genuinely-strong-password-1", setup_key: process.env.ADMIN_SETUP_TOKEN,
     });
     expect(res.status).toBe(400);
+  });
+
+  it("refuses a request with the wrong setup key, and creates nothing", async () => {
+    const res = await request(app).post("/api/auth/bootstrap-school").send({
+      school_name: "Sneaky School", short_code: "sneaky-school",
+      owner_full_name: "Owner", owner_email: "sneaky@wrong-key.test",
+      owner_password: "a-genuinely-strong-password-1", setup_key: "not-the-real-key",
+    });
+    expect(res.status).toBe(403);
+
+    const rows = await pool.query(`SELECT 1 FROM schools WHERE short_code = 'sneaky-school'`);
+    expect(rows.rows).toHaveLength(0);
+  });
+
+  it("refuses a request with no setup key at all", async () => {
+    const res = await request(app).post("/api/auth/bootstrap-school").send({
+      school_name: "No Key School", short_code: "no-key-school",
+      owner_full_name: "Owner", owner_email: "nokey@wrong-key.test",
+      owner_password: "a-genuinely-strong-password-1",
+    });
+    expect(res.status).toBe(400); // zod: setup_key itself is required
+  });
+
+  it("fails closed — refuses every request when ADMIN_SETUP_TOKEN isn't configured at all", async () => {
+    const original = process.env.ADMIN_SETUP_TOKEN;
+    delete process.env.ADMIN_SETUP_TOKEN;
+    try {
+      const res = await request(app).post("/api/auth/bootstrap-school").send({
+        school_name: "Unconfigured Deployment School", short_code: "unconfigured-school",
+        owner_full_name: "Owner", owner_email: "owner@unconfigured.test",
+        owner_password: "a-genuinely-strong-password-1", setup_key: "anything-at-all",
+      });
+      expect(res.status).toBe(503);
+
+      const rows = await pool.query(`SELECT 1 FROM schools WHERE short_code = 'unconfigured-school'`);
+      expect(rows.rows).toHaveLength(0);
+    } finally {
+      process.env.ADMIN_SETUP_TOKEN = original; // restore for every later test
+    }
   });
 });
 

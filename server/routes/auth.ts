@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { Router } from "express";
 import { z } from "zod";
 import { pool } from "../db/index.js";
@@ -122,7 +123,24 @@ const bootstrapSchema = z.object({
   owner_full_name: z.string().min(1).max(150),
   owner_email: z.string().email(),
   owner_password: z.string().min(12, "Use at least 12 characters."),
+  setup_key: z.string().min(1, "Enter the setup key."),
 });
+
+// Constant-time comparison, avoiding the length check itself leaking
+// timing information about how close a guess was character-by-character
+// — crypto.timingSafeEqual requires equal-length buffers, so unequal
+// lengths are padded to match before comparing rather than short-
+// circuited, which would otherwise leak the correct key's length.
+function safeEqual(a: string, b: string): boolean {
+  const aBuf = Buffer.from(a);
+  const bBuf = Buffer.from(b);
+  const len = Math.max(aBuf.length, bBuf.length, 1);
+  const aPadded = Buffer.alloc(len);
+  const bPadded = Buffer.alloc(len);
+  aBuf.copy(aPadded);
+  bBuf.copy(bPadded);
+  return crypto.timingSafeEqual(aPadded, bPadded) && aBuf.length === bBuf.length;
+}
 
 /**
  * Self-serve: create a brand-new school and its first (owner) user in one
@@ -135,6 +153,20 @@ authRouter.post("/bootstrap-school", async (req, res) => {
   const parsed = bootstrapSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ detail: parsed.error.issues[0]?.message });
   const d = parsed.data;
+
+  // Public, unauthenticated door — without this, anyone who finds the
+  // URL could create unlimited schools on this deployment. Fails closed:
+  // an operator who forgets to set ADMIN_SETUP_TOKEN gets setup refused
+  // outright, not a silently-open endpoint.
+  const expectedKey = process.env.ADMIN_SETUP_TOKEN;
+  if (!expectedKey) {
+    return res.status(503).json({
+      detail: "School setup isn't enabled on this deployment yet. Ask whoever manages it to set ADMIN_SETUP_TOKEN.",
+    });
+  }
+  if (!safeEqual(d.setup_key, expectedKey)) {
+    return res.status(403).json({ detail: "That setup key is incorrect." });
+  }
 
   const client = await pool.connect();
   try {
