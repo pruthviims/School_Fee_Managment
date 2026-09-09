@@ -6,6 +6,7 @@ import {
   Bus,
   Check,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   Download,
   FileSpreadsheet,
@@ -14,6 +15,7 @@ import {
   Image as ImageIcon,
   IndianRupee,
   Mail,
+  MapPin,
   Percent,
   Plus,
   Search,
@@ -723,8 +725,10 @@ function ChangePasswordPanel() {
 
 export function TransportScreen({ state, academicYears }) {
   const [routes, setRoutes] = useState([]);
-  const [openId, setOpenId] = useState(null);
+  const [editingRouteId, setEditingRouteId] = useState(null); // route DETAILS panel — never shows stops
+  const [stopsRouteId, setStopsRouteId] = useState(null); // drilled into managing ONE route's stops
   const [stopsByRoute, setStopsByRoute] = useState({}); // routeId -> stops[]
+  const [expandedStopIds, setExpandedStopIds] = useState(() => new Set()); // which stops are open for editing
   const [fares, setFares] = useState([]); // every fare for the current year
   const [riders, setRiders] = useState([]); // [{stop_id, riders}]
   const [loading, setLoading] = useState(true);
@@ -755,12 +759,7 @@ export function TransportScreen({ state, academicYears }) {
   async function fetchStopsFor(routeId) {
     const stops = await api.get(`/transport/routes/${routeId}/stops`);
     setStopsByRoute((prev) => ({ ...prev, [routeId]: stops }));
-  }
-
-  function toggleOpen(routeId) {
-    if (openId === routeId) { setOpenId(null); return; }
-    setOpenId(routeId);
-    if (!stopsByRoute[routeId]) fetchStopsFor(routeId);
+    return stops;
   }
 
   async function addRoute() {
@@ -770,7 +769,9 @@ export function TransportScreen({ state, academicYears }) {
       });
       setRoutes((prev) => [...prev, created]);
       setStopsByRoute((prev) => ({ ...prev, [created.id]: [] }));
-      setOpenId(created.id);
+      // Details only — stops are a deliberately separate next step, not
+      // shown alongside the route form the moment it's created.
+      setEditingRouteId(created.id);
     } catch (err) {
       alert(err instanceof Error ? err.message : "Could not add that route.");
     }
@@ -789,9 +790,16 @@ export function TransportScreen({ state, academicYears }) {
     try {
       await api.delete(`/transport/routes/${routeId}`);
       setRoutes((prev) => prev.filter((r) => r.id !== routeId));
+      if (editingRouteId === routeId) setEditingRouteId(null);
     } catch (err) {
       alert(err instanceof Error ? err.message : "Could not remove that route.");
     }
+  }
+
+  async function openStopsFor(routeId) {
+    setStopsRouteId(routeId);
+    setExpandedStopIds(new Set());
+    if (!stopsByRoute[routeId]) await fetchStopsFor(routeId);
   }
 
   async function addStop(routeId) {
@@ -801,9 +809,21 @@ export function TransportScreen({ state, academicYears }) {
         name: "", sequence: stops.length + 1,
       });
       setStopsByRoute((prev) => ({ ...prev, [routeId]: [...(prev[routeId] || []), created] }));
+      // A brand-new stop opens for editing; whatever was open before is
+      // done and collapses — one stop being filled in at a time, not
+      // every stop on the route staying expanded at once.
+      setExpandedStopIds(new Set([created.id]));
     } catch (err) {
       alert(err instanceof Error ? err.message : "Could not add that stop.");
     }
+  }
+
+  function toggleStopExpanded(stopId) {
+    setExpandedStopIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(stopId)) next.delete(stopId); else next.add(stopId);
+      return next;
+    });
   }
 
   async function patchStop(routeId, stopId, changes) {
@@ -865,6 +885,106 @@ export function TransportScreen({ state, academicYears }) {
     );
   }
 
+  // A route's stops are managed in their own drilled-down view, not
+  // shown inline under the route's own details — this is the whole
+  // point of the redesign, so it's its own return branch rather than a
+  // conditional block buried inside the routes list.
+  if (stopsRouteId) {
+    const route = routes.find((r) => r.id === stopsRouteId);
+    const stops = stopsByRoute[stopsRouteId] || [];
+    return (
+      <div>
+        <button onClick={() => setStopsRouteId(null)}
+          className="flex items-center gap-1.5 text-sm font-semibold text-slate-400 hover:text-slate-600 mb-4">
+          <ChevronLeft size={16} /> Back to routes
+        </button>
+        <PageHead title={`Stops on ${route?.name || "this route"}`}
+          subtitle={`Route ${route?.code} — each stop's yearly fare is set here, priced separately from every other stop.`}>
+          <button className={primary} onClick={() => addStop(stopsRouteId)}>
+            <Plus size={16} /> Add stop
+          </button>
+        </PageHead>
+
+        {stops.length === 0 ? (
+          <div className={`${panel} border-dashed p-12 text-center`}>
+            <MapPin className="mx-auto text-slate-300 mb-3" size={26} />
+            <p className="font-bold text-slate-700">No stops on this route yet</p>
+            <button className={`${primary} mx-auto mt-4`} onClick={() => addStop(stopsRouteId)}>
+              <Plus size={16} /> Add stop
+            </button>
+          </div>
+        ) : (
+          <div className="space-y-2.5">
+            {stops.map((s) => {
+              const expanded = expandedStopIds.has(s.id);
+              const fare = fareFor(s.id);
+              // A stop with no name yet always stays open — collapsing
+              // it to an empty summary line would just look broken.
+              const showExpanded = expanded || !s.name;
+              return (
+                <div key={s.id} className={`${panel} overflow-hidden ${showExpanded ? "border-brand-200" : ""}`}>
+                  {showExpanded ? (
+                    <div className="p-5">
+                      <div className="grid sm:grid-cols-3 gap-4">
+                        <div>
+                          <label className={eyebrow}>Stop name</label>
+                          <input className={`${field} mt-2`} defaultValue={s.name}
+                            placeholder="Jayanagar 4th Block" key={`${s.id}-name-${s.name}`}
+                            onBlur={(e) => { if (e.target.value !== s.name) patchStop(stopsRouteId, s.id, { name: e.target.value }); }} />
+                        </div>
+                        <div>
+                          <label className={eyebrow}>Pickup time</label>
+                          <input className={`${field} mt-2`} defaultValue={s.pickup_time || ""}
+                            placeholder="7:20 am" key={`${s.id}-time-${s.pickup_time}`}
+                            onBlur={(e) => {
+                              const next = e.target.value || null;
+                              if (next !== s.pickup_time) patchStop(stopsRouteId, s.id, { pickup_time: next });
+                            }} />
+                        </div>
+                        <div>
+                          <label className={eyebrow}>Yearly fare</label>
+                          <input className={`${field} mt-2 text-right tabular-nums`} inputMode="numeric"
+                            defaultValue={fare ? fare / 100 : ""} placeholder="0"
+                            key={`${s.id}-fare-${fare}`}
+                            onBlur={(e) => setFare(s.id, +e.target.value)} />
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 mt-4">
+                        {s.name && (
+                          <button className={ghost} onClick={() => toggleStopExpanded(s.id)}>
+                            <Check size={15} /> Done
+                          </button>
+                        )}
+                        <button className="text-xs font-semibold text-slate-300 hover:text-red-500 ml-auto"
+                          onClick={() => removeStop(stopsRouteId, s.id)}>
+                          Remove stop
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button onClick={() => toggleStopExpanded(s.id)}
+                      className="w-full flex items-center gap-3 px-5 py-3.5 hover:bg-slate-50/70 text-left">
+                      <MapPin size={15} className="text-slate-300 shrink-0" />
+                      <span className="font-bold flex-1">{s.name}</span>
+                      {s.pickup_time && <span className="text-xs font-semibold text-slate-400">{s.pickup_time}</span>}
+                      <span className="text-xs font-bold text-slate-500 tabular-nums">
+                        {fare ? inr(fare / 100) : <span className="text-amber-600">No fare set</span>}
+                      </span>
+                      <span className="text-xs font-semibold text-slate-400 tabular-nums w-16 text-right">
+                        {riderCountFor(s.id) ? `${riderCountFor(s.id)} riders` : ""}
+                      </span>
+                      <ChevronRight size={15} className="text-slate-300 shrink-0" />
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div>
       <PageHead title="Bus Routes"
@@ -894,28 +1014,15 @@ export function TransportScreen({ state, academicYears }) {
       ) : (
         <div className="space-y-3">
           {routes.map((r) => {
-            const open = openId === r.id;
-            const stops = stopsByRoute[r.id] || [];
-            const routeFares = stops.map((s) => fareFor(s.id)).filter(Boolean);
+            // A route with no name yet always stays open for editing —
+            // same reasoning as an unnamed stop above.
+            const editing = editingRouteId === r.id || !r.name;
+            const stopCount = (stopsByRoute[r.id] || []).length;
             return (
-              <div key={r.id} className={`${panel} overflow-hidden ${open ? "border-brand-200" : ""}`}>
-                <button className="w-full flex items-center gap-3 px-5 py-4 hover:bg-slate-50/70 text-left"
-                  onClick={() => toggleOpen(r.id)}>
-                  {open ? <ChevronDown size={17} className="text-slate-300" />
-                        : <ChevronRight size={17} className="text-slate-300" />}
-                  <span className="w-10 h-10 rounded-xl bg-brand-50 text-brand-600 grid place-items-center font-bold text-xs tabular-nums">
-                    {r.code.replace("R-", "")}
-                  </span>
-                  <span className="font-bold flex-1">{r.name || "Untitled route"}</span>
-                  <span className="text-xs font-semibold text-slate-400">
-                    {open ? `${stops.length} ${stops.length === 1 ? "stop" : "stops"}` : ""}
-                    {routeFares.length > 0 && ` · ${inr(Math.min(...routeFares) / 100)}–${inr(Math.max(...routeFares) / 100)}`}
-                  </span>
-                </button>
-
-                {open && (
-                  <div className="border-t border-slate-100 p-5">
-                    <div className="grid sm:grid-cols-3 gap-4 mb-5">
+              <div key={r.id} className={`${panel} overflow-hidden ${editing ? "border-brand-200" : ""}`}>
+                {editing ? (
+                  <div className="p-5">
+                    <div className="grid sm:grid-cols-3 gap-4">
                       {[["Route code", "code", "R-01"], ["Route name", "name", "Kanakapura Road"],
                         ["Vehicle number", "vehicle_no", "KA 01 AB 1234"], ["Driver", "driver_name", ""],
                         ["Driver phone", "driver_phone", ""], ["Seats", "seats", "40"]].map(([lbl, key, ph]) => (
@@ -930,67 +1037,31 @@ export function TransportScreen({ state, academicYears }) {
                         </div>
                       ))}
                     </div>
-
-                    <div className="rounded-xl border border-slate-100 overflow-hidden">
-                      <table className="w-full">
-                        <thead className="bg-slate-50/70">
-                          <tr>
-                            <th className={th} style={{ width: "40%" }}>Stop</th>
-                            <th className={th}>Pickup</th>
-                            <th className={`${th} text-right`}>Yearly fare</th>
-                            <th className={`${th} text-right`}>Riders</th>
-                            <th className={th} />
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {stops.map((s) => (
-                            <tr key={s.id} className="border-b border-slate-50 last:border-0">
-                              <td className="px-4 py-1.5">
-                                <input className={cellInput} defaultValue={s.name} placeholder="Jayanagar 4th Block"
-                                  key={`${s.id}-name-${s.name}`}
-                                  onBlur={(e) => { if (e.target.value !== s.name) patchStop(r.id, s.id, { name: e.target.value }); }} />
-                              </td>
-                              <td className="px-4 py-1.5">
-                                <input className={cellInput} defaultValue={s.pickup_time || ""} placeholder="7:20 am"
-                                  key={`${s.id}-time-${s.pickup_time}`}
-                                  onBlur={(e) => {
-                                    const next = e.target.value || null;
-                                    if (next !== s.pickup_time) patchStop(r.id, s.id, { pickup_time: next });
-                                  }} />
-                              </td>
-                              <td className="px-4 py-1.5">
-                                <input className={`${cellInput} text-right tabular-nums`} inputMode="numeric"
-                                  defaultValue={fareFor(s.id) ? fareFor(s.id) / 100 : ""} placeholder="0"
-                                  key={`${s.id}-fare-${fareFor(s.id)}`}
-                                  onBlur={(e) => setFare(s.id, +e.target.value)} />
-                              </td>
-                              <td className="px-4 py-1.5 text-right text-sm font-semibold text-slate-400 tabular-nums">
-                                {riderCountFor(s.id) || "—"}
-                              </td>
-                              <td className="px-4 py-1.5 text-right">
-                                <button className="text-slate-300 hover:text-red-500"
-                                  onClick={() => removeStop(r.id, s.id)} aria-label="Remove stop">
-                                  <Trash2 size={15} />
-                                </button>
-                              </td>
-                            </tr>
-                          ))}
-                          {stops.length === 0 && (
-                            <tr><td colSpan={5} className="px-4 py-5 text-sm text-slate-400">No stops yet.</td></tr>
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
-
-                    <div className="flex gap-2 mt-4">
-                      <button className={ghost} onClick={() => addStop(r.id)}>
-                        <Plus size={15} /> Add stop
-                      </button>
-                      <button className="text-sm font-semibold text-red-500 hover:bg-red-50 border border-slate-200 hover:border-red-200 rounded-xl px-4 py-2.5 flex items-center gap-2"
+                    <div className="flex items-center gap-2 mt-4">
+                      {r.name && (
+                        <button className={ghost} onClick={() => setEditingRouteId(null)}>
+                          <Check size={15} /> Done
+                        </button>
+                      )}
+                      <button className="text-sm font-semibold text-red-500 hover:bg-red-50 border border-slate-200 hover:border-red-200 rounded-xl px-4 py-2.5 flex items-center gap-2 ml-auto"
                         onClick={() => removeRoute(r.id)}>
                         <Trash2 size={15} /> Delete route
                       </button>
                     </div>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-3 px-5 py-4">
+                    <button onClick={() => setEditingRouteId(r.id)}
+                      className="flex items-center gap-3 flex-1 min-w-0 hover:opacity-70 text-left">
+                      <span className="w-10 h-10 rounded-xl bg-brand-50 text-brand-600 grid place-items-center font-bold text-xs tabular-nums shrink-0">
+                        {r.code.replace("R-", "")}
+                      </span>
+                      <span className="font-bold truncate">{r.name}</span>
+                    </button>
+                    <button onClick={() => openStopsFor(r.id)}
+                      className="text-xs font-bold rounded-lg px-3 py-2 border border-slate-200 text-slate-600 hover:border-brand-300 hover:text-brand-600 whitespace-nowrap flex items-center gap-1.5 shrink-0">
+                      <MapPin size={13} /> Manage stops{stopCount ? ` (${stopCount})` : ""}
+                    </button>
                   </div>
                 )}
               </div>
