@@ -3,6 +3,7 @@ import {
   Bus,
   ChevronDown,
   FileSpreadsheet,
+  History,
   LogOut,
   Percent,
   ReceiptIndianRupee,
@@ -15,6 +16,7 @@ import {
 import { Login, ResetPasswordScreen, Setup } from "./Auth";
 import { api } from "./api";
 import {
+  ActivityLogScreen,
   ConcessionScreen,
   FeeScreen,
   FilterSelect,
@@ -97,6 +99,7 @@ const NAV = [
   // this nav entry could lead to for anyone else — hidden rather than
   // shown-then-blocked.
   { id: "staff", label: "Staff Access", Icon: Users, ownerOnly: true },
+  { id: "activityLog", label: "Activity Log", Icon: History, requiresCapability: "view_audit_log" },
 ];
 
 // Screens where the working Academic Year actually matters. School Profile
@@ -156,6 +159,7 @@ function schoolFromSession(me) {
     adminName: me.full_name || me.email,
     adminEmail: me.email,
     role: me.membership?.role,
+    capabilities: me.membership?.capabilities || [],
     userId: me.id, // the signed-in user's own id, not the school's
   };
 }
@@ -406,7 +410,10 @@ export default function App() {
         <QuickBalanceSearch state={state} onSelect={() => setStep("roll")} />
 
         <nav className="flex lg:flex-col overflow-x-auto px-3 pb-3 gap-1.5">
-          {NAV.filter((n) => !n.ownerOnly || state.school.role === "owner").map((n) => {
+          {NAV.filter((n) =>
+            (!n.ownerOnly || state.school.role === "owner") &&
+            (!n.requiresCapability || state.school.capabilities.includes(n.requiresCapability)),
+          ).map((n) => {
             // A grouped item is "on" if the current step is any of its
             // sub-steps, so Fees Setup stays highlighted on both sub-tabs.
             const on = n.group ? n.group.includes(step) : step === n.id;
@@ -526,6 +533,10 @@ export default function App() {
         {step === "school" && <SchoolScreen state={state} save={setState} />}
         {step === "staff" && state.school.role === "owner" && (
           <StaffScreen currentUserId={state.school.userId} />
+        )}
+
+        {step === "activityLog" && state.school.capabilities.includes("view_audit_log") && (
+          <ActivityLogScreen />
         )}
 
         {(step === "transport" || step === "fees") && (

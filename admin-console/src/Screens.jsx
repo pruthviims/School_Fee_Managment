@@ -2969,3 +2969,128 @@ function InviteStaffPanel({ onDone, onCancel }) {
     </div>
   );
 }
+
+const AUDIT_ENTITY_LABEL = {
+  student: "Student", enrollment: "Enrollment", membership: "Staff",
+  promotion_batch: "Promotion", concession: "Concession", payment: "Payment",
+  refund: "Refund", fee_structure: "Fee Structure", transport: "Transport",
+};
+
+/**
+ * Owner and Accountant only (view_audit_log) — a read-only trail of who
+ * did what, across every instrumented write action in the system. Not
+ * every action is logged yet (see server/services/auditLog.ts and the
+ * routes that call it); this screen shows whatever's actually there
+ * rather than pretending the trail is complete.
+ */
+export function ActivityLogScreen() {
+  const [entries, setEntries] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [query, setQuery] = useState("");
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+  const debounceRef = useRef(null);
+
+  async function refetch(q, from, to) {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams();
+      if (q) params.set("q", q);
+      if (from) params.set("from", from);
+      if (to) params.set("to", to);
+      const qs = params.toString();
+      setEntries(await api.get(`/audit-log${qs ? `?${qs}` : ""}`));
+    } catch {
+      setEntries([]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { refetch(query, fromDate, toDate); }, [fromDate, toDate]); // eslint-disable-line
+
+  useEffect(() => {
+    clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => refetch(query, fromDate, toDate), 400);
+    return () => clearTimeout(debounceRef.current);
+  }, [query]); // eslint-disable-line
+
+  return (
+    <div>
+      <PageHead title="Activity Log"
+        subtitle="Who did what, across the school's account — admissions, promotions, staff changes, and more." />
+
+      <div className={`${panel} p-5 mb-5 flex flex-wrap items-end gap-4`}>
+        <div className="flex-1 min-w-[220px]">
+          <label className={eyebrow}>Search</label>
+          <div className="relative mt-2">
+            <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-300" />
+            <input value={query} onChange={(e) => setQuery(e.target.value)}
+              placeholder="Person or description" className={`${field} pl-9`} />
+          </div>
+        </div>
+        <div className="min-w-[150px]">
+          <label className={eyebrow}>From</label>
+          <input type="date" className={`${field} mt-2`} value={fromDate}
+            onChange={(e) => setFromDate(e.target.value)} />
+        </div>
+        <div className="min-w-[150px]">
+          <label className={eyebrow}>To</label>
+          <input type="date" className={`${field} mt-2`} value={toDate}
+            onChange={(e) => setToDate(e.target.value)} />
+        </div>
+        {(query || fromDate || toDate) && (
+          <button onClick={() => { setQuery(""); setFromDate(""); setToDate(""); }}
+            className={`${ghost} mb-0.5`}>
+            <X size={14} /> Clear filters
+          </button>
+        )}
+      </div>
+
+      <div className={`${panel} overflow-hidden`}>
+        {loading ? (
+          <div className="p-12 text-center text-slate-400 font-semibold">Loading…</div>
+        ) : entries.length === 0 ? (
+          <div className="p-12 text-center text-slate-400 font-semibold text-sm">
+            {query || fromDate || toDate ? "Nothing matches these filters." : "Nothing logged yet."}
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead className="bg-slate-50/70">
+                <tr>
+                  <th className={th}>When</th>
+                  <th className={th}>Who</th>
+                  <th className={th}>What</th>
+                  <th className={th}>Type</th>
+                </tr>
+              </thead>
+              <tbody>
+                {entries.map((e) => (
+                  <tr key={e.id} className="border-b border-slate-50 text-sm">
+                    <td className="px-5 py-3 text-slate-500 whitespace-nowrap tabular-nums">
+                      {new Date(e.created_at).toLocaleString("en-IN", {
+                        day: "2-digit", month: "short", year: "numeric",
+                        hour: "2-digit", minute: "2-digit",
+                      })}
+                    </td>
+                    <td className="px-5 py-3 whitespace-nowrap">
+                      <div className="font-bold">{e.user_name}</div>
+                      <div className="text-[11px] font-semibold text-slate-400">{ROLE_LABEL[e.user_role] || e.user_role}</div>
+                    </td>
+                    <td className="px-5 py-3">{e.description}</td>
+                    <td className="px-5 py-3">
+                      <span className="text-[11px] font-bold text-slate-400 bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 whitespace-nowrap">
+                        {AUDIT_ENTITY_LABEL[e.entity_type] || e.entity_type}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
