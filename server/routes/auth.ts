@@ -102,6 +102,26 @@ authRouter.get("/me", requireAuth, (req, res) => {
   res.json(meResponse(req.user!, req.membership ?? null, req.school ?? null));
 });
 
+const changePasswordSchema = z.object({
+  current_password: z.string().min(1, "Enter your current password."),
+  new_password: z.string().min(12, "Use at least 12 characters."),
+});
+
+authRouter.post("/me/password", requireAuth, async (req, res) => {
+  const parsed = changePasswordSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ detail: parsed.error.issues[0]?.message });
+  const d = parsed.data;
+
+  const userResult = await pool.query(`SELECT password_hash FROM users WHERE id = $1`, [req.user!.id]);
+  const ok = await verifyPassword(d.current_password, userResult.rows[0]?.password_hash ?? null);
+  if (!ok) return res.status(403).json({ detail: "Current password is incorrect." });
+
+  const newHash = await hashPassword(d.new_password);
+  await pool.query(`UPDATE users SET password_hash = $1, updated_at = now() WHERE id = $2`,
+    [newHash, req.user!.id]);
+  res.status(204).end();
+});
+
 authRouter.get("/schools/:shortCode", async (req, res) => {
   // Deliberately public and deliberately narrow: exact short_code lookup
   // only (never a search or a list), returning nothing but display

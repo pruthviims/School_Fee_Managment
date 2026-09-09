@@ -193,6 +193,53 @@ describe("staff management", () => {
   });
 });
 
+describe("change your own password", () => {
+  it("changes the password when the current one is correct", async () => {
+    const { cookie } = await loginAs("owner@school.test", "x".repeat(14));
+    const res = await request(app).post("/api/auth/me/password").set("Cookie", cookie).send({
+      current_password: "x".repeat(14), new_password: "a-genuinely-new-password-1",
+    });
+    expect(res.status).toBe(204);
+
+    // The old password no longer works.
+    const oldLogin = await request(app).post("/api/auth/login")
+      .send({ email: "owner@school.test", password: "x".repeat(14) });
+    expect(oldLogin.status).toBe(401);
+
+    // The new one does.
+    const newLogin = await request(app).post("/api/auth/login")
+      .send({ email: "owner@school.test", password: "a-genuinely-new-password-1" });
+    expect(newLogin.status).toBe(200);
+  });
+
+  it("refuses when the current password is wrong, and changes nothing", async () => {
+    const { cookie } = await loginAs("owner@school.test", "x".repeat(14));
+    const res = await request(app).post("/api/auth/me/password").set("Cookie", cookie).send({
+      current_password: "totally-the-wrong-password", new_password: "a-genuinely-new-password-1",
+    });
+    expect(res.status).toBe(403);
+
+    const stillWorks = await request(app).post("/api/auth/login")
+      .send({ email: "owner@school.test", password: "x".repeat(14) });
+    expect(stillWorks.status).toBe(200);
+  });
+
+  it("rejects a weak new password", async () => {
+    const { cookie } = await loginAs("owner@school.test", "x".repeat(14));
+    const res = await request(app).post("/api/auth/me/password").set("Cookie", cookie).send({
+      current_password: "x".repeat(14), new_password: "short",
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("refuses an anonymous request", async () => {
+    const res = await request(app).post("/api/auth/me/password").send({
+      current_password: "x".repeat(14), new_password: "a-genuinely-new-password-1",
+    });
+    expect(res.status).toBe(401);
+  });
+});
+
 describe("password reset", () => {
   it("returns the same response whether or not the email exists", async () => {
     const known = await request(app).post("/api/auth/password-reset")

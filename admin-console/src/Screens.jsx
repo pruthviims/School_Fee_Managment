@@ -639,6 +639,80 @@ export function SchoolScreen({ state, save }) {
           )}
         </div>
       </div>
+
+      <ChangePasswordPanel />
+    </div>
+  );
+}
+
+function ChangePasswordPanel() {
+  const [current, setCurrent] = useState("");
+  const [next, setNext] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [error, setError] = useState("");
+  const [done, setDone] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  async function submit(e) {
+    e.preventDefault();
+    setError(""); setDone(false);
+    if (next.length < 12) return setError("New password must be at least 12 characters.");
+    if (next !== confirm) return setError("The two new passwords do not match.");
+
+    setBusy(true);
+    try {
+      await api.post("/auth/me/password", { current_password: current, new_password: next });
+      setCurrent(""); setNext(""); setConfirm("");
+      setDone(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not change your password.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className={`${panel} p-6 grid sm:grid-cols-2 gap-5 max-w-3xl mt-6`}>
+      <div className="sm:col-span-2">
+        <h2 className="font-extrabold">Change Your Password</h2>
+        <p className="text-sm text-slate-500 mt-1">
+          For your own sign-in — this doesn't affect anyone else's account.
+        </p>
+      </div>
+
+      {error && (
+        <div className="sm:col-span-2 flex items-start gap-2 bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-3 text-sm font-semibold">
+          <AlertTriangle size={15} className="mt-0.5 shrink-0" /> {error}
+        </div>
+      )}
+      {done && (
+        <div className="sm:col-span-2 bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-xl px-4 py-3 text-sm font-semibold">
+          Password changed.
+        </div>
+      )}
+
+      <form onSubmit={submit} className="sm:col-span-2 grid sm:grid-cols-2 gap-5">
+        <div className="sm:col-span-2">
+          <label className={eyebrow}>Current password</label>
+          <input required type="password" className={`${field} mt-2`} value={current}
+            onChange={(e) => setCurrent(e.target.value)} />
+        </div>
+        <div>
+          <label className={eyebrow}>New password</label>
+          <input required type="password" className={`${field} mt-2`} value={next}
+            placeholder="At least 12 characters" onChange={(e) => setNext(e.target.value)} />
+        </div>
+        <div>
+          <label className={eyebrow}>Confirm new password</label>
+          <input required type="password" className={`${field} mt-2`} value={confirm}
+            onChange={(e) => setConfirm(e.target.value)} />
+        </div>
+        <div className="sm:col-span-2">
+          <button type="submit" disabled={busy} className={primary}>
+            {busy ? "Changing…" : "Change password"}
+          </button>
+        </div>
+      </form>
     </div>
   );
 }
