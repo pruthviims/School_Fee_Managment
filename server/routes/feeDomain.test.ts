@@ -302,6 +302,50 @@ describe("admission -> billing -> collection, end to end", () => {
     expect(ledger.body.balance).toBe(4000000);
   });
 
+  it("refuses to admit into a class with no fees priced at all for the year", async () => {
+    const cookie = await loginAs("owner@http.test");
+    const year = await request(app).post("/api/setup/academic-years").set("Cookie", cookie)
+      .send({ name: "2026-27", starts_on: "2026-06-01", ends_on: "2027-03-31", status: "active" });
+    const classLevel = await request(app).post("/api/setup/class-levels").set("Cookie", cookie)
+      .send({ name: "IX", ladder_order: 9, stage: "secondary" });
+    const section = await request(app).post("/api/setup/sections").set("Cookie", cookie).send({
+      academic_year_id: year.body.id, class_level_id: classLevel.body.id, name: "A",
+    });
+    // Deliberately no fee-structure line for this class at all.
+
+    const admission = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
+      admission_no: "2026/900", full_name: "Unpriced Class Student",
+      academic_year_id: year.body.id, class_level_id: classLevel.body.id, section_id: section.body.id,
+    });
+    expect(admission.status).toBe(400);
+
+    const check = await pool.query(`SELECT 1 FROM students WHERE admission_no = '2026/900'`);
+    expect(check.rows).toHaveLength(0); // nothing created, not a half-admitted student
+  });
+
+  it("refuses to admit into a class whose only fee line is explicitly zero", async () => {
+    const cookie = await loginAs("owner@http.test");
+    const year = await request(app).post("/api/setup/academic-years").set("Cookie", cookie)
+      .send({ name: "2026-27", starts_on: "2026-06-01", ends_on: "2027-03-31", status: "active" });
+    const classLevel = await request(app).post("/api/setup/class-levels").set("Cookie", cookie)
+      .send({ name: "IX", ladder_order: 9, stage: "secondary" });
+    const section = await request(app).post("/api/setup/sections").set("Cookie", cookie).send({
+      academic_year_id: year.body.id, class_level_id: classLevel.body.id, name: "A",
+    });
+    const feeHead = await request(app).post("/api/setup/fee-heads").set("Cookie", cookie)
+      .send({ name: "Tuition fee" });
+    await request(app).post("/api/setup/fee-structure").set("Cookie", cookie).send({
+      academic_year_id: year.body.id, class_level_id: classLevel.body.id,
+      fee_head_id: feeHead.body.id, amount: 0, due_on: "2026-06-15",
+    });
+
+    const admission = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
+      admission_no: "2026/901", full_name: "Zero Fee Student",
+      academic_year_id: year.body.id, class_level_id: classLevel.body.id, section_id: section.body.id,
+    });
+    expect(admission.status).toBe(400);
+  });
+
   it("front desk cannot access the defaulters report", async () => {
     const ownerCookie = await loginAs("owner@http.test");
     const { year } = await setUpAcademicStructure(ownerCookie);

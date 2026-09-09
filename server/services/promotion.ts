@@ -273,6 +273,28 @@ export async function commit(
       );
     }
 
+    // Same reasoning as New Admission's own check: promoting students
+    // into a class whose fees were never actually set up for the target
+    // year would otherwise silently generate zero-rupee charges — far
+    // more likely a forgotten setup step than an intentional free class.
+    // Checked once for every distinct target class in this batch, not
+    // per-move, since the same unpriced class would otherwise fail
+    // identically for every student moving into it.
+    const targetClassIds = [...new Set(actionable.map((m) => m.toClassId))];
+    const pricedResult = await client.query(
+      `SELECT DISTINCT class_level_id FROM fee_structures
+       WHERE school_id = $1 AND academic_year_id = $2 AND class_level_id = ANY($3) AND amount > 0`,
+      [toYear.school_id, toYearId, targetClassIds],
+    );
+    const pricedClassIds = new Set(pricedResult.rows.map((r) => r.class_level_id));
+    const unpriced = targetClassIds.filter((id) => !pricedClassIds.has(id));
+    if (unpriced.length > 0) {
+      throw new PromotionError(
+        "One or more target classes have no fees set up yet for this academic year. " +
+        "Set up Fee Structure for them first.",
+      );
+    }
+
     const batchResult = await client.query(
       `INSERT INTO promotion_batches
          (school_id, from_year_id, to_year_id, status, committed_at, committed_by,

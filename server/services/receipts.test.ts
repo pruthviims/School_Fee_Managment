@@ -83,7 +83,11 @@ describe("getReceiptData", () => {
     expect(data.totalDisplay).toBe("15,000.00");
     expect(data.lines).toHaveLength(1);
     expect(data.lines[0].name).toBe("Tuition fee");
-    expect(data.lines[0].amountPaise).toBe(1500000); // the allocated amount, not the full charge
+    // The full charge amount, not just what this payment covered — a
+    // receipt is a statement of the whole year's fees, not a log of one
+    // transaction's own allocations. "Paid now" (totalPaise, asserted
+    // above) is what carries the payment-specific figure.
+    expect(data.lines[0].amountPaise).toBe(4000000);
     expect(data.priorPayments).toHaveLength(0);
   });
 
@@ -147,6 +151,28 @@ describe("getReceiptData", () => {
 
     const secondData = await getReceiptData(second.id);
     expect(secondData.balanceAfterPaise).toBe(4000000 - 1500000 - 1000000); // both counted
+  });
+
+  it("shows every fee head's particulars on every receipt, not just what that payment covered", async () => {
+    // The exact reported bug: a second, later payment's receipt only
+    // showed the fee head that payment happened to be allocated
+    // against, dropping whatever the first payment had already covered.
+    const enrollment = await newEnrollment();
+    const admissionHead = await createFeeHead(school.id, { name: "Admission fee", is_one_time: true });
+    await createFeeStructureLine(school.id, year.id, classLevel.id, admissionHead.id, { amount: 500000 });
+    await generateCharges(enrollment.id); // Tuition 40,000 + Admission 5,000 = 45,000 total
+
+    const first = await recordPayment({ enrollmentId: enrollment.id, amount: 4000000, mode: "cash" }) as any;
+    await new Promise((r) => setTimeout(r, 10));
+    const second = await recordPayment({ enrollmentId: enrollment.id, amount: 500000, mode: "cash" }) as any;
+
+    const firstData = await getReceiptData(first.id);
+    const firstNames = firstData.lines.map((l) => l.name).sort();
+    expect(firstNames).toEqual(["Admission fee", "Tuition fee"]);
+
+    const secondData = await getReceiptData(second.id);
+    const secondNames = secondData.lines.map((l) => l.name).sort();
+    expect(secondNames).toEqual(["Admission fee", "Tuition fee"]);
   });
 
   it("throws for a payment that doesn't exist", async () => {

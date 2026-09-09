@@ -7,12 +7,15 @@
  * the same data Django's render_receipt_html() context dict held, before
  * html_to_pdf() ever touched it.
  *
- * Ledger note: line items here are the CHARGES this specific payment was
- * allocated against, with the ALLOCATED amount — not each charge's full
- * amount — exactly matching what the Django version showed (a.amount on
- * the Allocation, not a.charge.amount). A partial payment against a
- * ₹40,000 charge shows ₹15,000 against that head, which is what the
- * parent actually paid today.
+ * Ledger note: line items here are every non-reversed CHARGE for the
+ * enrollment — the full year's fee breakdown (Tuition per term,
+ * Admission fee, Transport fee, whatever applies) — not just what this
+ * specific payment happened to be allocated against. A receipt reads as
+ * a full statement of the year's fees, with "Paid now" and "Net
+ * payable" (computed separately, further down) making clear what this
+ * particular payment covers. An advance/credit from overpaying today is
+ * still called out as its own line, computed from this payment's own
+ * allocations specifically.
  */
 
 import { pool } from "../db/index.js";
@@ -156,18 +159,34 @@ export async function getReceiptData(paymentId: string): Promise<ReceiptData> {
   const enrollment = enrollmentResult.rows[0];
   if (!enrollment) throw new ReceiptError("Enrollment not found for this payment.");
 
-  const allocationsResult = await pool.query(
-    `SELECT c.head_name, c.term_no, a.amount
-     FROM allocations a JOIN charges c ON c.id = a.charge_id
-     WHERE a.payment_id = $1
-     ORDER BY c.due_on, c.id`,
-    [paymentId],
+  // Every non-reversed charge for the enrollment — the full year's
+  // itemized fee breakdown (Tuition per term, Admission fee, Transport
+  // fee, whatever applies), not just what this specific payment happened
+  // to be allocated against. A parent reading a receipt wants to see the
+  // whole picture — what's owed in total, broken down by particular —
+  // with "Paid now" and "Total fees"/"Net payable" below (computed
+  // separately, further down) making clear what this specific payment
+  // covers versus the year as a whole. Matches getInvoiceData's own
+  // charges query below, for the same reason.
+  const chargesResult = await pool.query(
+    `SELECT head_name, term_no, amount FROM charges
+     WHERE enrollment_id = $1 AND reversed_by IS NULL
+     ORDER BY due_on, id`,
+    [payment.enrollment_id],
   );
-  const lines: ReceiptLine[] = allocationsResult.rows.map((r) => ({
+  const lines: ReceiptLine[] = chargesResult.rows.map((r) => ({
     name: r.head_name, term: r.term_no, amountPaise: r.amount, amountDisplay: formatInr(r.amount),
   }));
 
-  const allocatedTotal = lines.reduce((sum, l) => sum + l.amountPaise, 0);
+  // Whether this specific payment covered more than what was actually
+  // owed at the time (an advance/credit) is still worth surfacing
+  // separately — computed from this payment's own allocations, not the
+  // full-breakdown lines above.
+  const allocationsResult = await pool.query(
+    `SELECT COALESCE(SUM(a.amount), 0) AS allocated FROM allocations a WHERE a.payment_id = $1`,
+    [paymentId],
+  );
+  const allocatedTotal = Number(allocationsResult.rows[0].allocated);
   const unallocated = payment.amount - allocatedTotal;
   if (unallocated > 0) {
     lines.push({

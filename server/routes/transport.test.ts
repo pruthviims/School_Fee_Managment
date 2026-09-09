@@ -34,6 +34,14 @@ async function setUpRouteStopFareAndStudent(cookie: string, annualFarePaise = 50
   const section = await request(app).post("/api/setup/sections").set("Cookie", cookie).send({
     academic_year_id: year.body.id, class_level_id: classLevel.body.id, name: "A",
   });
+  // A regular (non-transport) fee needs to be priced too — New Admission
+  // now refuses to admit into a class with no fees set up at all.
+  const tuitionHead = await request(app).post("/api/setup/fee-heads").set("Cookie", cookie)
+    .send({ name: "Tuition fee" });
+  await request(app).post("/api/setup/fee-structure").set("Cookie", cookie).send({
+    academic_year_id: year.body.id, class_level_id: classLevel.body.id,
+    fee_head_id: tuitionHead.body.id, amount: 4000000, due_on: "2026-06-15",
+  });
   const route = await request(app).post("/api/transport/routes").set("Cookie", cookie)
     .send({ code: "R-01", name: "Jayanagar Route" });
   const stop = await request(app).post(`/api/transport/routes/${route.body.id}/stops`).set("Cookie", cookie)
@@ -138,7 +146,9 @@ describe("assigning a student — the actual proration", () => {
 
     const ledger = await request(app).get(`/api/students/enrollments/${enrollment.id}/ledger`)
       .set("Cookie", cookie);
-    expect(ledger.body.charged).toBe(3500000);
+    // Transport (3,500,000) + the tuition fee setUpRouteStopFareAndStudent
+    // also prices for admission to succeed at all (4,000,000).
+    expect(ledger.body.charged).toBe(7500000);
   });
 
   it("riding the full 10 months charges the full annual fare", async () => {
@@ -167,6 +177,19 @@ describe("assigning a student — the actual proration", () => {
     expect(res.status).toBe(400);
   });
 
+  it("refuses a stop whose fare is explicitly set to zero, not just missing", async () => {
+    const cookie = await loginAs("owner@transport.test");
+    const { year, route, enrollment } = await setUpRouteStopFareAndStudent(cookie);
+    const zeroStop = await request(app).post(`/api/transport/routes/${route.id}/stops`)
+      .set("Cookie", cookie).send({ name: "Zero Fare Stop", sequence: 2 });
+    await request(app).post("/api/transport/fares").set("Cookie", cookie).send({
+      academic_year_id: year.id, stop_id: zeroStop.body.id, amount: 0, due_on: "2026-06-15",
+    });
+    const res = await request(app).post(`/api/transport/enrollments/${enrollment.id}/assign`)
+      .set("Cookie", cookie).send({ stop_id: zeroStop.body.id, months: 5 });
+    expect(res.status).toBe(400);
+  });
+
   it("reassigning mid-year reverses the old charge and posts a new one, not both", async () => {
     const cookie = await loginAs("owner@transport.test");
     const { stop, enrollment } = await setUpRouteStopFareAndStudent(cookie, 5000000);
@@ -178,10 +201,11 @@ describe("assigning a student — the actual proration", () => {
     expect(second.status).toBe(201);
     expect(second.body.charge.amount).toBe(5000000);
 
-    // Only the new charge counts — not 2,500,000 + 5,000,000.
+    // Only the new transport charge counts, not both — plus the tuition
+    // fee setUpRouteStopFareAndStudent also prices (4,000,000).
     const ledger = await request(app).get(`/api/students/enrollments/${enrollment.id}/ledger`)
       .set("Cookie", cookie);
-    expect(ledger.body.charged).toBe(5000000);
+    expect(ledger.body.charged).toBe(9000000);
   });
 
   it("front desk can assign transport (manage_admissions), not configure routes or fares", async () => {
@@ -206,7 +230,9 @@ describe("assigning a student — the actual proration", () => {
 
     const ledger = await request(app).get(`/api/students/enrollments/${enrollment.id}/ledger`)
       .set("Cookie", cookie);
-    expect(ledger.body.charged).toBe(0);
+    // The transport charge is reversed; the tuition fee
+    // setUpRouteStopFareAndStudent also prices (4,000,000) remains.
+    expect(ledger.body.charged).toBe(4000000);
 
     const current = await request(app).get(`/api/transport/enrollments/${enrollment.id}/assignment`)
       .set("Cookie", cookie);
@@ -252,8 +278,10 @@ describe("assigning a student — the actual proration", () => {
 
     const ledger = await request(app).get(`/api/students/enrollments/${enrollment.id}/ledger`)
       .set("Cookie", cookie);
-    expect(ledger.body.charged).toBe(5000000);
+    // Transport (5,000,000) + the tuition fee setUpRouteStopFareAndStudent
+    // also prices for admission to succeed at all (4,000,000).
+    expect(ledger.body.charged).toBe(9000000);
     expect(ledger.body.conceded).toBe(1000000);
-    expect(ledger.body.balance).toBe(4000000);
+    expect(ledger.body.balance).toBe(8000000);
   });
 });

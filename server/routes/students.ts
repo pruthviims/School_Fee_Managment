@@ -38,6 +38,23 @@ studentsRouter.post("/admit", requireCapability("manage_admissions"), async (req
   if (!parsed.success) return res.status(400).json({ detail: parsed.error.issues[0]?.message });
   const d = parsed.data;
 
+  // Refuses admission into a class whose fees haven't actually been set
+  // up yet — every fee_structure line for it is missing or explicitly
+  // zero. Without this, a class the office simply hasn't priced yet
+  // silently admits students for free, which is far more likely a
+  // forgotten setup step than an intentional zero-fee class.
+  const priced = await pool.query(
+    `SELECT 1 FROM fee_structures
+     WHERE school_id = $1 AND academic_year_id = $2 AND class_level_id = $3 AND amount > 0
+     LIMIT 1`,
+    [req.school!.id, d.academic_year_id, d.class_level_id],
+  );
+  if (!priced.rows[0]) {
+    return res.status(400).json({
+      detail: "This class has no fees set up yet for this academic year. Set up Fee Structure for it first.",
+    });
+  }
+
   const client = await pool.connect();
   let student, enrollment;
   try {

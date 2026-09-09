@@ -74,6 +74,47 @@ async function setUpTwoYearLadder(cookie: string) {
 }
 
 describe("promotion workflow over HTTP", () => {
+  it("refuses to commit into a target class with no fees priced for the year", async () => {
+    const cookie = await loginAs("owner@promo.test");
+    const fromYear = await request(app).post("/api/setup/academic-years").set("Cookie", cookie)
+      .send({ name: "2025-26", starts_on: "2025-06-01", ends_on: "2026-03-31", status: "active" });
+    const toYear = await request(app).post("/api/setup/academic-years").set("Cookie", cookie)
+      .send({ name: "2026-27", starts_on: "2026-06-01", ends_on: "2027-03-31", status: "planning" });
+    const classVIII = await request(app).post("/api/setup/class-levels").set("Cookie", cookie)
+      .send({ name: "VIII", ladder_order: 8, stage: "middle" });
+    const classIX = await request(app).post("/api/setup/class-levels").set("Cookie", cookie)
+      .send({ name: "IX", ladder_order: 9, stage: "middle" });
+    const sectionVIII = await request(app).post("/api/setup/sections").set("Cookie", cookie).send({
+      academic_year_id: fromYear.body.id, class_level_id: classVIII.body.id, name: "A",
+    });
+    const feeHead = await request(app).post("/api/setup/fee-heads").set("Cookie", cookie)
+      .send({ name: "Tuition fee" });
+    await request(app).post("/api/setup/fee-structure").set("Cookie", cookie).send({
+      academic_year_id: fromYear.body.id, class_level_id: classVIII.body.id,
+      fee_head_id: feeHead.body.id, amount: 4000000, due_on: "2025-06-15",
+    });
+    // Deliberately no fee-structure line for classIX in toYear at all.
+    await request(app).post("/api/students/admit").set("Cookie", cookie).send({
+      admission_no: "2025/900", full_name: "Test Student",
+      academic_year_id: fromYear.body.id, class_level_id: classVIII.body.id,
+      section_id: sectionVIII.body.id,
+    });
+
+    const previewRes = await request(app).post("/api/promotion/preview").set("Cookie", cookie)
+      .send({ from_year_id: fromYear.body.id, to_year_id: toYear.body.id });
+    const assignRes = await request(app).post("/api/promotion/assign-sections").set("Cookie", cookie)
+      .send({ to_year_id: toYear.body.id, moves: previewRes.body.moves });
+
+    const commitRes = await request(app).post("/api/promotion/commit").set("Cookie", cookie).send({
+      from_year_id: fromYear.body.id, to_year_id: toYear.body.id, moves: assignRes.body.moves,
+    });
+    expect(commitRes.status).toBe(400);
+
+    const enrollments = await request(app)
+      .get(`/api/students/enrollments?academic_year_id=${toYear.body.id}`).set("Cookie", cookie);
+    expect(enrollments.body).toHaveLength(0); // nothing committed, not a half-promoted student
+  });
+
   it("previews, assigns sections, and commits a promotion end to end", async () => {
     const cookie = await loginAs("owner@promo.test");
     const { fromYear, toYear } = await setUpTwoYearLadder(cookie);

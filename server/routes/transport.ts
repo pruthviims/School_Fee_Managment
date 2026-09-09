@@ -312,7 +312,10 @@ transportRouter.post(
          WHERE school_id = $1 AND academic_year_id = $2 AND stop_id = $3`,
         [req.school!.id, enrollment.academic_year_id, d.stop_id],
       );
-      if (!fareResult.rows[0]) {
+      // Missing and explicitly-zero are treated the same — either way
+      // the stop hasn't actually been priced yet, and assigning a
+      // student to it would silently charge them nothing.
+      if (!fareResult.rows[0] || Number(fareResult.rows[0].amount) === 0) {
         await client.query("ROLLBACK");
         return res.status(400).json({ detail: "No fare has been set for this stop for this academic year yet." });
       }
