@@ -3,6 +3,7 @@ import { z } from "zod";
 import { pool } from "../db/index.js";
 import { requireCapability } from "../middleware/permissions.js";
 import { capabilitiesFor, type Role } from "../permissions.js";
+import { logActivity } from "../services/auditLog.js";
 import { makeAndSendCredentialEmail } from "./auth.js";
 
 export const staffRouter = Router();
@@ -87,6 +88,14 @@ staffRouter.post("/", async (req, res) => {
 
     await client.query("COMMIT");
 
+    await logActivity(pool, req, {
+      action: "staff.invite",
+      entityType: "membership",
+      entityId: membership.rows[0].id,
+      description: `Invited ${user.email} as ${ROLE_LABEL[role as Role]}`,
+      metadata: { role },
+    });
+
     await makeAndSendCredentialEmail(user, {
       subject: `You've been added to ${req.school!.name}'s Fee Portal`,
       intro: `${req.user!.full_name || req.user!.email} has given you ` +
@@ -147,6 +156,17 @@ staffRouter.patch("/:membershipId", async (req, res) => {
   values.push(membership.id);
   await pool.query(`UPDATE memberships SET ${fields.join(", ")} WHERE id = $${values.length}`, values);
 
+  const changeParts: string[] = [];
+  if (parsed.data.role !== undefined) changeParts.push(`role to ${ROLE_LABEL[parsed.data.role as Role]}`);
+  if (parsed.data.is_active !== undefined) changeParts.push(parsed.data.is_active ? "reactivated" : "revoked");
+  await logActivity(pool, req, {
+    action: "staff.update",
+    entityType: "membership",
+    entityId: membership.id,
+    description: `Changed ${membership.email}'s access — ${changeParts.join(", ")}`,
+    metadata: { ...parsed.data },
+  });
+
   const updated = await loadMembership(req, membership.id);
   res.json(serializeMembership(updated));
 });
@@ -159,5 +179,11 @@ staffRouter.delete("/:membershipId", async (req, res) => {
   }
 
   await pool.query(`UPDATE memberships SET is_active = false WHERE id = $1`, [membership.id]);
+  await logActivity(pool, req, {
+    action: "staff.revoke",
+    entityType: "membership",
+    entityId: membership.id,
+    description: `Revoked ${membership.email}'s access`,
+  });
   res.status(204).end();
 });

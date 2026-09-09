@@ -10,7 +10,9 @@
 
 import { Router } from "express";
 import { z } from "zod";
+import { pool } from "../db/index.js";
 import { requireCapability } from "../middleware/permissions.js";
+import { logActivity } from "../services/auditLog.js";
 import {
   PromotionError, type ProposedMove, assignSections, commit, preview, previewSummary, reverseBatch,
 } from "../services/promotion.js";
@@ -98,6 +100,13 @@ promotionRouter.post("/commit", async (req, res) => {
       fromYearId: d.from_year_id, toYearId: d.to_year_id, moves: d.moves,
       carryArrears: d.carry_arrears, generateNewCharges: d.generate_new_charges,
       committedBy: req.user!.id,
+    }) as { id: string };
+    await logActivity(pool, req, {
+      action: "promotion.commit",
+      entityType: "promotion_batch",
+      entityId: batch.id,
+      description: `Committed a promotion batch — ${d.moves.length} student${d.moves.length === 1 ? "" : "s"} moved`,
+      metadata: { from_year_id: d.from_year_id, to_year_id: d.to_year_id, move_count: d.moves.length },
     });
     res.status(201).json(batch);
   } catch (err) {

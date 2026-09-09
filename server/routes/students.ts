@@ -10,6 +10,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { pool } from "../db/index.js";
 import { requireCapability, requireMember } from "../middleware/permissions.js";
+import { logActivity } from "../services/auditLog.js";
 import { BillingError, generateCharges } from "../services/billing.js";
 import { getEnrollmentLedger } from "../services/ledger.js";
 
@@ -88,6 +89,14 @@ studentsRouter.post("/admit", requireCapability("manage_admissions"), async (req
        d.stream_id, d.admission_type, req.user!.id],
     );
     enrollment = enrollmentResult.rows[0];
+
+    await logActivity(client, req, {
+      action: "student.admit",
+      entityType: "student",
+      entityId: student.id,
+      description: `Admitted ${student.full_name} (admission no. ${student.admission_no})`,
+      metadata: { enrollment_id: enrollment.id, class_level_id: d.class_level_id, section_id: d.section_id },
+    });
 
     await client.query("COMMIT");
   } catch (err) {
