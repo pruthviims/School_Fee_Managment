@@ -251,6 +251,20 @@ export default function App() {
     return [...years].sort((a, b) => (String(a.starts_on) < String(b.starts_on) ? 1 : -1))[0]?.name;
   }
 
+  // Every navigation between screens resets the working year back to
+  // whichever one actually contains today's date — deliberately, not an
+  // oversight. A year manually picked on one screen used to stay picked
+  // as the office clicked around the rest of the app, which risked
+  // admitting a student or collecting a payment against a stale prior
+  // year nobody meant to still be looking at. Falls back to whatever
+  // step-only navigation would have done if academicYears isn't loaded
+  // yet (e.g. mid-sign-in).
+  function goToStep(id) {
+    const currentYearName = pickCurrentYearName(academicYears);
+    if (currentYearName) setState((prev) => (prev.year === currentYearName ? prev : { ...prev, year: currentYearName }));
+    setStep(id);
+  }
+
   // Shared by setup, login, and session-restore: once we know who's
   // signed in, fetch (or seed) their real academic years and make sure
   // state.year actually matches one of them, rather than trusting
@@ -398,7 +412,7 @@ export default function App() {
             const on = n.group ? n.group.includes(step) : step === n.id;
             return (
               <button key={n.id}
-                onClick={() => setStep(n.group ? (n.group.includes(step) ? step : n.group[0]) : n.id)}
+                onClick={() => goToStep(n.group ? (n.group.includes(step) ? step : n.group[0]) : n.id)}
                 className={`flex items-center gap-3 px-4 py-3 rounded-xl text-sm whitespace-nowrap transition ${
                   on ? "bg-brand-600 text-white font-bold shadow-[0_10px_22px_-12px_rgba(91,61,245,1)]"
                      : "text-slate-500 font-semibold hover:bg-slate-50"}`}>
@@ -445,7 +459,7 @@ export default function App() {
                     {STUDENTS_SUBTABS.map((t) => {
                       const subOn = step === t.id;
                       return (
-                        <button key={t.id} onClick={() => setStep(t.id)}
+                        <button key={t.id} onClick={() => goToStep(t.id)}
                           className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm text-left whitespace-nowrap transition ${
                             subOn ? "bg-brand-50 text-brand-700 font-bold"
                                   : "text-slate-500 font-medium hover:bg-slate-100"}`}>
@@ -519,7 +533,7 @@ export default function App() {
             {FEES_SUBTABS.map((t) => {
               const on = step === t.id;
               return (
-                <button key={t.id} onClick={() => setStep(t.id)}
+                <button key={t.id} onClick={() => goToStep(t.id)}
                   className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition ${
                     on ? "bg-brand-600 text-white shadow-[0_6px_14px_-8px_rgba(91,61,245,0.9)]"
                        : "text-slate-500 hover:text-slate-700"}`}>
