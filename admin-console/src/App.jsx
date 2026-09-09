@@ -536,7 +536,10 @@ export default function App() {
             refreshFeeHeads={refreshFeeHeads} />
         )}
 
-        {step === "roll" && <ConcessionScreen academicYears={academicYears} state={state} />}
+        {step === "roll" && (
+          <ConcessionScreen academicYears={academicYears} state={state} feeHeads={feeHeads}
+            refreshFeeHeads={refreshFeeHeads} />
+        )}
         {step === "newadm" && (
           <NewAdmissionTab state={state} save={setState}
             classLevels={classLevels} academicYears={academicYears} />

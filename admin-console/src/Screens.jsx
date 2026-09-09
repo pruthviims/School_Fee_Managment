@@ -171,18 +171,24 @@ function reasonLabelForConcession(row) {
  * have), so editing later is a real reverse-and-regrant, not a silent
  * recompute against today's fee.
  */
-export function ConcessionEditor({ enrollmentId, grossPaise, transportPaise, onChanged, compact = false }) {
+/**
+ * Handles both the general fee concession and the transport concession
+ * — genuinely separate records now (see server/routes/transport.ts),
+ * distinguished by feeHeadId: null for the general one, the Transport
+ * fee head's id for the transport-specific one. Each instance only
+ * ever sees and edits the concession matching its own scope.
+ */
+export function ConcessionEditor({ enrollmentId, grossPaise, feeHeadId = null, onChanged, compact = false }) {
   const [active, setActive] = useState(null);
   const [type, setType] = useState("amount");
   const [value, setValue] = useState("");
   const [reasonLabel, setReasonLabel] = useState("");
   const [approverName, setApproverName] = useState("");
-  const [includeTransport, setIncludeTransport] = useState(false);
   const [busy, setBusy] = useState(false);
 
   async function refetch() {
     const list = await api.get(`/students/enrollments/${enrollmentId}/concessions`);
-    const current = list.find((c) => !c.reversed_by) || null;
+    const current = list.find((c) => !c.reversed_by && (c.fee_head_id || null) === feeHeadId) || null;
     setActive(current);
     if (current) {
       // Always shown back as a flat amount — that's what's actually
@@ -192,19 +198,18 @@ export function ConcessionEditor({ enrollmentId, grossPaise, transportPaise, onC
       setReasonLabel(reasonLabelForConcession(current));
       setApproverName(current.approver_name || "");
     } else {
-      setType("amount"); setValue(""); setReasonLabel(""); setApproverName(""); setIncludeTransport(false);
+      setType("amount"); setValue(""); setReasonLabel(""); setApproverName("");
     }
   }
-  useEffect(() => { refetch(); }, [enrollmentId]); // eslint-disable-line
+  useEffect(() => { refetch(); }, [enrollmentId, feeHeadId]); // eslint-disable-line
 
   const appliedPaise = active ? active.amount : 0;
 
-  async function commit(nextValue, nextReasonLabel, nextIncludeTransport, nextType, nextApproverName) {
+  async function commit(nextValue, nextReasonLabel, nextType, nextApproverName) {
     const numeric = Math.max(0, +nextValue || 0);
-    const base = nextIncludeTransport ? grossPaise : grossPaise - transportPaise;
     const amountPaise = nextType === "percent"
-      ? Math.round((base * Math.min(100, numeric)) / 100)
-      : Math.min(base, Math.round(numeric * 100));
+      ? Math.round((grossPaise * Math.min(100, numeric)) / 100)
+      : Math.min(grossPaise, Math.round(numeric * 100));
 
     setBusy(true);
     try {
@@ -215,6 +220,7 @@ export function ConcessionEditor({ enrollmentId, grossPaise, transportPaise, onC
           reason: REASON_TO_ENUM[nextReasonLabel] || "other",
           note: nextReasonLabel,
           approver_name: nextApproverName.trim(),
+          fee_head_id: feeHeadId,
         });
       }
       await refetch();
@@ -227,12 +233,20 @@ export function ConcessionEditor({ enrollmentId, grossPaise, transportPaise, onC
   }
 
   return (
-    <div className={compact ? "" : "px-6 py-5 border-b border-slate-100"}>
+    <div className={compact ? "mt-1.5" : "px-6 py-5 border-b border-slate-100"}>
       {!compact && (
         <div className="flex items-center justify-between mb-2">
-          <label className="eyebrow text-slate-400">Concession</label>
+          <label className="eyebrow text-slate-400">{feeHeadId ? "Transport concession" : "Concession"}</label>
           {appliedPaise > 0 && (
             <span className="text-xs font-bold text-amber-600">−{inr(appliedPaise / 100)} applied</span>
+          )}
+        </div>
+      )}
+      {compact && feeHeadId && (
+        <div className="flex items-center justify-between mb-1.5">
+          <label className="text-[11px] font-bold text-slate-400 uppercase tracking-wide">Transport concession</label>
+          {appliedPaise > 0 && (
+            <span className="text-[11px] font-bold text-amber-600">−{inr(appliedPaise / 100)} applied</span>
           )}
         </div>
       )}
@@ -252,12 +266,12 @@ export function ConcessionEditor({ enrollmentId, grossPaise, transportPaise, onC
             if (type !== "amount") v = Math.min(100, v);
             setValue(v || "");
           }}
-          onBlur={(e) => commit(e.target.value, reasonLabel, includeTransport, type, approverName)} />
+          onBlur={(e) => commit(e.target.value, reasonLabel, type, approverName)} />
         <select
           className={`bg-white border rounded-lg outline-none focus:border-brand-500 text-sm font-medium flex-1 min-w-0 ${
             compact ? "border-slate-200 px-2 py-1.5" : "border-2 border-slate-200 px-3 py-2.5"}`}
           value={reasonLabel} disabled={!(+value > 0) || busy}
-          onChange={(e) => { setReasonLabel(e.target.value); commit(value, e.target.value, includeTransport, type, approverName); }}>
+          onChange={(e) => { setReasonLabel(e.target.value); commit(value, e.target.value, type, approverName); }}>
           <option value="">{compact ? "Reason —" : "Reason (optional)"}</option>
           {CONCESSION_REASONS.map((r) => <option key={r}>{r}</option>)}
         </select>
@@ -267,17 +281,173 @@ export function ConcessionEditor({ enrollmentId, grossPaise, transportPaise, onC
           className={`w-full border rounded-lg outline-none focus:border-brand-500 text-xs font-medium mt-1.5 ${
             compact ? "border-slate-200 px-2 py-1.5" : "border-2 border-slate-200 px-3 py-2"}`}
           onChange={(e) => setApproverName(e.target.value)}
-          onBlur={(e) => commit(value, reasonLabel, includeTransport, type, e.target.value)} />
+          onBlur={(e) => commit(value, reasonLabel, type, e.target.value)} />
       )}
-      {+value > 0 && transportPaise > 0 && (
-        <label className="flex items-center gap-1.5 mt-1.5 text-[11px] font-semibold text-slate-400">
-          <input type="checkbox" checked={includeTransport} disabled={busy}
-            onChange={(e) => {
-              setIncludeTransport(e.target.checked);
-              commit(value, reasonLabel, e.target.checked, type, approverName);
-            }} />
-          Also discount transport
-        </label>
+    </div>
+  );
+}
+
+/**
+ * Assign a student to a stop for however many of the year's ten months
+ * they're actually riding — the prorated fee is computed and posted as
+ * a real charge server-side (see POST /transport/enrollments/:id/assign
+ * in server/routes/transport.ts); this just drives that endpoint and
+ * shows what's currently active.
+ */
+function TransportAssignmentPanel({ enrollmentId, academicYearId, onChanged, onAmountChange, refreshFeeHeads }) {
+  const [current, setCurrent] = useState(undefined); // undefined = loading, null = none
+  const [currentFarePaise, setCurrentFarePaise] = useState(0);
+  const [stops, setStops] = useState([]); // flat list across every route, for the picker
+  const [fares, setFares] = useState([]);
+  const [editing, setEditing] = useState(false);
+  const [stopId, setStopId] = useState("");
+  const [months, setMonths] = useState(10);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function refetch() {
+    const assignment = await api.get(`/transport/enrollments/${enrollmentId}/assignment`);
+    setCurrent(assignment);
+    if (assignment && academicYearId) {
+      // The annual fare for the currently-assigned stop, so the parent
+      // can exclude the actual transport charge from the general
+      // concession's own base — a general "20% off tuition" grant
+      // shouldn't silently also discount transport, which is its own,
+      // separately-approved decision now.
+      const yearFares = await api.get(`/transport/fares?academic_year_id=${academicYearId}`);
+      const fare = yearFares.find((f) => f.stop_id === assignment.stop_id)?.amount || 0;
+      const amount = Math.round((fare / 10) * assignment.months);
+      setCurrentFarePaise(amount);
+      if (onAmountChange) onAmountChange(amount);
+    } else {
+      setCurrentFarePaise(0);
+      if (onAmountChange) onAmountChange(0);
+    }
+  }
+  useEffect(() => { refetch(); }, [enrollmentId]); // eslint-disable-line
+
+  async function loadPickerData() {
+    const routes = await api.get("/transport/routes");
+    const stopLists = await Promise.all(
+      routes.map((r) => api.get(`/transport/routes/${r.id}/stops`)
+        .then((list) => list.map((s) => ({ ...s, routeCode: r.code, routeName: r.name })))),
+    );
+    setStops(stopLists.flat());
+    if (academicYearId) setFares(await api.get(`/transport/fares?academic_year_id=${academicYearId}`));
+  }
+
+  function startEditing() {
+    setError("");
+    setStopId(current?.stop_id || "");
+    setMonths(current?.months || 10);
+    setEditing(true);
+    loadPickerData();
+  }
+
+  const fareFor = (id) => fares.find((f) => f.stop_id === id)?.amount || 0;
+  const previewPaise = stopId ? Math.round((fareFor(stopId) / 10) * months) : 0;
+
+  async function assign() {
+    setError("");
+    if (!stopId) return setError("Choose a stop.");
+    if (!fareFor(stopId)) return setError("No fare has been set for that stop for this year yet — set it under Bus Routes first.");
+    setBusy(true);
+    try {
+      await api.post(`/transport/enrollments/${enrollmentId}/assign`, { stop_id: stopId, months });
+      setEditing(false);
+      await refetch();
+      // The very first transport assignment anywhere in the school
+      // lazily creates the "Transport fee" head server-side (see
+      // POST /transport/enrollments/:id/assign) — refreshing here is
+      // what lets the transport concession below correctly find its
+      // real id instead of staying scoped to null indefinitely for
+      // this session.
+      if (refreshFeeHeads) await refreshFeeHeads();
+      if (onChanged) onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not assign transport.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function endAssignment() {
+    if (!current || !window.confirm("Stop this student's transport? Today's remaining balance for it will be reversed.")) return;
+    setBusy(true);
+    try {
+      await api.post(`/transport/assignments/${current.id}/end`, {});
+      await refetch();
+      if (onChanged) onChanged();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Could not end that assignment.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (current === undefined) return null; // still loading — avoid a flash of "no transport"
+
+  return (
+    <div className="px-6 py-5 border-b border-slate-100">
+      <div className="flex items-center justify-between mb-2">
+        <label className="eyebrow text-slate-400">Transport</label>
+        {current && !editing && (
+          <button onClick={startEditing} disabled={busy}
+            className="text-xs font-bold text-brand-600 hover:text-brand-700">Change</button>
+        )}
+      </div>
+
+      {!editing && current && (
+        <div className="flex items-center justify-between bg-slate-50 rounded-xl px-3.5 py-2.5">
+          <div className="text-sm">
+            <span className="font-bold">{current.stop_name}</span>
+            <span className="text-slate-400"> · {current.route_code} · {current.months} months this year</span>
+            {currentFarePaise > 0 && <span className="text-slate-400"> · {inr(currentFarePaise / 100)}</span>}
+          </div>
+          <button onClick={endAssignment} disabled={busy}
+            className="text-xs font-semibold text-slate-400 hover:text-red-500">Stop riding</button>
+        </div>
+      )}
+
+      {!editing && !current && (
+        <button onClick={startEditing} disabled={busy}
+          className="text-sm font-semibold text-brand-600 hover:text-brand-700 flex items-center gap-1.5">
+          <Bus size={14} /> Assign a bus stop
+        </button>
+      )}
+
+      {editing && (
+        <div>
+          {error && <p className="text-xs font-semibold text-red-500 mb-2">{error}</p>}
+          <div className="flex items-center gap-1.5">
+            <select value={stopId} onChange={(e) => setStopId(e.target.value)} disabled={busy}
+              className="bg-white border-2 border-slate-200 rounded-lg px-3 py-2.5 outline-none focus:border-brand-500 text-sm font-medium flex-1 min-w-0">
+              <option value="">Choose a stop</option>
+              {stops.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.routeCode} · {s.name}{fareFor(s.id) ? ` — ${inr(fareFor(s.id) / 100)}/yr` : " (no fare set)"}
+                </option>
+              ))}
+            </select>
+            <input type="number" min={1} max={10} value={months} disabled={busy}
+              onChange={(e) => setMonths(Math.min(10, Math.max(1, +e.target.value || 1)))}
+              className="w-16 border-2 border-slate-200 rounded-lg text-right tabular-nums outline-none focus:border-brand-500 text-sm font-bold px-2 py-2.5" />
+            <span className="text-xs text-slate-400 shrink-0">months</span>
+          </div>
+          {stopId && fareFor(stopId) > 0 && (
+            <p className="text-xs text-slate-500 mt-1.5">
+              {months} of 10 months · <span className="font-bold text-ink">{inr(previewPaise / 100)}</span>
+            </p>
+          )}
+          <div className="flex gap-2 mt-2">
+            <button onClick={assign} disabled={busy}
+              className="text-xs font-bold rounded-lg px-3 py-2 bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-50">
+              {busy ? "Saving…" : current ? "Update" : "Assign"}
+            </button>
+            <button onClick={() => setEditing(false)} disabled={busy}
+              className="text-xs font-semibold text-slate-400 hover:text-slate-600">Cancel</button>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -1964,7 +2134,7 @@ function ClassImport({ state, academicYears, classLevels, classLevelId, setClass
  * columns) — that's follow-up work; this exists to close the loop from
  * New Admission through to an actual payment against real data.
  */
-export function ConcessionScreen({ academicYears, state }) {
+export function ConcessionScreen({ academicYears, state, feeHeads, refreshFeeHeads }) {
   const [enrollments, setEnrollments] = useState([]);
   const [loading, setLoading] = useState(true);
   const [payingFor, setPayingFor] = useState(null); // {enrollmentId, student}
@@ -2097,6 +2267,9 @@ export function ConcessionScreen({ academicYears, state }) {
 
       {payingFor && (
         <PaymentModal enrollmentId={payingFor.enrollmentId} student={payingFor.student}
+          academicYearId={year?.id}
+          transportFeeHeadId={feeHeads.find((h) => h.name === "Transport fee")?.id || null}
+          refreshFeeHeads={refreshFeeHeads}
           onClose={() => { setPayingFor(null); refetch(); }} onPaid={() => {}} />
       )}
     </div>
@@ -2130,10 +2303,11 @@ function adaptReceiptData(data) {
   };
 }
 
-export function PaymentModal({ enrollmentId, student, onClose, onPaid }) {
+export function PaymentModal({ enrollmentId, student, academicYearId, transportFeeHeadId, refreshFeeHeads, onClose, onPaid }) {
   const [ledger, setLedger] = useState(null); // {charged, conceded, paid, balance}, paise
   const [payments, setPayments] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [transportChargePaise, setTransportChargePaise] = useState(0);
 
   async function refetch() {
     const [ledgerResult, paymentsResult] = await Promise.all([
@@ -2227,8 +2401,17 @@ export function PaymentModal({ enrollmentId, student, onClose, onPaid }) {
           </button>
         </div>
 
-        <ConcessionEditor enrollmentId={enrollmentId} grossPaise={ledger.charged}
-          transportPaise={0} onChanged={refetch} />
+        <TransportAssignmentPanel enrollmentId={enrollmentId} academicYearId={academicYearId}
+          onChanged={refetch} onAmountChange={setTransportChargePaise}
+          refreshFeeHeads={refreshFeeHeads} />
+
+        <ConcessionEditor enrollmentId={enrollmentId}
+          grossPaise={ledger.charged - transportChargePaise} onChanged={refetch} />
+
+        {transportChargePaise > 0 && (
+          <ConcessionEditor enrollmentId={enrollmentId} grossPaise={transportChargePaise}
+            feeHeadId={transportFeeHeadId} onChanged={refetch} compact />
+        )}
 
         <div className="px-6 py-5 grid grid-cols-3 gap-4 border-b border-slate-100 text-sm">
           <div>
