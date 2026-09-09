@@ -2212,6 +2212,9 @@ export function ConcessionScreen({ academicYears, state, feeHeads, refreshFeeHea
   const [enrollments, setEnrollments] = useState([]);
   const [loading, setLoading] = useState(true);
   const [payingFor, setPayingFor] = useState(null); // {enrollmentId, student}
+  const [classFilter, setClassFilter] = useState("");
+  const [sectionFilter, setSectionFilter] = useState("");
+  const [query, setQuery] = useState("");
 
   const year = academicYears.find((y) => y.name === state.year);
 
@@ -2226,6 +2229,9 @@ export function ConcessionScreen({ academicYears, state, feeHeads, refreshFeeHea
     setLoading(false);
   }
   useEffect(() => { refetch(); }, [year?.id]); // eslint-disable-line
+  // Switching class invalidates whatever section was picked for the
+  // previous class — sections aren't shared across classes.
+  useEffect(() => { setSectionFilter(""); }, [classFilter]);
 
   if (loading) {
     return (
@@ -2249,15 +2255,76 @@ export function ConcessionScreen({ academicYears, state, feeHeads, refreshFeeHea
     );
   }
 
+  // Options are derived from who's actually enrolled this year, not a
+  // separate classLevels fetch — the same approach Class Promotion's own
+  // filters already use, and it means a class with nobody in it yet
+  // doesn't clutter the filter with an empty option.
+  const classNames = [...new Set(enrollments.map((e) => e.class_name))]
+    .sort((a, b) => (enrollments.find((e) => e.class_name === a)?.ladder_order ?? 0)
+                   - (enrollments.find((e) => e.class_name === b)?.ladder_order ?? 0));
+  const sectionNames = [...new Set(
+    enrollments.filter((e) => !classFilter || e.class_name === classFilter).map((e) => e.section_name),
+  )].sort();
+
+  const q = query.trim().toLowerCase();
+  const filtered = enrollments.filter((e) =>
+    (!classFilter || e.class_name === classFilter) &&
+    (!sectionFilter || e.section_name === sectionFilter) &&
+    (!q || e.full_name.toLowerCase().includes(q) || e.admission_no.toLowerCase().includes(q)));
+
   return (
     <div>
       <PageHead title="Fee Collection"
         subtitle="Every enrolled student for the year, with fees and payment status in one place." />
 
-      <div className={`${panel} overflow-hidden`}>
-        <div className="px-6 py-5 border-b border-slate-100">
-          <h2 className="text-lg font-extrabold">Student Fee Records</h2>
+      <div className={`${panel} p-5 mb-5 flex flex-wrap items-end gap-4`}>
+        <div className="min-w-[150px]">
+          <label className={eyebrow}>Class</label>
+          <FilterSelect value={classFilter} active={Boolean(classFilter)} className="mt-2"
+            onChange={(e) => setClassFilter(e.target.value)}>
+            <option value="">All classes</option>
+            {classNames.map((c) => <option key={c} value={c}>{c}</option>)}
+          </FilterSelect>
         </div>
+        <div className="min-w-[150px]">
+          <label className={eyebrow}>Section</label>
+          <FilterSelect value={sectionFilter} active={Boolean(sectionFilter)} className="mt-2"
+            onChange={(e) => setSectionFilter(e.target.value)}>
+            <option value="">All sections</option>
+            {sectionNames.map((s) => <option key={s} value={s}>{s}</option>)}
+          </FilterSelect>
+        </div>
+        <div className="flex-1 min-w-[220px]">
+          <label className={eyebrow}>Search</label>
+          <div className="relative mt-2">
+            <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-300" />
+            <input value={query} onChange={(e) => setQuery(e.target.value)}
+              placeholder="Student name or admission no."
+              className={`${field} pl-9`} />
+          </div>
+        </div>
+        {(classFilter || sectionFilter || query) && (
+          <button onClick={() => { setClassFilter(""); setSectionFilter(""); setQuery(""); }}
+            className={`${ghost} mb-0.5`}>
+            <X size={14} /> Clear filters
+          </button>
+        )}
+      </div>
+
+      <div className={`${panel} overflow-hidden`}>
+        <div className="px-6 py-5 border-b border-slate-100 flex items-center justify-between">
+          <h2 className="text-lg font-extrabold">Student Fee Records</h2>
+          {filtered.length !== enrollments.length && (
+            <span className="text-xs font-semibold text-slate-400">
+              {filtered.length} of {enrollments.length} shown
+            </span>
+          )}
+        </div>
+        {filtered.length === 0 ? (
+          <div className="p-10 text-center text-slate-400 font-semibold text-sm">
+            No students match these filters.
+          </div>
+        ) : (
         <div className="overflow-x-auto">
           <table className="w-full min-w-[1240px]">
             <thead className="bg-slate-50/70">
@@ -2275,7 +2342,7 @@ export function ConcessionScreen({ academicYears, state, feeHeads, refreshFeeHea
               </tr>
             </thead>
             <tbody>
-              {enrollments.map((e) => {
+              {filtered.map((e) => {
                 const balance = e.ledger.balance / 100;
                 return (
                   <tr key={e.id} className="border-b border-slate-50 text-sm font-medium">
@@ -2337,6 +2404,7 @@ export function ConcessionScreen({ academicYears, state, feeHeads, refreshFeeHea
             </tbody>
           </table>
         </div>
+        )}
       </div>
 
       {payingFor && (
