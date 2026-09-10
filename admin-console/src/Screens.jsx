@@ -2486,7 +2486,7 @@ export function ConcessionScreen({ academicYears, state, feeHeads, refreshFeeHea
 
       {payingFor && (
         <PaymentModal enrollmentId={payingFor.enrollmentId} student={payingFor.student}
-          academicYearId={year?.id}
+          academicYearId={year?.id} capabilities={state.school.capabilities}
           transportFeeHeadId={feeHeads.find((h) => h.name === "Transport fee")?.id || null}
           refreshFeeHeads={refreshFeeHeads}
           onClose={() => { setPayingFor(null); refetch(); }} onPaid={() => {}} />
@@ -2531,11 +2531,13 @@ function adaptReceiptData(data) {
   };
 }
 
-export function PaymentModal({ enrollmentId, student, academicYearId, transportFeeHeadId, refreshFeeHeads, onClose, onPaid }) {
+export function PaymentModal({ enrollmentId, student, academicYearId, capabilities, transportFeeHeadId, refreshFeeHeads, onClose, onPaid }) {
   const [ledger, setLedger] = useState(null); // {charged, conceded, paid, balance}, paise
   const [payments, setPayments] = useState([]);
   const [loading, setLoading] = useState(true);
   const [transportChargePaise, setTransportChargePaise] = useState(0);
+  const [correctingPaymentId, setCorrectingPaymentId] = useState(null);
+  const canVoid = (capabilities || []).includes("void_payments");
 
   async function refetch() {
     const [ledgerResult, paymentsResult] = await Promise.all([
@@ -2738,21 +2740,42 @@ export function PaymentModal({ enrollmentId, student, academicYearId, transportF
             </h3>
             <ul className="divide-y divide-slate-50">
               {payments.map((p) => (
-                <li key={p.id} className="py-2.5 flex items-center justify-between gap-3 text-sm">
-                  <div>
-                    <p className="font-bold">{inr(p.amount / 100)}
-                      <span className="font-normal text-slate-400"> · {p.mode === "cash" ? "Cash" :
-                        p.mode === "upi" ? "UPI" : p.mode === "card" ? "Card" :
-                        p.mode === "netbanking" ? "Net banking" : "Cheque"}</span>
-                    </p>
-                    <p className="eyebrow text-slate-400 mt-0.5">
-                      {p.receipt_no} · {displayDate(p.received_on)}
-                    </p>
+                <li key={p.id} className="py-2.5">
+                  <div className="flex items-center justify-between gap-3 text-sm">
+                    <div>
+                      <p className="font-bold">{inr(p.amount / 100)}
+                        <span className="font-normal text-slate-400"> · {p.mode === "cash" ? "Cash" :
+                          p.mode === "upi" ? "UPI" : p.mode === "card" ? "Card" :
+                          p.mode === "netbanking" ? "Net banking" : p.mode === "neft" ? "NEFT" :
+                          p.mode === "dd" ? "Demand draft" : "Cheque"}</span>
+                      </p>
+                      <p className="eyebrow text-slate-400 mt-0.5">
+                        {p.receipt_no} · {displayDate(p.received_on)}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      {canVoid && (
+                        <button onClick={() => {
+                          setCorrectingPaymentId(correctingPaymentId === p.id ? null : p.id);
+                          setJustRecorded(null);
+                        }}
+                          className="text-xs font-bold rounded-lg px-3 py-1.5 border border-slate-200 text-slate-500 hover:border-amber-300 hover:text-amber-600 flex items-center gap-1.5">
+                          <Undo2 size={13} /> Correct
+                        </button>
+                      )}
+                      <button onClick={() => reprint(p.id)}
+                        className="text-xs font-bold rounded-lg px-3 py-1.5 border border-slate-200 text-slate-500 hover:border-brand-300 flex items-center gap-1.5">
+                        <Download size={13} /> PDF
+                      </button>
+                    </div>
                   </div>
-                  <button onClick={() => reprint(p.id)}
-                    className="text-xs font-bold rounded-lg px-3 py-1.5 border border-slate-200 text-slate-500 hover:border-brand-300 flex items-center gap-1.5 shrink-0">
-                    <Download size={13} /> PDF
-                  </button>
+                  {correctingPaymentId === p.id && (
+                    <PaymentCorrectionPanel payment={p}
+                      onDone={async () => {
+                        setCorrectingPaymentId(null); setJustRecorded(null); await refetch();
+                      }}
+                      onCancel={() => setCorrectingPaymentId(null)} />
+                  )}
                 </li>
               ))}
             </ul>
@@ -3105,6 +3128,82 @@ export function ActivityLogScreen() {
             </table>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Voids the original payment and records a genuinely new, correct one
+ * — never edits the original in place (see voidAndCorrectPayment in
+ * server/services/collection.ts for why). Pre-fills with the original's
+ * own figures so the office only has to change whatever was actually
+ * wrong, not retype the whole thing.
+ */
+function PaymentCorrectionPanel({ payment, onDone, onCancel }) {
+  const [amount, setAmount] = useState(String(payment.amount / 100));
+  const [mode, setMode] = useState(payment.mode);
+  const [reference, setReference] = useState(payment.instrument_ref || "");
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit() {
+    setError("");
+    const amt = Math.round(parseFloat(amount) || 0);
+    if (!(amt > 0)) return setError("Enter an amount greater than zero.");
+    setBusy(true);
+    try {
+      const result = await api.post(`/collection/payments/${payment.id}/void`, {
+        amount: amt * 100, mode, instrument_ref: reference.trim(), reason: reason.trim(),
+      });
+      const receiptData = await api.get(`/collection/payments/${result.corrected.id}/receipt-data`);
+      downloadReceipt({ school: receiptData.school, payment: adaptReceiptData(receiptData), duplicate: false });
+      await onDone();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not correct that payment.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="mt-2 mb-1 p-4 bg-amber-50 border border-amber-200 rounded-xl">
+      <p className="text-xs font-semibold text-amber-700 mb-3">
+        This voids {payment.receipt_no} and records a new payment with a new receipt —
+        the original stays in history, never edited.
+      </p>
+      {error && <p className="text-xs font-semibold text-red-600 mb-2">{error}</p>}
+      <div className="grid sm:grid-cols-2 gap-3">
+        <div>
+          <label className={eyebrow}>Correct amount</label>
+          <input inputMode="numeric" className={`${field} mt-2`} value={amount}
+            onChange={(e) => setAmount(e.target.value)} />
+        </div>
+        <div>
+          <label className={eyebrow}>Mode</label>
+          <select className={`${field} mt-2`} value={mode} onChange={(e) => setMode(e.target.value)}>
+            {PAYMENT_MODES.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+          </select>
+        </div>
+      </div>
+      <div className="grid sm:grid-cols-2 gap-3 mt-3">
+        <div>
+          <label className={eyebrow}>Reference (optional)</label>
+          <input className={`${field} mt-2`} value={reference} onChange={(e) => setReference(e.target.value)} />
+        </div>
+        <div>
+          <label className={eyebrow}>Reason for correction</label>
+          <input className={`${field} mt-2`} value={reason} onChange={(e) => setReason(e.target.value)}
+            placeholder="Amount entered incorrectly" />
+        </div>
+      </div>
+      <div className="flex gap-2 mt-3">
+        <button onClick={submit} disabled={busy}
+          className="text-sm font-bold rounded-lg px-4 py-2.5 bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50">
+          {busy ? "Correcting…" : "Confirm correction & print new receipt"}
+        </button>
+        <button onClick={onCancel} disabled={busy} className={ghost}>Cancel</button>
       </div>
     </div>
   );
