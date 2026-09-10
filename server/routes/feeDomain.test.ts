@@ -401,6 +401,98 @@ describe("admission -> billing -> collection, end to end", () => {
     expect(list.body[1].amount).toBe(1000000);
   });
 
+  it("corrects a payment entered wrong — the exact reported scenario", async () => {
+    const ownerCookie = await loginAs("owner@http.test");
+    const { year, classLevel, section } = await setUpAcademicStructure(ownerCookie);
+    const admission = await request(app).post("/api/students/admit").set("Cookie", ownerCookie).send({
+      admission_no: "2026/910", full_name: "Wrong Amount Student",
+      academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
+    });
+    // Office meant to type 15,560 but typed 15,660.
+    const wrong = await request(app).post("/api/collection/payments").set("Cookie", ownerCookie).send({
+      enrollment_id: admission.body.enrollment.id, amount: 1566000, mode: "cash",
+    });
+    expect(wrong.status).toBe(201);
+
+    const before = await request(app)
+      .get(`/api/students/enrollments/${admission.body.enrollment.id}/ledger`).set("Cookie", ownerCookie);
+    expect(before.body.balance).toBe(4000000 - 1566000);
+
+    const correction = await request(app).post(`/api/collection/payments/${wrong.body.id}/void`)
+      .set("Cookie", ownerCookie).send({
+        amount: 1556000, mode: "cash", reason: "Amount entered incorrectly — should be 15,560",
+      });
+    expect(correction.status).toBe(200);
+    expect(correction.body.voided.reversed_by).toBe(correction.body.corrected.id);
+    expect(correction.body.corrected.amount).toBe(1556000);
+    // A real, different receipt number for the corrected payment, not
+    // the same receipt silently carrying a different amount.
+    expect(correction.body.corrected.receipt_no).not.toBe(wrong.body.receipt_no);
+
+    // The ledger now reflects only the corrected amount — not both,
+    // not the wrong one.
+    const after = await request(app)
+      .get(`/api/students/enrollments/${admission.body.enrollment.id}/ledger`).set("Cookie", ownerCookie);
+    expect(after.body.balance).toBe(4000000 - 1556000);
+
+    const log = await request(app).get("/api/audit-log?entity_type=payment").set("Cookie", ownerCookie);
+    const entry = log.body.find((e: any) => e.action === "payment.void");
+    expect(entry).toBeDefined();
+    expect(entry.description).toContain("Wrong Amount Student");
+  });
+
+  it("refuses to void the same payment twice", async () => {
+    const cookie = await loginAs("owner@http.test");
+    const { year, classLevel, section } = await setUpAcademicStructure(cookie);
+    const admission = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
+      admission_no: "2026/911", full_name: "Double Void Student",
+      academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
+    });
+    const payment = await request(app).post("/api/collection/payments").set("Cookie", cookie).send({
+      enrollment_id: admission.body.enrollment.id, amount: 1000000, mode: "cash",
+    });
+    await request(app).post(`/api/collection/payments/${payment.body.id}/void`)
+      .set("Cookie", cookie).send({ amount: 900000, mode: "cash" });
+
+    const second = await request(app).post(`/api/collection/payments/${payment.body.id}/void`)
+      .set("Cookie", cookie).send({ amount: 800000, mode: "cash" });
+    expect(second.status).toBe(400);
+  });
+
+  it("front desk cannot void a payment (void_payments required)", async () => {
+    const ownerCookie = await loginAs("owner@http.test");
+    const { year, classLevel, section } = await setUpAcademicStructure(ownerCookie);
+    const admission = await request(app).post("/api/students/admit").set("Cookie", ownerCookie).send({
+      admission_no: "2026/912", full_name: "No Void Student",
+      academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
+    });
+    const payment = await request(app).post("/api/collection/payments").set("Cookie", ownerCookie).send({
+      enrollment_id: admission.body.enrollment.id, amount: 1000000, mode: "cash",
+    });
+
+    const deskCookie = await loginAs("desk@http.test");
+    const res = await request(app).post(`/api/collection/payments/${payment.body.id}/void`)
+      .set("Cookie", deskCookie).send({ amount: 900000, mode: "cash" });
+    expect(res.status).toBe(403);
+  });
+
+  it("accountant can void a payment", async () => {
+    const ownerCookie = await loginAs("owner@http.test");
+    const { year, classLevel, section } = await setUpAcademicStructure(ownerCookie);
+    const admission = await request(app).post("/api/students/admit").set("Cookie", ownerCookie).send({
+      admission_no: "2026/913", full_name: "Accountant Void Student",
+      academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
+    });
+    const payment = await request(app).post("/api/collection/payments").set("Cookie", ownerCookie).send({
+      enrollment_id: admission.body.enrollment.id, amount: 1000000, mode: "cash",
+    });
+
+    const accCookie = await loginAs("acc@http.test");
+    const res = await request(app).post(`/api/collection/payments/${payment.body.id}/void`)
+      .set("Cookie", accCookie).send({ amount: 900000, mode: "cash" });
+    expect(res.status).toBe(200);
+  });
+
   it("an accountant can see the day book after front desk collects", async () => {
     const ownerCookie = await loginAs("owner@http.test");
     const { year, classLevel, section } = await setUpAcademicStructure(ownerCookie);

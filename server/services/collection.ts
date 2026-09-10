@@ -153,6 +153,73 @@ export async function recordPayment(input: RecordPaymentInput): Promise<unknown>
   }
 }
 
+/**
+ * The exact scenario reported: office typed 15,660 instead of 15,560,
+ * already generated a receipt, needs it fixed. Never edits the
+ * original payment in place — that would mean two different receipts
+ * could exist for the same payment_id at different points in time,
+ * which is exactly the kind of thing an auditor (or a parent disputing
+ * a figure) needs never to be possible. Instead: the original's own
+ * allocations are removed (its charges become outstanding again,
+ * exactly as if it had never been paid), a genuinely new payment is
+ * recorded with the corrected figures and its own real receipt number,
+ * and the original's reversed_by is pointed at that new payment —
+ * mirroring the payments schema's own design (reversed_by references
+ * payments, not a zero-amount marker row, since amount must stay
+ * positive here unlike charges/concessions).
+ */
+export async function voidAndCorrectPayment(
+  paymentId: string,
+  correction: { amount: number; mode: string; instrumentRef?: string; receivedOn?: Date },
+  correctedBy: string,
+  reason: string,
+): Promise<{ voided: unknown; corrected: unknown }> {
+  if (correction.amount <= 0) throw new CollectionError("Corrected amount must be positive.");
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const oldResult = await client.query(`SELECT * FROM payments WHERE id = $1 FOR UPDATE`, [paymentId]);
+    const old = oldResult.rows[0];
+    if (!old) throw new CollectionError("Payment not found.");
+    if (old.reversed_by) throw new CollectionError("This payment has already been corrected.");
+
+    await client.query(`DELETE FROM allocations WHERE payment_id = $1`, [old.id]);
+
+    const receivedOn = (correction.receivedOn ?? new Date()).toISOString().slice(0, 10);
+    const instant = INSTANT_MODES.has(correction.mode);
+    const receiptNo = await nextReceiptNo(client, old.school_id, receivedOn);
+
+    const newResult = await client.query(
+      `INSERT INTO payments
+         (school_id, receipt_no, enrollment_id, amount, mode, clearing_status,
+          received_on, cleared_on, instrument_ref, collected_by, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
+       RETURNING *`,
+      [old.school_id, receiptNo, old.enrollment_id, correction.amount, correction.mode,
+       instant ? "cleared" : "pending", receivedOn, instant ? receivedOn : null,
+       correction.instrumentRef ?? "", correctedBy],
+    );
+    const corrected = newResult.rows[0];
+
+    await allocate(client, corrected);
+
+    const reversedResult = await client.query(
+      `UPDATE payments SET reversed_by = $1, reversal_reason = $2 WHERE id = $3 RETURNING *`,
+      [corrected.id, reason, old.id],
+    );
+
+    await client.query("COMMIT");
+    return { voided: reversedResult.rows[0], corrected };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 export async function markCleared(paymentId: string, clearedOn?: Date): Promise<unknown> {
   const client = await pool.connect();
   try {

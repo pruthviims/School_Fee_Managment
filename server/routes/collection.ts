@@ -15,8 +15,9 @@ import { pool } from "../db/index.js";
 import { requireCapability, requireMember } from "../middleware/permissions.js";
 import {
   CollectionError, dailyCollection, handleGatewayWebhook, markBounced, markCleared,
-  recordPayment, verifyWebhookSignature,
+  recordPayment, verifyWebhookSignature, voidAndCorrectPayment,
 } from "../services/collection.js";
+import { logActivity } from "../services/auditLog.js";
 import { ReceiptError, getReceiptData } from "../services/receipts.js";
 
 export const collectionRouter = Router();
@@ -71,6 +72,52 @@ collectionRouter.post(
     const parsed = bounceSchema.safeParse(req.body ?? {});
     const payment = await markBounced(String(req.params.id), parsed.success ? parsed.data.reason : undefined);
     res.json(payment);
+  },
+);
+
+const voidSchema = z.object({
+  amount: z.number().int().positive(),
+  mode: z.enum(["cash", "upi", "card", "netbanking", "neft", "cheque", "dd"]),
+  instrument_ref: z.string().max(100).optional().default(""),
+  reason: z.string().max(500).optional().default(""),
+});
+
+// Accountant/Owner only — confirmed as the same sensitivity level as
+// the refund action, not something Front Desk can do unilaterally on
+// their own collected payments.
+collectionRouter.post(
+  "/payments/:id/void", requireCapability("void_payments"),
+  async (req, res) => {
+    const parsed = voidSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ detail: parsed.error.issues[0]?.message });
+    const d = parsed.data;
+
+    try {
+      const { voided, corrected } = await voidAndCorrectPayment(
+        String(req.params.id),
+        { amount: d.amount, mode: d.mode, instrumentRef: d.instrument_ref },
+        req.user!.id,
+        d.reason,
+      ) as { voided: { enrollment_id: string; amount: number }; corrected: { id: string; amount: number } };
+
+      const student = await pool.query(
+        `SELECT s.full_name FROM enrollments e JOIN students s ON s.id = e.student_id WHERE e.id = $1`,
+        [voided.enrollment_id],
+      );
+      await logActivity(pool, req, {
+        action: "payment.void",
+        entityType: "payment",
+        entityId: String(req.params.id),
+        description: `Corrected a payment for ${student.rows[0]?.full_name || "a student"} — ` +
+          `₹${(voided.amount / 100).toFixed(2)} → ₹${(corrected.amount / 100).toFixed(2)}`,
+        metadata: { old_amount: voided.amount, new_amount: corrected.amount, new_payment_id: corrected.id },
+      });
+
+      res.json({ voided, corrected });
+    } catch (err) {
+      if (err instanceof CollectionError) return res.status(400).json({ detail: err.message });
+      throw err;
+    }
   },
 );
 
