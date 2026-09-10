@@ -1733,8 +1733,11 @@ export function PromoteTab({ academicYears, classLevels, ensureUnassignedSection
 }
 
 export function NewAdmissionTab({ state, save, classLevels, academicYears }) {
-  const blank = { name: "", classLevelId: "", sectionId: "", dob: "",
-    guardianName: "", phone: "", email: "", address: "" };
+  const blank = { name: "", classLevelId: "", sectionId: "", dob: "", gender: "", bloodGroup: "",
+    contactType: "guardian",
+    fatherName: "", fatherPhone: "", fatherEmail: "",
+    motherName: "", motherPhone: "", motherEmail: "",
+    guardianRelationship: "", guardianName: "", phone: "", email: "", address: "" };
   const [f, setF] = useState(blank);
   const [sections, setSections] = useState([]);
   const [error, setError] = useState("");
@@ -1813,7 +1816,15 @@ export function NewAdmissionTab({ state, save, classLevels, academicYears }) {
     if (!f.classLevelId) return setError("Choose a class.");
     if (!f.sectionId) return setError("Choose a section.");
     if (!name || name.length < 2) return setError("Enter the student's full name.");
+    if (!f.gender) return setError("Choose the student's gender.");
     if (!year) return setError("No academic year is set up yet.");
+    if (f.contactType === "parents") {
+      if (!f.fatherName.trim() || !f.motherName.trim()) {
+        return setError("Enter both the father's and mother's name.");
+      }
+    } else if (!f.guardianRelationship.trim() || !f.guardianName.trim()) {
+      return setError("Enter the guardian's relationship to the student and their name.");
+    }
 
     setBusy(true);
     try {
@@ -1821,6 +1832,14 @@ export function NewAdmissionTab({ state, save, classLevels, academicYears }) {
         admission_no: previewAdmissionNo,
         full_name: name,
         date_of_birth: f.dob || null,
+        gender: f.gender,
+        blood_group: f.bloodGroup,
+        contact_type: f.contactType,
+        father_name: f.fatherName.trim(), father_phone: f.fatherPhone.trim(),
+        father_email: f.fatherEmail.trim(),
+        mother_name: f.motherName.trim(), mother_phone: f.motherPhone.trim(),
+        mother_email: f.motherEmail.trim(),
+        guardian_relationship: f.guardianRelationship.trim(),
         guardian_name: f.guardianName.trim(),
         guardian_phone: f.phone.trim(),
         guardian_email: f.email.trim(),
@@ -1926,17 +1945,89 @@ export function NewAdmissionTab({ state, save, classLevels, academicYears }) {
             <input type="date" className={`${field} mt-2`} value={f.dob || ""} onChange={set("dob")} />
           </div>
           <div>
-            <label className={eyebrow}>Guardian name</label>
-            <input className={`${field} mt-2`} value={f.guardianName} onChange={set("guardianName")} />
+            <label className={eyebrow}>Gender<span className="text-red-500"> *</span></label>
+            <FilterSelect value={f.gender} active={Boolean(f.gender)} className="mt-2"
+              onChange={set("gender")}>
+              <option value="">Choose</option>
+              <option value="male">Male</option>
+              <option value="female">Female</option>
+              <option value="other">Other</option>
+            </FilterSelect>
           </div>
           <div>
-            <label className={eyebrow}>Phone</label>
-            <input className={`${field} mt-2`} value={f.phone} onChange={set("phone")} inputMode="numeric" />
+            <label className={eyebrow}>Blood group</label>
+            <FilterSelect value={f.bloodGroup} active={Boolean(f.bloodGroup)} className="mt-2"
+              onChange={set("bloodGroup")}>
+              <option value="">Not known yet</option>
+              {["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"].map((bg) => (
+                <option key={bg} value={bg}>{bg}</option>
+              ))}
+            </FilterSelect>
           </div>
-          <div className="sm:col-span-2">
-            <label className={eyebrow}>Email</label>
-            <input className={`${field} mt-2`} value={f.email} onChange={set("email")} type="email" />
+
+          <div className="sm:col-span-2 pt-2">
+            <label className={eyebrow}>Parent / Guardian details</label>
+            <div className="flex gap-2 mt-2">
+              <button type="button"
+                onClick={() => setF({ ...f, contactType: "parents" })}
+                className={`flex-1 rounded-xl px-4 py-2.5 text-sm font-bold border-2 transition ${
+                  f.contactType === "parents" ? "border-brand-400 bg-brand-50 text-brand-700"
+                                              : "border-slate-200 text-slate-500 hover:border-slate-300"}`}>
+                Parents
+              </button>
+              <button type="button"
+                onClick={() => setF({ ...f, contactType: "guardian" })}
+                className={`flex-1 rounded-xl px-4 py-2.5 text-sm font-bold border-2 transition ${
+                  f.contactType === "guardian" ? "border-brand-400 bg-brand-50 text-brand-700"
+                                               : "border-slate-200 text-slate-500 hover:border-slate-300"}`}>
+                Guardian
+              </button>
+            </div>
           </div>
+
+          {f.contactType === "parents" ? (
+            <>
+              <div>
+                <label className={eyebrow}>Father's name<span className="text-red-500"> *</span></label>
+                <input className={`${field} mt-2`} value={f.fatherName} onChange={set("fatherName")} />
+              </div>
+              <div>
+                <label className={eyebrow}>Father's phone</label>
+                <input className={`${field} mt-2`} value={f.fatherPhone} onChange={set("fatherPhone")}
+                  inputMode="numeric" />
+              </div>
+              <div>
+                <label className={eyebrow}>Mother's name<span className="text-red-500"> *</span></label>
+                <input className={`${field} mt-2`} value={f.motherName} onChange={set("motherName")} />
+              </div>
+              <div>
+                <label className={eyebrow}>Mother's phone</label>
+                <input className={`${field} mt-2`} value={f.motherPhone} onChange={set("motherPhone")}
+                  inputMode="numeric" />
+              </div>
+            </>
+          ) : (
+            <>
+              <div>
+                <label className={eyebrow}>Relationship<span className="text-red-500"> *</span></label>
+                <input className={`${field} mt-2`} value={f.guardianRelationship}
+                  onChange={set("guardianRelationship")} placeholder="Uncle, Grandmother, etc." />
+              </div>
+              <div>
+                <label className={eyebrow}>Guardian's name<span className="text-red-500"> *</span></label>
+                <input className={`${field} mt-2`} value={f.guardianName} onChange={set("guardianName")} />
+              </div>
+              <div>
+                <label className={eyebrow}>Phone</label>
+                <input className={`${field} mt-2`} value={f.phone} onChange={set("phone")}
+                  inputMode="numeric" />
+              </div>
+              <div>
+                <label className={eyebrow}>Email</label>
+                <input className={`${field} mt-2`} value={f.email} onChange={set("email")} type="email" />
+              </div>
+            </>
+          )}
           <div className="sm:col-span-2">
             <label className={eyebrow}>Address</label>
             <textarea rows={2} className={`${field} mt-2`} value={f.address} onChange={set("address")} />
@@ -3248,6 +3339,13 @@ function StudentProfileModal({ enrollmentId, capabilities, onClose, onCollectPay
     setForm({
       guardian_name: p.guardian_name, guardian_phone: p.guardian_phone,
       guardian_email: p.guardian_email, address: p.address, section_id: p.section_id,
+      gender: p.gender || "", blood_group: p.blood_group || "",
+      contact_type: p.contact_type || "guardian",
+      father_name: p.father_name || "", father_phone: p.father_phone || "",
+      father_email: p.father_email || "",
+      mother_name: p.mother_name || "", mother_phone: p.mother_phone || "",
+      mother_email: p.mother_email || "",
+      guardian_relationship: p.guardian_relationship || "",
     });
     const [s, r] = await Promise.all([
       api.get(`/setup/sections?academic_year_id=${p.academic_year_id}&class_level_id=${p.class_level_id}`),
@@ -3260,14 +3358,31 @@ function StudentProfileModal({ enrollmentId, capabilities, onClose, onCollectPay
 
   async function save() {
     setError(""); setSaved(false);
+    if (form.contact_type === "parents") {
+      if (!form.father_name.trim() || !form.mother_name.trim()) {
+        setError("Enter both the father's and mother's name.");
+        return;
+      }
+    } else if (!form.guardian_relationship.trim() || !form.guardian_name.trim()) {
+      setError("Enter the guardian's relationship to the student and their name.");
+      return;
+    }
     setBusy(true);
     try {
-      const contactChanged = ["guardian_name", "guardian_phone", "guardian_email", "address"]
-        .some((k) => form[k] !== profile[k]);
+      const contactFields = ["guardian_name", "guardian_phone", "guardian_email", "gender",
+        "blood_group", "contact_type", "father_name", "father_phone", "father_email",
+        "mother_name", "mother_phone", "mother_email", "guardian_relationship", "address"];
+      const contactChanged = contactFields.some((k) => form[k] !== (profile[k] || ""));
       if (contactChanged) {
         await api.patch(`/students/${profile.student_id}`, {
           guardian_name: form.guardian_name, guardian_phone: form.guardian_phone,
           guardian_email: form.guardian_email, address: form.address,
+          gender: form.gender, blood_group: form.blood_group, contact_type: form.contact_type,
+          father_name: form.father_name, father_phone: form.father_phone,
+          father_email: form.father_email,
+          mother_name: form.mother_name, mother_phone: form.mother_phone,
+          mother_email: form.mother_email,
+          guardian_relationship: form.guardian_relationship,
         });
       }
       if (form.section_id !== profile.section_id) {
@@ -3344,20 +3459,99 @@ function StudentProfileModal({ enrollmentId, capabilities, onClose, onCollectPay
 
           <div className="grid sm:grid-cols-2 gap-4">
             <div>
-              <label className={eyebrow}>Guardian name</label>
-              <input className={`${field} mt-2`} value={form.guardian_name} onChange={set("guardian_name")} />
+              <label className={eyebrow}>Gender</label>
+              <FilterSelect value={form.gender} active={Boolean(form.gender)} className="mt-2"
+                onChange={(e) => { setForm({ ...form, gender: e.target.value }); setSaved(false); }}>
+                <option value="">Not set</option>
+                <option value="male">Male</option>
+                <option value="female">Female</option>
+                <option value="other">Other</option>
+              </FilterSelect>
             </div>
             <div>
-              <label className={eyebrow}>Guardian phone</label>
-              <input className={`${field} mt-2`} value={form.guardian_phone}
-                onChange={set("guardian_phone")} inputMode="numeric" />
+              <label className={eyebrow}>Blood group</label>
+              <FilterSelect value={form.blood_group} active={Boolean(form.blood_group)} className="mt-2"
+                onChange={(e) => { setForm({ ...form, blood_group: e.target.value }); setSaved(false); }}>
+                <option value="">Not known yet</option>
+                {["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"].map((bg) => (
+                  <option key={bg} value={bg}>{bg}</option>
+                ))}
+              </FilterSelect>
             </div>
           </div>
+
           <div>
-            <label className={eyebrow}>Guardian email</label>
-            <input className={`${field} mt-2`} value={form.guardian_email} onChange={set("guardian_email")}
-              type="email" />
+            <label className={eyebrow}>Parent / Guardian details</label>
+            <div className="flex gap-2 mt-2">
+              <button type="button"
+                onClick={() => { setForm({ ...form, contact_type: "parents" }); setSaved(false); }}
+                className={`flex-1 rounded-xl px-4 py-2.5 text-sm font-bold border-2 transition ${
+                  form.contact_type === "parents" ? "border-brand-400 bg-brand-50 text-brand-700"
+                                                  : "border-slate-200 text-slate-500 hover:border-slate-300"}`}>
+                Parents
+              </button>
+              <button type="button"
+                onClick={() => { setForm({ ...form, contact_type: "guardian" }); setSaved(false); }}
+                className={`flex-1 rounded-xl px-4 py-2.5 text-sm font-bold border-2 transition ${
+                  form.contact_type === "guardian" ? "border-brand-400 bg-brand-50 text-brand-700"
+                                                   : "border-slate-200 text-slate-500 hover:border-slate-300"}`}>
+                Guardian
+              </button>
+            </div>
           </div>
+
+          {form.contact_type === "parents" ? (
+            <>
+              <div className="grid sm:grid-cols-2 gap-4">
+                <div>
+                  <label className={eyebrow}>Father's name</label>
+                  <input className={`${field} mt-2`} value={form.father_name} onChange={set("father_name")} />
+                </div>
+                <div>
+                  <label className={eyebrow}>Father's phone</label>
+                  <input className={`${field} mt-2`} value={form.father_phone}
+                    onChange={set("father_phone")} inputMode="numeric" />
+                </div>
+              </div>
+              <div className="grid sm:grid-cols-2 gap-4">
+                <div>
+                  <label className={eyebrow}>Mother's name</label>
+                  <input className={`${field} mt-2`} value={form.mother_name} onChange={set("mother_name")} />
+                </div>
+                <div>
+                  <label className={eyebrow}>Mother's phone</label>
+                  <input className={`${field} mt-2`} value={form.mother_phone}
+                    onChange={set("mother_phone")} inputMode="numeric" />
+                </div>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="grid sm:grid-cols-2 gap-4">
+                <div>
+                  <label className={eyebrow}>Relationship</label>
+                  <input className={`${field} mt-2`} value={form.guardian_relationship}
+                    onChange={set("guardian_relationship")} placeholder="Uncle, Grandmother, etc." />
+                </div>
+                <div>
+                  <label className={eyebrow}>Guardian's name</label>
+                  <input className={`${field} mt-2`} value={form.guardian_name} onChange={set("guardian_name")} />
+                </div>
+              </div>
+              <div className="grid sm:grid-cols-2 gap-4">
+                <div>
+                  <label className={eyebrow}>Guardian phone</label>
+                  <input className={`${field} mt-2`} value={form.guardian_phone}
+                    onChange={set("guardian_phone")} inputMode="numeric" />
+                </div>
+                <div>
+                  <label className={eyebrow}>Guardian email</label>
+                  <input className={`${field} mt-2`} value={form.guardian_email}
+                    onChange={set("guardian_email")} type="email" />
+                </div>
+              </div>
+            </>
+          )}
           <div>
             <label className={eyebrow}>Address</label>
             <textarea rows={2} className={`${field} mt-2`} value={form.address} onChange={set("address")} />
