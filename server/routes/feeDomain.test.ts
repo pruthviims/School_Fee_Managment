@@ -640,6 +640,66 @@ describe("concessions and enrollment editing", () => {
     expect(res.status).toBe(200);
   });
 
+  it("withdraws a student — sets outcome, is_active, and logs it", async () => {
+    const cookie = await loginAs("owner@http.test");
+    const { enrollment } = await setUpAdmittedStudent(cookie);
+
+    const withdraw = await request(app).post(`/api/students/enrollments/${enrollment.id}/withdraw`)
+      .set("Cookie", cookie).send({ withdrawn_on: "2026-11-15", reason: "Family relocating to another city" });
+    expect(withdraw.status).toBe(200);
+    expect(withdraw.body.outcome).toBe("left");
+    expect(withdraw.body.is_active).toBe(false);
+    expect(withdraw.body.withdrawal_reason).toBe("Family relocating to another city");
+
+    const log = await request(app).get("/api/audit-log?entity_type=enrollment").set("Cookie", cookie);
+    const entry = log.body.find((e: any) => e.action === "enrollment.withdraw");
+    expect(entry).toBeDefined();
+    expect(entry.description).toContain("Test Student");
+  });
+
+  it("records a refund at management's own amount, not capped to the ledger balance", async () => {
+    const cookie = await loginAs("owner@http.test");
+    const { enrollment } = await setUpAdmittedStudent(cookie);
+    // Nothing has been paid at all — balance is the full charge, owed
+    // TO the school, not a credit — yet a refund is still allowed
+    // through, exactly as confirmed: management's own figure.
+    const refund = await request(app).post(`/api/students/enrollments/${enrollment.id}/refund`)
+      .set("Cookie", cookie).send({
+        amount: 500000, mode: "cheque", instrument_ref: "CHQ00123",
+        reason: "Goodwill gesture on withdrawal", approver_name: "R. Krishnamurthy (Principal)",
+      });
+    expect(refund.status).toBe(201);
+    expect(refund.body.amount).toBe(500000);
+    expect(refund.body.mode).toBe("cheque");
+
+    const list = await request(app).get(`/api/students/enrollments/${enrollment.id}/refunds`)
+      .set("Cookie", cookie);
+    expect(list.body).toHaveLength(1);
+    expect(list.body[0].approver_name).toBe("R. Krishnamurthy (Principal)");
+
+    const log = await request(app).get("/api/audit-log?entity_type=refund").set("Cookie", cookie);
+    expect(log.body.length).toBeGreaterThan(0);
+    expect(log.body[0].description).toContain("cheque");
+  });
+
+  it("front desk cannot record a refund (void_payments required)", async () => {
+    const ownerCookie = await loginAs("owner@http.test");
+    const { enrollment } = await setUpAdmittedStudent(ownerCookie);
+    const deskCookie = await loginAs("desk@http.test");
+    const res = await request(app).post(`/api/students/enrollments/${enrollment.id}/refund`)
+      .set("Cookie", deskCookie).send({ amount: 100000, mode: "cash" });
+    expect(res.status).toBe(403);
+  });
+
+  it("accountant can record a refund", async () => {
+    const ownerCookie = await loginAs("owner@http.test");
+    const { enrollment } = await setUpAdmittedStudent(ownerCookie);
+    const accountantCookie = await loginAs("acc@http.test");
+    const res = await request(app).post(`/api/students/enrollments/${enrollment.id}/refund`)
+      .set("Cookie", accountantCookie).send({ amount: 100000, mode: "cash" });
+    expect(res.status).toBe(201);
+  });
+
   it("rejects a duplicate roll number within the same section", async () => {
     const cookie = await loginAs("owner@http.test");
     const { year, sectionA, enrollment } = await setUpAdmittedStudent(cookie);

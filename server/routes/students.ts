@@ -247,6 +247,106 @@ studentsRouter.patch(
 );
 
 // ---------------------------------------------------------------------
+// Withdrawal and refunds — a student stops attending mid-year (a
+// parent's death, a transfer to another school) and the amount to
+// refund is management's own decision, not derived from the ledger
+// (confirmed: free-form, not capped to any calculated credit). These
+// are two genuinely independent actions, not one combined step: a
+// school might withdraw a student with nothing owed back, or refund an
+// amount without formally withdrawing (correcting an earlier mistake).
+// ---------------------------------------------------------------------
+
+const withdrawSchema = z.object({
+  withdrawn_on: z.string(),
+  reason: z.string().max(500).optional().default(""),
+});
+
+studentsRouter.post(
+  "/enrollments/:id/withdraw", requireCapability("manage_admissions"),
+  async (req, res) => {
+    const parsed = withdrawSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ detail: parsed.error.issues[0]?.message });
+    const d = parsed.data;
+
+    const result = await pool.query(
+      `UPDATE enrollments
+       SET outcome = 'left', is_active = false, withdrawn_on = $1, withdrawal_reason = $2
+       WHERE id = $3 AND school_id = $4 RETURNING *`,
+      [d.withdrawn_on, d.reason, req.params.id, req.school!.id],
+    );
+    if (!result.rows[0]) return res.status(404).end();
+
+    const student = await pool.query(`SELECT full_name FROM students WHERE id = $1`,
+      [result.rows[0].student_id]);
+    await logActivity(pool, req, {
+      action: "enrollment.withdraw",
+      entityType: "enrollment",
+      entityId: String(req.params.id),
+      description: `Withdrew ${student.rows[0]?.full_name || "a student"}${d.reason ? ` — ${d.reason}` : ""}`,
+      metadata: { withdrawn_on: d.withdrawn_on, reason: d.reason },
+    });
+
+    res.json(result.rows[0]);
+  },
+);
+
+const refundSchema = z.object({
+  amount: z.number().int().positive(), // paise — management's own figure, not tied to the ledger
+  mode: z.enum(["cash", "upi", "card", "netbanking", "neft", "cheque", "dd"]),
+  instrument_ref: z.string().max(100).optional().default(""),
+  reason: z.string().max(500).optional().default(""),
+  approver_name: z.string().max(150).optional().default(""),
+});
+
+// Accountant/Owner only (void_payments) — a refund is money leaving the
+// school, the same sensitivity level already agreed for voiding a
+// payment, not something Front Desk initiates on their own.
+studentsRouter.post(
+  "/enrollments/:id/refund", requireCapability("void_payments"),
+  async (req, res) => {
+    const parsed = refundSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ detail: parsed.error.issues[0]?.message });
+    const d = parsed.data;
+
+    const enrollment = await pool.query(
+      `SELECT e.id, s.full_name FROM enrollments e JOIN students s ON s.id = e.student_id
+       WHERE e.id = $1 AND e.school_id = $2`,
+      [req.params.id, req.school!.id],
+    );
+    if (!enrollment.rows[0]) return res.status(404).end();
+
+    const result = await pool.query(
+      `INSERT INTO refunds
+         (school_id, enrollment_id, amount, mode, instrument_ref, reason, approver_name, refunded_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+      [req.school!.id, req.params.id, d.amount, d.mode, d.instrument_ref, d.reason,
+       d.approver_name, req.user!.id],
+    );
+
+    await logActivity(pool, req, {
+      action: "refund.create",
+      entityType: "refund",
+      entityId: result.rows[0].id,
+      description: `Refunded ${enrollment.rows[0].full_name} — ₹${(d.amount / 100).toFixed(2)} via ${d.mode}`,
+      metadata: { amount: d.amount, mode: d.mode, reason: d.reason },
+    });
+
+    res.status(201).json(result.rows[0]);
+  },
+);
+
+studentsRouter.get("/enrollments/:id/refunds", async (req, res) => {
+  const result = await pool.query(
+    `SELECT r.*, u.full_name AS refunded_by_name FROM refunds r
+     LEFT JOIN users u ON u.id = r.refunded_by
+     WHERE r.enrollment_id = $1 AND r.school_id = $2
+     ORDER BY r.created_at DESC`,
+    [req.params.id, req.school!.id],
+  );
+  res.json(result.rows);
+});
+
+// ---------------------------------------------------------------------
 // Concessions — an append-only ledger, same as charges and payments.
 // Reversing one never deletes or edits the original: a new, zero-amount
 // row is created, and the original's reversed_by is pointed at it, so
