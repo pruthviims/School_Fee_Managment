@@ -94,8 +94,20 @@ describe("suggestColumnMap", () => {
     expect(map.full_name).toBe(1);
     expect(map.class_name).toBe(2);
     expect(map.section).toBe(3);
-    expect(map.guardian_name).toBe(4);
+    // "Father's Name" now claims the dedicated father_name field, not
+    // the older, more generic guardian_name — a sheet that only has
+    // one undifferentiated parent/guardian column (no "Father"/
+    // "Mother" split) still maps to guardian_name correctly, covered
+    // separately below.
+    expect(map.father_name).toBe(4);
     expect(map.guardian_phone).toBe(5);
+  });
+
+  it("still maps a generic, undifferentiated parent/guardian column when there's no father/mother split", () => {
+    const headers = ["Adm No", "Student Name", "Std", "Sec", "Parent Name", "Mobile No"];
+    const map = suggestColumnMap(headers);
+    expect(map.guardian_name).toBe(4);
+    expect(map.father_name).toBeUndefined();
   });
 
   it("never maps the same column to two fields", () => {

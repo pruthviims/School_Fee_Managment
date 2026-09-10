@@ -100,15 +100,28 @@ export interface RecordPaymentInput {
   gatewayOrderId?: string;
   gatewayPaymentId?: string;
   convenienceFee?: number;
+  client?: PoolClient;
 }
 
-/** Cash, UPI, card and net banking clear immediately. Cheques and DDs sit PENDING until confirmed. */
+/**
+ * Cash, UPI, card and net banking clear immediately. Cheques and DDs
+ * sit PENDING until confirmed.
+ *
+ * Takes an optional client so a caller already inside its own
+ * transaction (import's opening-balance payments, recorded alongside
+ * the charges they're paid against) can keep this atomic with the rest
+ * of what it's doing — same ownsConnection pattern generateCharges
+ * already uses, for the same reason: a payment succeeding while the
+ * enrollment it belongs to gets rolled back would be a real
+ * inconsistency, not just an edge case.
+ */
 export async function recordPayment(input: RecordPaymentInput): Promise<unknown> {
   if (input.amount <= 0) throw new CollectionError("Payment amount must be positive.");
 
-  const client = await pool.connect();
+  const ownsConnection = !input.client;
+  const client = input.client ?? await pool.connect();
   try {
-    await client.query("BEGIN");
+    if (ownsConnection) await client.query("BEGIN");
 
     const enrollmentResult = await client.query(
       `SELECT e.id, e.school_id, ay.status AS academic_year_status
@@ -143,13 +156,13 @@ export async function recordPayment(input: RecordPaymentInput): Promise<unknown>
 
     await allocate(client, payment, input.chargeAmounts);
 
-    await client.query("COMMIT");
+    if (ownsConnection) await client.query("COMMIT");
     return payment;
   } catch (err) {
-    await client.query("ROLLBACK");
+    if (ownsConnection) await client.query("ROLLBACK");
     throw err;
   } finally {
-    client.release();
+    if (ownsConnection) client.release();
   }
 }
 

@@ -13,6 +13,8 @@
 
 import Papa from "papaparse";
 import { pool } from "../db/index.js";
+import { generateCharges } from "./billing.js";
+import { recordPayment } from "./collection.js";
 
 export class ImportServiceError extends Error {}
 
@@ -26,14 +28,28 @@ const FIELDS: Record<string, string[]> = {
   roll_no: ["roll no", "roll", "roll number"],
   date_of_birth: ["dob", "date of birth", "birth date", "d.o.b"],
   gender: ["gender", "sex"],
-  guardian_name: ["parent name", "father name", "guardian name",
-    "father's name", "parent", "guardian"],
+  blood_group: ["blood group", "blood grp", "bg", "blood type"],
+  // father_name/mother_name are checked first in suggestColumnMap below
+  // (see the note there) so a column literally titled "Father Name"
+  // claims that dedicated field rather than the older, more generic
+  // guardian_name — which still exists for a sheet that only has one
+  // undifferentiated parent/guardian contact column, not one per parent.
+  father_name: ["father name", "father's name", "fathers name"],
+  father_phone: ["father phone", "father's phone", "father mobile", "father contact"],
+  father_email: ["father email", "father's email"],
+  mother_name: ["mother name", "mother's name", "mothers name"],
+  mother_phone: ["mother phone", "mother's phone", "mother mobile", "mother contact"],
+  mother_email: ["mother email", "mother's email"],
+  guardian_relationship: ["relationship", "guardian relationship", "relation to student", "relation"],
+  guardian_name: ["parent name", "guardian name", "parent", "guardian"],
   guardian_phone: ["phone", "mobile", "contact", "phone no",
     "mobile no", "contact number"],
   guardian_email: ["email", "email id", "e-mail"],
   address: ["address", "residential address"],
   stream: ["stream", "combination", "group"],
   bus_stop: ["bus stop", "stop", "transport stop", "pickup point"],
+  amount_paid: ["amount paid", "paid so far", "amount paid so far",
+    "payments done so far", "paid amount", "fees paid"],
 };
 
 const REQUIRED = ["admission_no", "full_name", "class_name"];
@@ -100,6 +116,17 @@ export function normalisePhone(raw: string): string {
   if (digits.length > 10 && digits.startsWith("91")) digits = digits.slice(2);
   if (digits.length > 10 && digits.startsWith("0")) digits = digits.replace(/^0+/, "");
   return digits;
+}
+
+const KNOWN_BLOOD_GROUPS = new Set(["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"]);
+
+/** "M"/"Male"/"F"/"Female" map directly; anything else non-blank becomes "other" rather than an error. */
+export function normaliseGender(raw: string): "male" | "female" | "other" | null {
+  const t = (raw || "").trim().toLowerCase();
+  if (!t) return null;
+  if (["m", "male", "boy"].includes(t)) return "male";
+  if (["f", "female", "girl"].includes(t)) return "female";
+  return "other";
 }
 
 const MONTH_NAMES: Record<string, number> = {
@@ -295,13 +322,54 @@ export async function stageImport(input: StageImportInput): Promise<unknown> {
       const dob = parseDate(dobRaw);
       if (dobRaw && !dob) warnings.push(`Could not read the date '${dobRaw}'. Left blank.`);
 
-      const phoneRaw = cell("guardian_phone");
-      const phone = normalisePhone(phoneRaw);
-      if (phoneRaw && phone.length !== 10) {
-        warnings.push(`Phone '${phoneRaw}' is not 10 digits. Kept as is.`);
+      const genderRaw = cell("gender");
+      const gender = normaliseGender(genderRaw);
+      if (!genderRaw) {
+        warnings.push("No gender given. Left blank — can be filled in later from the student's profile.");
+      } else if (!gender) {
+        warnings.push(`Could not read gender '${genderRaw}'. Use Male, Female, or Other. Left blank.`);
       }
-      if (!cell("guardian_name")) {
-        warnings.push("No guardian name. Fee reminders will have no contact.");
+
+      const bloodGroup = cell("blood_group").toUpperCase().replace(/\s+/g, "");
+      if (bloodGroup && !KNOWN_BLOOD_GROUPS.has(bloodGroup)) {
+        warnings.push(`Blood group '${cell("blood_group")}' isn't a standard group — kept as entered.`);
+      }
+
+      const checkPhone = (field: string, label: string) => {
+        const raw = cell(field);
+        const normalised = normalisePhone(raw);
+        if (raw && normalised.length !== 10) {
+          warnings.push(`${label} phone '${raw}' is not 10 digits. Kept as is.`);
+        }
+        return normalised;
+      };
+      const fatherPhone = checkPhone("father_phone", "Father's");
+      const motherPhone = checkPhone("mother_phone", "Mother's");
+      const guardianPhoneGeneric = checkPhone("guardian_phone", "Guardian");
+
+      // Which of Parents/Guardian applies is inferred from whichever
+      // columns actually have data — a school's existing roster may
+      // record just one parent, both, or a non-parent guardian, and
+      // bulk-importing historical data shouldn't force the same
+      // both-required rule New Admission applies to a fresh entry.
+      const fatherName = cell("father_name");
+      const motherName = cell("mother_name");
+      const guardianRelationship = cell("guardian_relationship");
+      const guardianNameRaw = cell("guardian_name");
+      const contactType = (fatherName || motherName) ? "parents" : "guardian";
+      if (!fatherName && !motherName && !guardianNameRaw) {
+        warnings.push("No parent or guardian name given. Fee reminders will have no contact.");
+      }
+
+      const amountPaidRaw = cell("amount_paid");
+      let amountPaidRupees = 0;
+      if (amountPaidRaw) {
+        const parsed = Number(amountPaidRaw.replace(/[,₹\s]/g, ""));
+        if (!Number.isFinite(parsed) || parsed < 0) {
+          warnings.push(`Could not read amount paid '${amountPaidRaw}'. Treated as 0.`);
+        } else {
+          amountPaidRupees = parsed;
+        }
       }
 
       const stopName = cell("bus_stop");
@@ -312,7 +380,13 @@ export async function stageImport(input: StageImportInput): Promise<unknown> {
       raw._class = klass;
       raw._section = section;
       raw._dob = dob ?? "";
-      raw._phone = phone;
+      raw._gender = gender ?? "";
+      raw._blood_group = bloodGroup;
+      raw._father_phone = fatherPhone;
+      raw._mother_phone = motherPhone;
+      raw._guardian_phone = guardianPhoneGeneric;
+      raw._contact_type = contactType;
+      raw._amount_paid_paise = String(Math.round(amountPaidRupees * 100));
 
       await client.query(
         `INSERT INTO import_rows (school_id, batch_id, line_no, raw, errors, warnings)
@@ -339,15 +413,22 @@ export async function stageImport(input: StageImportInput): Promise<unknown> {
 }
 
 /**
- * Create students and enrollments from a validated batch. Deliberately
- * does NOT generate charges — importing a roll is a records exercise;
- * billing them is a separate, explicit decision the admin makes once the
- * fee structure is confirmed correct.
+ * Creates students, enrollments, and — now that a class actually has
+ * fees set up for it (see the zero-fee-blocking check below, the same
+ * one New Admission already enforces) — their charges too, exactly
+ * like a normal admission would generate. Confirmed with the client:
+ * importing a roll used to deliberately stop at the records, on the
+ * theory that billing was a separate decision made later — but
+ * nothing else in the app ever actually took that later step, so an
+ * imported student showed as owing nothing at all. If the sheet also
+ * says how much they've already paid this year, that gets recorded as
+ * a real payment against those same charges, so the balance reflects
+ * where they actually stand, not a blank slate.
  */
 export async function commitImport(
   batchId: string, { skipInvalid = true, committedBy = null }:
     { skipInvalid?: boolean; committedBy?: string | null } = {},
-): Promise<{ created: number; skipped: number }> {
+): Promise<{ created: number; skipped: number; unpriced: string[] }> {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -381,13 +462,38 @@ export async function commitImport(
     );
     const streamsByLowerName = new Map(streamsResult.rows.map((s) => [s.name.toLowerCase(), s]));
 
+    // Same rule New Admission already enforces: a class with no priced
+    // fee_structure line at all doesn't get charges generated for it —
+    // computed once here for every class in the file, rather than
+    // re-querying per row.
+    const pricedResult = await client.query(
+      `SELECT DISTINCT class_level_id FROM fee_structures
+       WHERE school_id = $1 AND academic_year_id = $2 AND amount > 0`,
+      [batch.school_id, batch.academic_year_id],
+    );
+    const pricedClassIds = new Set(pricedResult.rows.map((r) => r.class_level_id));
+
     let created = 0;
+    const unpricedClassNames = new Set<string>();
 
     for (const row of rows) {
       if ((row.errors as unknown[]).length > 0) continue;
       const raw = row.raw as Record<string, string>;
 
       const klass = classesByName.get(raw._class)!;
+      const contactType = raw._contact_type === "parents" ? "parents" : "guardian";
+      // Same derivation New Admission uses: the primary contact every
+      // other screen reads (guardian_name/phone/email) comes from
+      // whichever parent is actually reachable when Parents applies,
+      // or the guardian's own details otherwise — father checked first
+      // only as a deterministic tie-break, not a statement about who
+      // the real contact is.
+      const primaryName = contactType === "guardian" ? (raw.guardian_name ?? "")
+        : ((raw.father_name || raw.mother_name) ?? "");
+      const primaryPhone = contactType === "guardian" ? (raw._guardian_phone ?? "")
+        : ((raw._father_phone || raw._mother_phone) ?? "");
+      const primaryEmail = contactType === "guardian" ? (raw.guardian_email ?? "")
+        : ((raw.father_email || raw.mother_email) ?? "");
 
       const sectionResult = await client.query(
         `INSERT INTO sections (school_id, academic_year_id, class_level_id, name, capacity)
@@ -401,13 +507,18 @@ export async function commitImport(
 
       const studentResult = await client.query(
         `INSERT INTO students
-           (school_id, admission_no, full_name, date_of_birth, gender,
+           (school_id, admission_no, full_name, date_of_birth, gender, blood_group,
+            contact_type, father_name, father_phone, father_email,
+            mother_name, mother_phone, mother_email, guardian_relationship,
             guardian_name, guardian_phone, guardian_email, address, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
          RETURNING id`,
         [batch.school_id, raw.admission_no ?? "", raw.full_name ?? "", raw._dob || null,
-         raw.gender ?? "", raw.guardian_name ?? "", raw._phone ?? "",
-         raw.guardian_email ?? "", raw.address ?? "", committedBy],
+         raw._gender ?? "", raw._blood_group ?? "",
+         contactType, raw.father_name ?? "", raw._father_phone ?? "", raw.father_email ?? "",
+         raw.mother_name ?? "", raw._mother_phone ?? "", raw.mother_email ?? "",
+         raw.guardian_relationship ?? "",
+         primaryName, primaryPhone, primaryEmail, raw.address ?? "", committedBy],
       );
       const studentId = studentResult.rows[0].id;
 
@@ -422,16 +533,34 @@ export async function commitImport(
 
       const rollNo = /^\d+$/.test(raw.roll_no ?? "") ? parseInt(raw.roll_no, 10) : null;
 
-      await client.query(
+      const enrollmentResult = await client.query(
         `INSERT INTO enrollments
            (school_id, student_id, academic_year_id, class_level_id, section_id, stream_id,
             roll_no, admission_type, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'carry_over', $8)`,
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'carry_over', $8)
+         RETURNING id`,
         // Imported students were already at the school; they are not new
-        // admissions and must not be charged an admission fee.
+        // admissions and must not be charged an admission fee — the
+        // 'carry_over' admission_type is what generateCharges below uses
+        // to correctly skip any one-time (admission) fee line.
         [batch.school_id, studentId, batch.academic_year_id, klass.id, sectionId, streamId,
          rollNo, committedBy],
       );
+      const enrollmentId = enrollmentResult.rows[0].id;
+
+      if (pricedClassIds.has(klass.id)) {
+        await generateCharges(enrollmentId, { createdBy: committedBy, client });
+
+        const amountPaidPaise = Number(raw._amount_paid_paise ?? "0");
+        if (amountPaidPaise > 0) {
+          await recordPayment({
+            enrollmentId, amount: amountPaidPaise, mode: "cash",
+            instrumentRef: "Opening balance from import", collectedBy: committedBy, client,
+          });
+        }
+      } else {
+        unpricedClassNames.add(klass.name);
+      }
 
       await client.query(`UPDATE import_rows SET student_id = $1 WHERE id = $2`, [studentId, row.id]);
       created++;
@@ -443,7 +572,7 @@ export async function commitImport(
     );
 
     await client.query("COMMIT");
-    return { created, skipped: bad.length };
+    return { created, skipped: bad.length, unpriced: [...unpricedClassNames] };
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;
@@ -455,10 +584,16 @@ export async function commitImport(
 /** The blank sheet to hand a school that has nothing usable. */
 export function templateCsv(): string {
   const cols = ["Admission No", "Name", "Class", "Section", "Roll No",
-    "DOB", "Gender", "Guardian Name", "Phone", "Email",
-    "Address", "Stream", "Bus Stop"];
+    "DOB", "Gender", "Blood Group",
+    "Father Name", "Father Phone", "Father Email",
+    "Mother Name", "Mother Phone", "Mother Email",
+    "Guardian Relationship", "Guardian Name", "Phone", "Email",
+    "Address", "Stream", "Bus Stop", "Amount Paid So Far"];
   const example = ["2026/0001", "Ananya Krishnamurthy", "VIII", "A", "1",
-    "14/03/2012", "F", "R. Krishnamurthy", "9845012345",
-    "parent@example.com", "12 MG Road, Bengaluru", "", "Jayanagar 4th Block"];
+    "14/03/2012", "F", "O+",
+    "R. Krishnamurthy", "9845012345", "father@example.com",
+    "S. Krishnamurthy", "9845012346", "mother@example.com",
+    "", "", "", "",
+    "12 MG Road, Bengaluru", "", "Jayanagar 4th Block", "15000"];
   return Papa.unparse([cols, example]);
 }
