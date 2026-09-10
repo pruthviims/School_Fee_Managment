@@ -21,6 +21,13 @@ function serializeMembership(row: any) {
     full_name: row.full_name,
     role: row.role,
     is_active: row.is_active,
+    // Whether they've ever actually set a password — password_hash
+    // stays null from invitation until the reset/invite link is used
+    // (see the invite handler below). Never the hash itself, just
+    // whether one exists, so the frontend can show "hasn't signed in
+    // yet, here's how to resend their invite" without exposing
+    // anything sensitive.
+    has_password: Boolean(row.password_hash),
     capabilities: capabilitiesFor(row.role, row.is_active).sort(),
     created_at: row.created_at,
   };
@@ -29,7 +36,7 @@ function serializeMembership(row: any) {
 staffRouter.get("/", async (req, res) => {
   const result = await pool.query(
     `SELECT m.id, m.role, m.is_active, m.created_at, m.user_id,
-            u.email, u.full_name
+            u.email, u.full_name, u.password_hash
      FROM memberships m JOIN users u ON u.id = m.user_id
      WHERE m.school_id = $1
      ORDER BY u.full_name, u.email`,
@@ -96,16 +103,19 @@ staffRouter.post("/", async (req, res) => {
       metadata: { role },
     });
 
-    await makeAndSendCredentialEmail(user, {
+    const inviteUrl = await makeAndSendCredentialEmail(user, {
       subject: `You've been added to ${req.school!.name}'s Fee Portal`,
       intro: `${req.user!.full_name || req.user!.email} has given you ` +
         `${ROLE_LABEL[role as Role]} access to ${req.school!.name} on the Fee Portal. ` +
         "Set your password to get started:",
     });
 
-    res.status(201).json(serializeMembership({
-      ...membership.rows[0], user_id: user.id, email: user.email, full_name: user.full_name,
-    }));
+    res.status(201).json({
+      ...serializeMembership({
+        ...membership.rows[0], user_id: user.id, email: user.email, full_name: user.full_name,
+      }),
+      invite_url: inviteUrl,
+    });
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;
@@ -130,6 +140,34 @@ async function loadMembership(req: any, membershipId: string) {
   );
   return result.rows[0] ?? null;
 }
+
+staffRouter.post("/:membershipId/resend-invite", async (req, res) => {
+  const membership = await loadMembership(req, req.params.membershipId);
+  if (!membership) return res.status(404).end();
+
+  // Works regardless of whether they've signed in before — the same
+  // link either lets someone who never got the original invite set
+  // their first password, or lets an existing staff member set a new
+  // one, without needing a separate "reset a colleague's password"
+  // mechanism duplicating this one.
+  const inviteUrl = await makeAndSendCredentialEmail(
+    { id: membership.user_id, password_hash: null, email: membership.email },
+    {
+      subject: `Your ${req.school!.name} Fee Portal access`,
+      intro: `${req.user!.full_name || req.user!.email} sent you a link to set your ` +
+        `password for ${req.school!.name} on the Fee Portal:`,
+    },
+  );
+
+  await logActivity(pool, req, {
+    action: "staff.resend_invite",
+    entityType: "membership",
+    entityId: membership.id,
+    description: `Resent access setup link to ${membership.email}`,
+  });
+
+  res.json({ invite_url: inviteUrl });
+});
 
 staffRouter.patch("/:membershipId", async (req, res) => {
   const membership = await loadMembership(req, req.params.membershipId);

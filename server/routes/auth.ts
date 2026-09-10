@@ -298,7 +298,7 @@ authRouter.post("/password-reset/confirm", async (req, res) => {
 export async function makeAndSendCredentialEmail(
   user: { id: string; password_hash: string | null; email: string },
   { subject, intro }: { subject: string; intro: string },
-) {
+): Promise<string> {
   const token = makeCredentialToken(user);
   const uid = user.id;
   const frontendUrl = (process.env.FRONTEND_URL || "http://localhost:5173").replace(/\/$/, "");
@@ -311,4 +311,11 @@ export async function makeAndSendCredentialEmail(
       `This link works for ${CREDENTIAL_TOKEN_TTL_HOURS} hours. If you didn't expect this ` +
       "email, you can ignore it — nothing changes until the link is used.",
   });
+
+  // Returned (not just sent) so the caller can offer it as a fallback —
+  // sendMail() silently just logs to the server console instead of
+  // actually delivering anything whenever EMAIL_HOST isn't configured
+  // (see emailService.ts), which is invisible to whoever clicked
+  // "invite" and easy to mistake for the invite itself having failed.
+  return resetUrl;
 }

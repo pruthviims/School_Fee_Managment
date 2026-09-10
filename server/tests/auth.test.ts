@@ -133,9 +133,66 @@ describe("staff management", () => {
     expect(call.text).toContain("uid=");
     expect(call.text).toContain("token=");
 
+    // Returned directly, not just emailed — sendMail() silently just
+    // logs to the server console instead of actually delivering
+    // anything whenever EMAIL_HOST isn't configured, which is
+    // invisible to whoever clicked "invite." The Owner needs a way to
+    // get this link even when email delivery isn't working.
+    expect(res.body.invite_url).toContain("uid=");
+    expect(res.body.invite_url).toContain("token=");
+    expect(res.body.has_password).toBe(false);
+
     const userRow = await pool.query(`SELECT password_hash FROM users WHERE email = $1`,
       ["new-accountant@school.test"]);
     expect(userRow.rows[0].password_hash).toBeNull();
+  });
+
+  it("resending an invite works for a pending staff member and returns a fresh link", async () => {
+    const { cookie } = await loginAs("owner@school.test", "x".repeat(14));
+    const invite = await request(app).post("/api/staff").set("Cookie", cookie).send({
+      email: "never-got-the-email@school.test", role: "accountant",
+    });
+    sendMailSpy.mockClear();
+
+    const resend = await request(app).post(`/api/staff/${invite.body.id}/resend-invite`)
+      .set("Cookie", cookie);
+    expect(resend.status).toBe(200);
+    expect(resend.body.invite_url).toContain("uid=");
+    expect(sendMailSpy).toHaveBeenCalledTimes(1);
+    expect(sendMailSpy.mock.calls[0][0].to).toBe("never-got-the-email@school.test");
+  });
+
+  it("resending an invite also works for an already-active staff member", async () => {
+    const { cookie } = await loginAs("owner@school.test", "x".repeat(14));
+    const membershipRow = await pool.query(`SELECT id FROM memberships WHERE user_id = $1`,
+      [frontDesk.id]);
+    const resend = await request(app).post(`/api/staff/${membershipRow.rows[0].id}/resend-invite`)
+      .set("Cookie", cookie);
+    expect(resend.status).toBe(200);
+    expect(resend.body.invite_url).toBeTruthy();
+  });
+
+  it("front desk cannot resend an invite", async () => {
+    const ownerCookie = await loginAs("owner@school.test", "x".repeat(14));
+    const invite = await request(app).post("/api/staff").set("Cookie", ownerCookie.cookie).send({
+      email: "someone-else@school.test", role: "viewer",
+    });
+    const { cookie: deskCookie } = await loginAs("desk@school.test", "x".repeat(14));
+    const resend = await request(app).post(`/api/staff/${invite.body.id}/resend-invite`)
+      .set("Cookie", deskCookie);
+    expect(resend.status).toBe(403);
+  });
+
+  it("staff list reports has_password correctly for pending vs active staff", async () => {
+    const { cookie } = await loginAs("owner@school.test", "x".repeat(14));
+    await request(app).post("/api/staff").set("Cookie", cookie)
+      .send({ email: "still-pending@school.test", role: "viewer" });
+
+    const list = await request(app).get("/api/staff").set("Cookie", cookie);
+    const pending = list.body.find((m: any) => m.email === "still-pending@school.test");
+    const active = list.body.find((m: any) => m.email === "owner@school.test");
+    expect(pending.has_password).toBe(false);
+    expect(active.has_password).toBe(true);
   });
 
   it("inviting the same person twice is refused", async () => {

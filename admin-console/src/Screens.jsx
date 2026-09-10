@@ -8,6 +8,7 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  Copy,
   Download,
   FileSpreadsheet,
   GraduationCap,
@@ -2916,6 +2917,7 @@ export function StaffScreen({ currentUserId }) {
   const [error, setError] = useState("");
   const [inviting, setInviting] = useState(false);
   const [busyId, setBusyId] = useState(null);
+  const [resendLink, setResendLink] = useState(null); // {email, url}
 
   async function refetch() {
     setLoading(true);
@@ -2953,6 +2955,18 @@ export function StaffScreen({ currentUserId }) {
     }
   }
 
+  async function resendInvite(member) {
+    setBusyId(member.id);
+    try {
+      const result = await api.post(`/staff/${member.id}/resend-invite`, {});
+      setResendLink({ email: member.email, url: result.invite_url });
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Could not resend that invite.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   return (
     <div>
       <PageHead title="Staff Access"
@@ -2971,6 +2985,23 @@ export function StaffScreen({ currentUserId }) {
       {inviting && (
         <InviteStaffPanel onDone={() => { setInviting(false); refetch(); }}
           onCancel={() => setInviting(false)} />
+      )}
+
+      {resendLink && (
+        <div className="fixed inset-0 bg-slate-900/40 flex items-center justify-center p-4 z-50"
+          onClick={() => setResendLink(null)}>
+          <div className={`${panel} w-full max-w-lg p-6`} onClick={(e) => e.stopPropagation()}>
+            <h2 className="font-extrabold mb-1 flex items-center gap-2">
+              <Mail size={18} className="text-brand-600" /> Link sent to {resendLink.email}
+            </h2>
+            <p className="text-sm text-slate-500 mb-4">
+              Email delivery isn't always reliable — here's the same link to share directly if
+              it doesn't arrive.
+            </p>
+            <CopyableLink url={resendLink.url} />
+            <button className={`${primary} mt-4`} onClick={() => setResendLink(null)}>Done</button>
+          </div>
+        </div>
       )}
 
       <div className={`${panel} overflow-hidden`}>
@@ -3023,17 +3054,28 @@ export function StaffScreen({ currentUserId }) {
                             Revoked
                           </span>
                         )}
+                        {m.is_active && !m.has_password && (
+                          <span className="block mt-1 text-[11px] font-bold text-amber-600">
+                            Hasn't signed in yet
+                          </span>
+                        )}
                       </td>
                       <td className="px-5 py-3 text-right">
                         {isSelf ? (
                           <span className="text-xs font-semibold text-slate-300">That's you</span>
                         ) : (
-                          <button disabled={busy} onClick={() => toggleActive(m)}
-                            className={m.is_active
-                              ? "text-xs font-bold rounded-lg px-3 py-2 border border-slate-200 text-slate-500 hover:border-red-300 hover:text-red-500 whitespace-nowrap disabled:opacity-50"
-                              : "text-xs font-bold rounded-lg px-3 py-2 bg-brand-600 text-white hover:bg-brand-700 whitespace-nowrap disabled:opacity-50"}>
-                            {busy ? "Working…" : m.is_active ? "Revoke access" : "Reactivate"}
-                          </button>
+                          <div className="flex items-center gap-2 justify-end">
+                            <button disabled={busy} onClick={() => resendInvite(m)}
+                              className="text-xs font-bold rounded-lg px-3 py-2 border border-slate-200 text-slate-500 hover:border-brand-300 hover:text-brand-600 whitespace-nowrap disabled:opacity-50">
+                              {m.has_password ? "Send reset link" : "Resend invite"}
+                            </button>
+                            <button disabled={busy} onClick={() => toggleActive(m)}
+                              className={m.is_active
+                                ? "text-xs font-bold rounded-lg px-3 py-2 border border-slate-200 text-slate-500 hover:border-red-300 hover:text-red-500 whitespace-nowrap disabled:opacity-50"
+                                : "text-xs font-bold rounded-lg px-3 py-2 bg-brand-600 text-white hover:bg-brand-700 whitespace-nowrap disabled:opacity-50"}>
+                              {busy ? "Working…" : m.is_active ? "Revoke access" : "Reactivate"}
+                            </button>
+                          </div>
                         )}
                       </td>
                     </tr>
@@ -3054,26 +3096,45 @@ function InviteStaffPanel({ onDone, onCancel }) {
   const [role, setRole] = useState("front_desk");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [inviteLink, setInviteLink] = useState(null); // set once the invite itself succeeds
 
   async function submit(e) {
     e.preventDefault();
     setError("");
     setBusy(true);
     try {
-      await api.post("/staff", { email: email.trim(), full_name: fullName.trim(), role });
-      onDone();
+      const result = await api.post("/staff", { email: email.trim(), full_name: fullName.trim(), role });
+      setInviteLink(result.invite_url);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not send that invite.");
+    } finally {
       setBusy(false);
     }
+  }
+
+  if (inviteLink) {
+    return (
+      <div className={`${panel} p-6 mb-5`}>
+        <h2 className="font-extrabold mb-1 flex items-center gap-2">
+          <Check size={18} className="text-emerald-600" /> Invite sent to {email}
+        </h2>
+        <p className="text-sm text-slate-500 mb-4">
+          An email with a link to set their password was sent — but email delivery isn't always
+          reliable, so here's the same link to share directly (WhatsApp, SMS, anything) if it
+          doesn't arrive.
+        </p>
+        <CopyableLink url={inviteLink} />
+        <button className={`${primary} mt-4`} onClick={onDone}>Done</button>
+      </div>
+    );
   }
 
   return (
     <div className={`${panel} p-6 mb-5`}>
       <h2 className="font-extrabold mb-1">Invite someone new</h2>
       <p className="text-sm text-slate-500 mb-4">
-        They'll get an email with a link to set their own password — nothing to share over
-        phone or chat.
+        They'll get an email with a link to set their own password. If it doesn't arrive, the
+        link can also be copied and shared directly afterward.
       </p>
       {error && (
         <div className="mb-4 flex items-start gap-2 bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-3 text-sm font-semibold">
@@ -3111,6 +3172,31 @@ function InviteStaffPanel({ onDone, onCancel }) {
           <button type="button" className={ghost} onClick={onCancel}>Cancel</button>
         </div>
       </form>
+    </div>
+  );
+}
+
+function CopyableLink({ url }) {
+  const [copied, setCopied] = useState(false);
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard access can be blocked by the browser — the link is
+      // still fully visible and selectable by hand either way.
+    }
+  }
+  return (
+    <div className="flex items-stretch gap-2">
+      <input readOnly value={url} onFocus={(e) => e.target.select()}
+        className={`${field} font-mono text-xs`} />
+      <button onClick={copy}
+        className="shrink-0 text-sm font-bold rounded-xl px-4 border-2 border-slate-200 hover:border-brand-300 flex items-center gap-1.5">
+        {copied ? <Check size={15} className="text-emerald-600" /> : <Copy size={15} />}
+        {copied ? "Copied" : "Copy"}
+      </button>
     </div>
   );
 }
