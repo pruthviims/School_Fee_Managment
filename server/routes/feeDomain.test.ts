@@ -318,6 +318,8 @@ describe("admission -> billing -> collection, end to end", () => {
     const deskCookie = await loginAs("desk@http.test");
     const admission = await request(app).post("/api/students/admit").set("Cookie", deskCookie).send({
       admission_no: "2026/001", full_name: "Ravi Kumar",
+      gender: "male", contact_type: "guardian",
+      guardian_relationship: "Father", guardian_name: "Test Guardian",
       academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
     });
     expect(admission.status).toBe(201);
@@ -342,6 +344,8 @@ describe("admission -> billing -> collection, end to end", () => {
 
     const admission = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
       admission_no: "2026/900", full_name: "Unpriced Class Student",
+      gender: "male", contact_type: "guardian",
+      guardian_relationship: "Father", guardian_name: "Test Guardian",
       academic_year_id: year.body.id, class_level_id: classLevel.body.id, section_id: section.body.id,
     });
     expect(admission.status).toBe(400);
@@ -368,6 +372,8 @@ describe("admission -> billing -> collection, end to end", () => {
 
     const admission = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
       admission_no: "2026/901", full_name: "Zero Fee Student",
+      gender: "male", contact_type: "guardian",
+      guardian_relationship: "Father", guardian_name: "Test Guardian",
       academic_year_id: year.body.id, class_level_id: classLevel.body.id, section_id: section.body.id,
     });
     expect(admission.status).toBe(400);
@@ -389,6 +395,8 @@ describe("admission -> billing -> collection, end to end", () => {
     const deskCookie = await loginAs("desk@http.test");
     const admission = await request(app).post("/api/students/admit").set("Cookie", deskCookie).send({
       admission_no: "2026/002", full_name: "Sneha Iyer",
+      gender: "male", contact_type: "guardian",
+      guardian_relationship: "Father", guardian_name: "Test Guardian",
       academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
     });
 
@@ -409,6 +417,8 @@ describe("admission -> billing -> collection, end to end", () => {
     const { year, classLevel, section } = await setUpAcademicStructure(ownerCookie);
     const admission = await request(app).post("/api/students/admit").set("Cookie", ownerCookie).send({
       admission_no: "2026/920", full_name: "Logged Payment Student",
+      gender: "male", contact_type: "guardian",
+      guardian_relationship: "Father", guardian_name: "Test Guardian",
       academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
     });
     await request(app).post("/api/collection/payments").set("Cookie", ownerCookie).send({
@@ -428,6 +438,8 @@ describe("admission -> billing -> collection, end to end", () => {
     const deskCookie = await loginAs("desk@http.test");
     const admission = await request(app).post("/api/students/admit").set("Cookie", deskCookie).send({
       admission_no: "2026/902", full_name: "Payment History Student",
+      gender: "male", contact_type: "guardian",
+      guardian_relationship: "Father", guardian_name: "Test Guardian",
       academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
     });
     await request(app).post("/api/collection/payments").set("Cookie", deskCookie).send({
@@ -451,6 +463,8 @@ describe("admission -> billing -> collection, end to end", () => {
     const { year, classLevel, section } = await setUpAcademicStructure(ownerCookie);
     const admission = await request(app).post("/api/students/admit").set("Cookie", ownerCookie).send({
       admission_no: "2026/910", full_name: "Wrong Amount Student",
+      gender: "male", contact_type: "guardian",
+      guardian_relationship: "Father", guardian_name: "Test Guardian",
       academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
     });
     // Office meant to type 15,560 but typed 15,660.
@@ -491,6 +505,8 @@ describe("admission -> billing -> collection, end to end", () => {
     const { year, classLevel, section } = await setUpAcademicStructure(cookie);
     const admission = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
       admission_no: "2026/911", full_name: "Double Void Student",
+      gender: "male", contact_type: "guardian",
+      guardian_relationship: "Father", guardian_name: "Test Guardian",
       academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
     });
     const payment = await request(app).post("/api/collection/payments").set("Cookie", cookie).send({
@@ -509,6 +525,8 @@ describe("admission -> billing -> collection, end to end", () => {
     const { year, classLevel, section } = await setUpAcademicStructure(ownerCookie);
     const admission = await request(app).post("/api/students/admit").set("Cookie", ownerCookie).send({
       admission_no: "2026/912", full_name: "No Void Student",
+      gender: "male", contact_type: "guardian",
+      guardian_relationship: "Father", guardian_name: "Test Guardian",
       academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
     });
     const payment = await request(app).post("/api/collection/payments").set("Cookie", ownerCookie).send({
@@ -526,6 +544,8 @@ describe("admission -> billing -> collection, end to end", () => {
     const { year, classLevel, section } = await setUpAcademicStructure(ownerCookie);
     const admission = await request(app).post("/api/students/admit").set("Cookie", ownerCookie).send({
       admission_no: "2026/913", full_name: "Accountant Void Student",
+      gender: "male", contact_type: "guardian",
+      guardian_relationship: "Father", guardian_name: "Test Guardian",
       academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
     });
     const payment = await request(app).post("/api/collection/payments").set("Cookie", ownerCookie).send({
@@ -543,6 +563,8 @@ describe("admission -> billing -> collection, end to end", () => {
       const { year, classLevel, section } = await setUpAcademicStructure(cookie);
       const admission = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
         admission_no: "2026/950", full_name: "Leaving Student",
+        gender: "male", contact_type: "guardian",
+        guardian_relationship: "Father", guardian_name: "Test Guardian",
         academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
       });
       return admission.body.enrollment;
@@ -637,6 +659,8 @@ describe("admission -> billing -> collection, end to end", () => {
       for (let i = 0; i < 2; i++) {
         const admission = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
           admission_no: `2026/96${i}`, full_name: `TC Student ${i}`,
+          gender: "male", contact_type: "guardian",
+          guardian_relationship: "Father", guardian_name: "Test Guardian",
           academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
         });
         const req1 = await request(app).post(`/api/students/enrollments/${admission.body.enrollment.id}/tc-requests`)
@@ -700,6 +724,8 @@ describe("admission -> billing -> collection, end to end", () => {
     const deskCookie = await loginAs("desk@http.test");
     const admission = await request(app).post("/api/students/admit").set("Cookie", deskCookie).send({
       admission_no: "2026/003", full_name: "Arjun Shetty",
+      gender: "male", contact_type: "guardian",
+      guardian_relationship: "Father", guardian_name: "Test Guardian",
       academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
     });
     await request(app).post("/api/collection/payments").set("Cookie", deskCookie).send({
@@ -721,6 +747,8 @@ describe("admission -> billing -> collection, end to end", () => {
     const deskCookie = await loginAs("desk@http.test");
     const admission = await request(app).post("/api/students/admit").set("Cookie", deskCookie).send({
       admission_no: "2026/004", full_name: "Meera Nair",
+      gender: "male", contact_type: "guardian",
+      guardian_relationship: "Father", guardian_name: "Test Guardian",
       academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
     });
 
@@ -765,6 +793,8 @@ describe("concessions and enrollment editing", () => {
     });
     const admission = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
       admission_no: "2026/800", full_name: "Test Student",
+      gender: "male", contact_type: "guardian",
+      guardian_relationship: "Father", guardian_name: "Test Guardian",
       academic_year_id: year.body.id, class_level_id: classLevel.body.id,
       section_id: sectionA.body.id,
     });
@@ -987,6 +1017,159 @@ describe("concessions and enrollment editing", () => {
     expect(profile.body.withdrawn_on).toContain("2026-11-15");
   });
 
+  describe("gender, blood group, and family details", () => {
+    async function classSetup(cookie: string) {
+      const year = await request(app).post("/api/setup/academic-years").set("Cookie", cookie)
+        .send({ name: "2026-27", starts_on: "2026-06-01", ends_on: "2027-03-31" });
+      const classLevel = await request(app).post("/api/setup/class-levels").set("Cookie", cookie)
+        .send({ name: "VIII", ladder_order: 8, stage: "middle" });
+      const section = await request(app).post("/api/setup/sections").set("Cookie", cookie).send({
+        academic_year_id: year.body.id, class_level_id: classLevel.body.id, name: "A",
+      });
+      const feeHead = await request(app).post("/api/setup/fee-heads").set("Cookie", cookie)
+        .send({ name: "Tuition fee" });
+      await request(app).post("/api/setup/fee-structure").set("Cookie", cookie).send({
+        academic_year_id: year.body.id, class_level_id: classLevel.body.id,
+        fee_head_id: feeHead.body.id, amount: 4000000, due_on: "2026-06-15",
+      });
+      return { year: year.body, classLevel: classLevel.body, section: section.body };
+    }
+
+    it("refuses admission without gender", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const { year, classLevel, section } = await classSetup(cookie);
+      const res = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
+        admission_no: "2026/930", full_name: "No Gender Student",
+        contact_type: "guardian", guardian_relationship: "Father", guardian_name: "A Guardian",
+        academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("admits successfully without a blood group — it's optional", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const { year, classLevel, section } = await classSetup(cookie);
+      const res = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
+        admission_no: "2026/931", full_name: "No Blood Group Student", gender: "female",
+        contact_type: "guardian", guardian_relationship: "Mother", guardian_name: "A Guardian",
+        academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
+      });
+      expect(res.status).toBe(201);
+      expect(res.body.student.blood_group).toBe("");
+    });
+
+    it("Parents requires both father's and mother's name", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const { year, classLevel, section } = await classSetup(cookie);
+      const res = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
+        admission_no: "2026/932", full_name: "Only Father Student", gender: "male",
+        contact_type: "parents", father_name: "Some Father", // mother_name missing
+        academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("Guardian requires both relationship and name", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const { year, classLevel, section } = await classSetup(cookie);
+      const res = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
+        admission_no: "2026/933", full_name: "No Relationship Student", gender: "male",
+        contact_type: "guardian", guardian_name: "Some Guardian", // relationship missing
+        academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("Parents: the primary contact (guardian_name/phone/email) is derived from the father", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const { year, classLevel, section } = await classSetup(cookie);
+      const res = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
+        admission_no: "2026/934", full_name: "Parents Student", gender: "male", blood_group: "O+",
+        contact_type: "parents",
+        father_name: "Suresh Rao", father_phone: "9000000001", father_email: "suresh@example.test",
+        mother_name: "Lakshmi Rao", mother_phone: "9000000002",
+        academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
+      });
+      expect(res.status).toBe(201);
+      expect(res.body.student.blood_group).toBe("O+");
+      expect(res.body.student.father_name).toBe("Suresh Rao");
+      expect(res.body.student.mother_name).toBe("Lakshmi Rao");
+      // The primary contact fields every other screen reads are
+      // populated automatically — nothing downstream had to change.
+      expect(res.body.student.guardian_name).toBe("Suresh Rao");
+      expect(res.body.student.guardian_phone).toBe("9000000001");
+      expect(res.body.student.guardian_email).toBe("suresh@example.test");
+    });
+
+    it("Parents: falls back to the mother's contact if the father's is blank", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const { year, classLevel, section } = await classSetup(cookie);
+      const res = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
+        admission_no: "2026/935", full_name: "Mother Fallback Student", gender: "female",
+        contact_type: "parents",
+        father_name: "Suresh Rao", // no father phone/email
+        mother_name: "Lakshmi Rao", mother_phone: "9000000002", mother_email: "lakshmi@example.test",
+        academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
+      });
+      expect(res.status).toBe(201);
+      expect(res.body.student.guardian_phone).toBe("9000000002");
+      expect(res.body.student.guardian_email).toBe("lakshmi@example.test");
+    });
+
+    it("Guardian: the primary contact is the guardian's own details", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const { year, classLevel, section } = await classSetup(cookie);
+      const res = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
+        admission_no: "2026/936", full_name: "Guardian Student", gender: "other",
+        contact_type: "guardian", guardian_relationship: "Grandmother",
+        guardian_name: "Kamala Devi", guardian_phone: "9000000003",
+        academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
+      });
+      expect(res.status).toBe(201);
+      expect(res.body.student.guardian_relationship).toBe("Grandmother");
+      expect(res.body.student.guardian_name).toBe("Kamala Devi");
+    });
+
+    it("gender and blood group can both be edited later via the profile endpoint", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const { year, classLevel, section } = await classSetup(cookie);
+      const admission = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
+        admission_no: "2026/937", full_name: "Editable Student", gender: "male",
+        contact_type: "guardian", guardian_relationship: "Father", guardian_name: "A Guardian",
+        academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
+      });
+      const studentId = admission.body.enrollment.student_id;
+
+      const patch = await request(app).patch(`/api/students/${studentId}`).set("Cookie", cookie)
+        .send({ gender: "other", blood_group: "AB-" });
+      expect(patch.status).toBe(200);
+      expect(patch.body.gender).toBe("other");
+      expect(patch.body.blood_group).toBe("AB-");
+    });
+
+    it("editing from Guardian to Parents re-derives the primary contact", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const { year, classLevel, section } = await classSetup(cookie);
+      const admission = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
+        admission_no: "2026/938", full_name: "Switching Student", gender: "female",
+        contact_type: "guardian", guardian_relationship: "Aunt", guardian_name: "Aunt Name",
+        guardian_phone: "9000000009",
+        academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
+      });
+      const studentId = admission.body.enrollment.student_id;
+      expect(admission.body.student.guardian_name).toBe("Aunt Name");
+
+      const patch = await request(app).patch(`/api/students/${studentId}`).set("Cookie", cookie).send({
+        contact_type: "parents",
+        father_name: "New Father", father_phone: "9000000011",
+        mother_name: "New Mother",
+      });
+      expect(patch.status).toBe(200);
+      expect(patch.body.guardian_name).toBe("New Father");
+      expect(patch.body.guardian_phone).toBe("9000000011");
+    });
+  });
+
   it("withdraws a student — sets outcome, is_active, and logs it", async () => {
     const cookie = await loginAs("owner@http.test");
     const { enrollment } = await setUpAdmittedStudent(cookie);
@@ -1055,6 +1238,8 @@ describe("concessions and enrollment editing", () => {
 
     const admission2 = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
       admission_no: "2026/801", full_name: "Second Student",
+      gender: "male", contact_type: "guardian",
+      guardian_relationship: "Father", guardian_name: "Test Guardian",
       academic_year_id: year.id, class_level_id: enrollment.class_level_id, section_id: sectionA.id,
     });
     const dup = await request(app).patch(`/api/students/enrollments/${admission2.body.enrollment.id}`)
@@ -1081,6 +1266,8 @@ describe("gateway webhook", () => {
     });
     const admission = await request(app).post("/api/students/admit").set("Cookie", ownerCookie).send({
       admission_no: "2026/005", full_name: "Kavya Reddy",
+      gender: "male", contact_type: "guardian",
+      guardian_relationship: "Father", guardian_name: "Test Guardian",
       academic_year_id: year.body.id, class_level_id: classLevel.body.id, section_id: section.body.id,
     });
 

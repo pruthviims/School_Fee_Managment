@@ -51,6 +51,8 @@ async function setUpRouteStopFareAndStudent(cookie: string, annualFarePaise = 50
   });
   const admission = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
     admission_no: "2026/700", full_name: "Test Rider",
+    gender: "male", contact_type: "guardian",
+    guardian_relationship: "Father", guardian_name: "Test Guardian",
     academic_year_id: year.body.id, class_level_id: classLevel.body.id, section_id: section.body.id,
   });
   return { year: year.body, route: route.body, stop: stop.body, enrollment: admission.body.enrollment };

@@ -50,6 +50,8 @@ describe("audit log", () => {
 
     await request(app).post("/api/students/admit").set("Cookie", cookie).send({
       admission_no: "2026/500", full_name: "Ravi Kumar",
+      gender: "male", contact_type: "guardian",
+      guardian_relationship: "Father", guardian_name: "Test Guardian",
       academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
     });
 
@@ -98,6 +100,8 @@ describe("audit log", () => {
     const { year, classLevel, section } = await setUpPricedClass(ownerCookie);
     await request(app).post("/api/students/admit").set("Cookie", ownerCookie).send({
       admission_no: "2026/501", full_name: "Distinctive Name Xyz",
+      gender: "male", contact_type: "guardian",
+      guardian_relationship: "Father", guardian_name: "Test Guardian",
       academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
     });
 

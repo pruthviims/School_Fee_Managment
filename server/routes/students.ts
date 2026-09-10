@@ -22,7 +22,16 @@ const admitSchema = z.object({
   admission_no: z.string().min(1).max(30),
   full_name: z.string().min(1).max(150),
   date_of_birth: z.string().nullable().optional(),
-  gender: z.string().max(20).optional().default(""),
+  gender: z.enum(["male", "female", "other"]),
+  blood_group: z.string().max(10).optional().default(""),
+  contact_type: z.enum(["parents", "guardian"]).optional().default("guardian"),
+  father_name: z.string().max(150).optional().default(""),
+  father_phone: z.string().max(20).optional().default(""),
+  father_email: z.string().email().optional().or(z.literal("")).default(""),
+  mother_name: z.string().max(150).optional().default(""),
+  mother_phone: z.string().max(20).optional().default(""),
+  mother_email: z.string().email().optional().or(z.literal("")).default(""),
+  guardian_relationship: z.string().max(50).optional().default(""),
   guardian_name: z.string().max(150).optional().default(""),
   guardian_phone: z.string().max(20).optional().default(""),
   guardian_email: z.string().email().optional().or(z.literal("")).default(""),
@@ -33,7 +42,15 @@ const admitSchema = z.object({
   stream_id: z.string().uuid().nullable().optional().default(null),
   admission_type: z.enum(["new", "carry_over", "repeat", "readmission"]).optional().default("new"),
   optional_head_ids: z.array(z.string().uuid()).optional().default([]),
-});
+}).refine(
+  (v) => v.contact_type === "guardian"
+    ? Boolean(v.guardian_relationship.trim() && v.guardian_name.trim())
+    : Boolean(v.father_name.trim() && v.mother_name.trim()),
+  {
+    message: "For Parents, both Father's and Mother's name are required. " +
+      "For a Guardian, their relationship to the student and name are required.",
+  },
+);
 
 studentsRouter.post("/admit", requireCapability("manage_admissions"), async (req, res) => {
   const parsed = admitSchema.safeParse(req.body);
@@ -57,6 +74,20 @@ studentsRouter.post("/admit", requireCapability("manage_admissions"), async (req
     });
   }
 
+  // guardian_name/phone/email stay the single "primary contact" every
+  // existing screen already reads (Fee Collection's table, receipts,
+  // the TC certificate) — for Parents, populated from whichever parent
+  // is actually reachable, so nothing downstream needs to learn a new
+  // shape just to keep working. Father is checked first only as a
+  // deterministic tie-break when both are filled in, not a statement
+  // about who the "real" contact is.
+  const primaryName = d.contact_type === "guardian" ? d.guardian_name
+    : (d.father_name || d.mother_name);
+  const primaryPhone = d.contact_type === "guardian" ? d.guardian_phone
+    : (d.father_phone || d.mother_phone);
+  const primaryEmail = d.contact_type === "guardian" ? d.guardian_email
+    : (d.father_email || d.mother_email);
+
   const client = await pool.connect();
   let student, enrollment;
   try {
@@ -65,12 +96,17 @@ studentsRouter.post("/admit", requireCapability("manage_admissions"), async (req
     try {
       const studentResult = await client.query(
         `INSERT INTO students
-           (school_id, admission_no, full_name, date_of_birth, gender, admitted_on,
+           (school_id, admission_no, full_name, date_of_birth, gender, blood_group, admitted_on,
+            contact_type, father_name, father_phone, father_email,
+            mother_name, mother_phone, mother_email, guardian_relationship,
             guardian_name, guardian_phone, guardian_email, address, created_by)
-         VALUES ($1, $2, $3, $4, $5, CURRENT_DATE, $6, $7, $8, $9, $10)
+         VALUES ($1, $2, $3, $4, $5, $6, CURRENT_DATE, $7, $8, $9, $10, $11, $12, $13, $14,
+                 $15, $16, $17, $18, $19)
          RETURNING *`,
-        [req.school!.id, d.admission_no, d.full_name, d.date_of_birth ?? null, d.gender,
-         d.guardian_name, d.guardian_phone, d.guardian_email, d.address, req.user!.id],
+        [req.school!.id, d.admission_no, d.full_name, d.date_of_birth ?? null, d.gender, d.blood_group,
+         d.contact_type, d.father_name, d.father_phone, d.father_email,
+         d.mother_name, d.mother_phone, d.mother_email, d.guardian_relationship,
+         primaryName, primaryPhone, primaryEmail, d.address, req.user!.id],
       );
       student = studentResult.rows[0];
     } catch (err) {
@@ -146,6 +182,9 @@ studentsRouter.get("/enrollments/:id/ledger", async (req, res) => {
 studentsRouter.get("/enrollments/:id/profile", async (req, res) => {
   const result = await pool.query(
     `SELECT s.id AS student_id, s.admission_no, s.full_name, s.date_of_birth, s.gender,
+            s.blood_group, s.contact_type,
+            s.father_name, s.father_phone, s.father_email,
+            s.mother_name, s.mother_phone, s.mother_email, s.guardian_relationship,
             s.guardian_name, s.guardian_phone, s.guardian_email, s.address, s.status,
             e.id AS enrollment_id, e.academic_year_id, e.class_level_id, e.section_id,
             e.outcome, e.is_active, e.withdrawn_on, e.withdrawal_reason,
@@ -166,14 +205,24 @@ const studentUpdateSchema = z.object({
   guardian_phone: z.string().max(20).optional(),
   guardian_email: z.string().max(150).optional(),
   address: z.string().max(500).optional(),
+  gender: z.enum(["male", "female", "other"]).optional(),
+  blood_group: z.string().max(10).optional(),
+  contact_type: z.enum(["parents", "guardian"]).optional(),
+  father_name: z.string().max(150).optional(),
+  father_phone: z.string().max(20).optional(),
+  father_email: z.string().max(150).optional(),
+  mother_name: z.string().max(150).optional(),
+  mother_phone: z.string().max(20).optional(),
+  mother_email: z.string().max(150).optional(),
+  guardian_relationship: z.string().max(50).optional(),
 }).refine((v) => Object.keys(v).length > 0, { message: "Nothing to update." });
 
-// Deliberately narrow: name, date of birth, gender, and admission
-// number aren't editable here — those are treated as fixed identity
-// records elsewhere in this app (matching how a receipt freezes a
-// student's name at the time it's issued). Only the contact details
-// that genuinely do change over a school year — a family moving
-// house, a new phone number — are writable through this endpoint.
+// Deliberately narrow on identity: full name and admission number
+// aren't editable here — those are treated as fixed identity records
+// elsewhere in this app (matching how a receipt freezes a student's
+// name at the time it's issued). Gender and blood group, by contrast,
+// genuinely can be entered wrong and corrected later — required at
+// admission doesn't mean frozen forever — so both are writable here.
 studentsRouter.patch(
   "/:id", requireCapability("manage_admissions"),
   async (req, res) => {
@@ -181,17 +230,38 @@ studentsRouter.patch(
     if (!parsed.success) return res.status(400).json({ detail: parsed.error.issues[0]?.message });
 
     const before = await pool.query(
-      `SELECT guardian_name, guardian_phone, guardian_email, address FROM students
-       WHERE id = $1 AND school_id = $2`,
+      `SELECT guardian_name, guardian_phone, guardian_email, address, gender, blood_group,
+              contact_type, father_name, mother_name, guardian_relationship
+       FROM students WHERE id = $1 AND school_id = $2`,
       [req.params.id, req.school!.id],
     );
     if (!before.rows[0]) return res.status(404).end();
 
-    const fields = Object.keys(parsed.data);
+    const data: Record<string, unknown> = { ...parsed.data };
+    // The primary contact (guardian_name/phone/email — what every other
+    // screen actually reads) is only recomputed when contact_type is
+    // part of this same request, on the assumption the caller sends the
+    // whole family block together when editing it, not one field in
+    // isolation — the same assumption the New Admission form's own
+    // submit already makes.
+    if (data.contact_type) {
+      const isGuardian = data.contact_type === "guardian";
+      data.guardian_name = isGuardian
+        ? (data.guardian_name as string ?? "")
+        : ((data.father_name as string) || (data.mother_name as string) || "");
+      data.guardian_phone = isGuardian
+        ? (data.guardian_phone as string ?? "")
+        : ((data.father_phone as string) || (data.mother_phone as string) || "");
+      data.guardian_email = isGuardian
+        ? (data.guardian_email as string ?? "")
+        : ((data.father_email as string) || (data.mother_email as string) || "");
+    }
+
+    const fields = Object.keys(data);
     const setClause = fields.map((f, i) => `${f} = $${i + 3}`).join(", ");
     const result = await pool.query(
       `UPDATE students SET ${setClause} WHERE id = $1 AND school_id = $2 RETURNING *`,
-      [req.params.id, req.school!.id, ...fields.map((f) => (parsed.data as any)[f])],
+      [req.params.id, req.school!.id, ...fields.map((f) => data[f])],
     );
 
     await logActivity(pool, req, {

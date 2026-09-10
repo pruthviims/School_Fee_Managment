@@ -45,6 +45,8 @@ async function setUpAndAdmit(cookie: string) {
   });
   const admission = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
     admission_no: "2026/700", full_name: "Kavya Reddy",
+    gender: "male", contact_type: "guardian",
+    guardian_relationship: "Father", guardian_name: "Test Guardian",
     academic_year_id: year.body.id, class_level_id: classLevel.body.id, section_id: section.body.id,
   });
   return admission.body;

@@ -66,6 +66,8 @@ async function setUpTwoYearLadder(cookie: string) {
   });
   const admission = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
     admission_no: "2025/900", full_name: "Test Student",
+    gender: "male", contact_type: "guardian",
+    guardian_relationship: "Father", guardian_name: "Test Guardian",
     academic_year_id: fromYear.body.id, class_level_id: classVIII.body.id,
     section_id: sectionVIII.body.id,
   });
@@ -96,6 +98,8 @@ describe("promotion workflow over HTTP", () => {
     // Deliberately no fee-structure line for classIX in toYear at all.
     await request(app).post("/api/students/admit").set("Cookie", cookie).send({
       admission_no: "2025/900", full_name: "Test Student",
+      gender: "male", contact_type: "guardian",
+      guardian_relationship: "Father", guardian_name: "Test Guardian",
       academic_year_id: fromYear.body.id, class_level_id: classVIII.body.id,
       section_id: sectionVIII.body.id,
     });
