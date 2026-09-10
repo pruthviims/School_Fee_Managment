@@ -2296,11 +2296,13 @@ export function ConcessionScreen({ academicYears, state, feeHeads, refreshFeeHea
   async function refetch() {
     if (!year) { setEnrollments([]); setLoading(false); return; }
     setLoading(true);
-    const list = await api.get(`/students/enrollments?academic_year_id=${year.id}`);
-    const withLedgers = await Promise.all(list.map(async (e) => ({
-      ...e, ledger: await api.get(`/students/enrollments/${e.id}/ledger`),
-    })));
-    setEnrollments(withLedgers);
+    // Ledger totals now come back inline on every row (see GET
+    // /students/enrollments on the backend) — this used to also fire
+    // one further GET per student for their own ledger, which was
+    // fine at small scale but genuinely failed to load for a school
+    // with 1,500+ students.
+    const list = await api.get(`/students/enrollments?academic_year_id=${year.id}&include_ledger=1`);
+    setEnrollments(list);
     setLoading(false);
   }
   useEffect(() => { refetch(); }, [year?.id]); // eslint-disable-line

@@ -788,6 +788,32 @@ describe("concessions and enrollment editing", () => {
     expect(ledger.body.balance).toBe(3000000);
   });
 
+  it("the enrollments list's inline ledger (include_ledger=1) matches the single-enrollment ledger exactly", async () => {
+    const cookie = await loginAs("owner@http.test");
+    const { year, enrollment } = await setUpAdmittedStudent(cookie);
+    await request(app).post(`/api/students/enrollments/${enrollment.id}/concessions`)
+      .set("Cookie", cookie).send({ amount: 500000, reason: "hardship" });
+    await request(app).post("/api/collection/payments").set("Cookie", cookie)
+      .send({ enrollment_id: enrollment.id, amount: 1000000, mode: "cash" });
+
+    const single = await request(app).get(`/api/students/enrollments/${enrollment.id}/ledger`)
+      .set("Cookie", cookie);
+
+    const withLedger = await request(app)
+      .get(`/api/students/enrollments?academic_year_id=${year.id}&include_ledger=1`)
+      .set("Cookie", cookie);
+    const row = withLedger.body.find((r: any) => r.id === enrollment.id);
+    expect(row.ledger).toEqual(single.body);
+
+    // Without the flag, no ledger at all — callers that don't ask for
+    // it shouldn't pay for (or receive) the aggregate work.
+    const withoutLedger = await request(app)
+      .get(`/api/students/enrollments?academic_year_id=${year.id}`)
+      .set("Cookie", cookie);
+    const rowNoLedger = withoutLedger.body.find((r: any) => r.id === enrollment.id);
+    expect(rowNoLedger.ledger).toBeUndefined();
+  });
+
   it("logs both granting and reversing a concession", async () => {
     const cookie = await loginAs("owner@http.test");
     const { enrollment } = await setUpAdmittedStudent(cookie);

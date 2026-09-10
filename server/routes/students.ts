@@ -675,17 +675,66 @@ studentsRouter.post(
 );
 
 studentsRouter.get("/enrollments", async (req, res) => {
-  const { academic_year_id, class_level_id, section_id } = req.query;
+  const { academic_year_id, class_level_id, section_id, include_ledger } = req.query;
   const params: unknown[] = [req.school!.id];
   let where = "e.school_id = $1 AND e.is_active = true";
   if (academic_year_id) { params.push(academic_year_id); where += ` AND e.academic_year_id = $${params.length}`; }
   if (class_level_id) { params.push(class_level_id); where += ` AND e.class_level_id = $${params.length}`; }
   if (section_id) { params.push(section_id); where += ` AND e.section_id = $${params.length}`; }
 
+  if (include_ledger !== "1") {
+    const result = await pool.query(
+      `SELECT e.id, e.admission_type, e.outcome, e.roll_no,
+              s.admission_no, s.full_name, s.guardian_name, s.guardian_phone, s.address,
+              cl.name AS class_name, sec.name AS section_name
+       FROM enrollments e
+       JOIN students s ON s.id = e.student_id
+       JOIN class_levels cl ON cl.id = e.class_level_id
+       JOIN sections sec ON sec.id = e.section_id
+       WHERE ${where}
+       ORDER BY cl.ladder_order, sec.name, s.full_name`,
+      params,
+    );
+    return res.json(result.rows);
+  }
+
+  // Ledger totals computed here, per row, rather than one extra
+  // request per enrollment from the caller — Fee Collection used to
+  // fetch this school's roster and then issue one further GET per
+  // student for their ledger; a school with 1,500+ enrolled students
+  // turned that into 1,500+ sequential requests and the screen
+  // genuinely failed to load. Same correlated-subquery totals
+  // getEnrollmentLedger computes for one enrollment, just run once
+  // per row here instead of once per round trip — and only viable now
+  // that concessions.enrollment_id and allocations.charge_id/
+  // payment_id are actually indexed (see the 1700000000016 migration
+  // sitting right next to this change). Opt-in via include_ledger=1
+  // rather than always-on: callers that only need the roster (the
+  // admission-number preview, promotion's existing-students check)
+  // shouldn't pay for aggregates they never read.
   const result = await pool.query(
     `SELECT e.id, e.admission_type, e.outcome, e.roll_no,
             s.admission_no, s.full_name, s.guardian_name, s.guardian_phone, s.address,
-            cl.name AS class_name, sec.name AS section_name
+            cl.name AS class_name, sec.name AS section_name,
+            COALESCE((SELECT SUM(c.amount) FROM charges c
+                      WHERE c.enrollment_id = e.id AND c.reversed_by IS NULL), 0) AS charged,
+            COALESCE((SELECT SUM(co.amount) FROM concessions co
+                      WHERE co.enrollment_id = e.id AND co.reversed_by IS NULL), 0) AS conceded,
+            COALESCE((SELECT SUM(a.amount) FROM allocations a
+                      JOIN payments p ON p.id = a.payment_id
+                      WHERE a.charge_id IN (SELECT id FROM charges WHERE enrollment_id = e.id)
+                        AND p.clearing_status = 'cleared' AND p.reversed_by IS NULL), 0) AS paid,
+            COALESCE((SELECT SUM(c.amount) FROM charges c
+                      WHERE c.enrollment_id = e.id AND c.reversed_by IS NULL
+                        AND c.is_arrear = true), 0) AS arrears_charged,
+            COALESCE((SELECT SUM(c.amount) FROM charges c
+                      WHERE c.enrollment_id = e.id AND c.reversed_by IS NULL
+                        AND c.is_arrear = true), 0)
+              - COALESCE((SELECT SUM(a.amount) FROM allocations a
+                          JOIN payments p ON p.id = a.payment_id
+                          JOIN charges c ON c.id = a.charge_id
+                          WHERE c.enrollment_id = e.id AND c.reversed_by IS NULL AND c.is_arrear = true
+                            AND p.clearing_status = 'cleared' AND p.reversed_by IS NULL), 0) AS arrears_balance
      FROM enrollments e
      JOIN students s ON s.id = e.student_id
      JOIN class_levels cl ON cl.id = e.class_level_id
@@ -694,5 +743,12 @@ studentsRouter.get("/enrollments", async (req, res) => {
      ORDER BY cl.ladder_order, sec.name, s.full_name`,
     params,
   );
-  res.json(result.rows);
+  res.json(result.rows.map((r) => ({
+    ...r,
+    ledger: {
+      charged: Number(r.charged), conceded: Number(r.conceded), paid: Number(r.paid),
+      balance: Number(r.charged) - Number(r.conceded) - Number(r.paid),
+      arrearsCharged: Number(r.arrears_charged), arrearsBalance: Number(r.arrears_balance),
+    },
+  })));
 });
