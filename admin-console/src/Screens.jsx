@@ -62,6 +62,7 @@ import {
   validateRows,
 } from "./lib";
 import { downloadReceipt } from "./receipt";
+import { downloadTcCertificate } from "./tc";
 
 /* ---------------- shared bits ---------------- */
 
@@ -3237,7 +3238,6 @@ function StudentProfileModal({ enrollmentId, capabilities, onClose, onCollectPay
   const [saved, setSaved] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [showWithdraw, setShowWithdraw] = useState(false);
   const [showRefund, setShowRefund] = useState(false);
 
   async function refetch() {
@@ -3289,7 +3289,10 @@ function StudentProfileModal({ enrollmentId, capabilities, onClose, onCollectPay
   }
 
   const set = (k) => (e) => { setForm({ ...form, [k]: e.target.value }); setSaved(false); };
-  const withdrawn = profile.outcome === "left";
+  // 'left' is the older, retired marker from the simple one-step withdraw
+  // this replaced — still checked here so any pre-existing data still
+  // reads correctly, even though nothing writes it anymore.
+  const withdrawn = profile.outcome === "tc_issued" || profile.outcome === "left";
   const canRefund = (capabilities || []).includes("void_payments");
 
   return (
@@ -3312,7 +3315,7 @@ function StudentProfileModal({ enrollmentId, capabilities, onClose, onCollectPay
         <div className="px-6 py-5 space-y-4">
           {withdrawn && (
             <div className="bg-amber-50 border border-amber-200 text-amber-800 rounded-xl px-4 py-3 text-sm">
-              <span className="font-bold">Withdrawn</span>
+              <span className="font-bold">{profile.outcome === "tc_issued" ? "TC Issued" : "Withdrawn"}</span>
               {profile.withdrawn_on && ` on ${displayDate(profile.withdrawn_on)}`}
               {profile.withdrawal_reason && ` — ${profile.withdrawal_reason}`}
             </div>
@@ -3390,33 +3393,131 @@ function StudentProfileModal({ enrollmentId, capabilities, onClose, onCollectPay
         )}
 
         <div className="px-6 py-4 border-t border-slate-100 flex flex-wrap gap-2">
-          {!withdrawn && (
-            <button onClick={() => setShowWithdraw((v) => !v)}
-              className="text-sm font-semibold text-slate-500 hover:text-red-500 flex items-center gap-1.5">
-              <UserMinus size={14} /> Withdraw student
-            </button>
-          )}
           {canRefund && (
             <button onClick={() => setShowRefund((v) => !v)}
-              className="text-sm font-semibold text-slate-500 hover:text-brand-600 flex items-center gap-1.5 sm:ml-auto">
+              className="text-sm font-semibold text-slate-500 hover:text-brand-600 flex items-center gap-1.5">
               <Undo2 size={14} /> Record refund
             </button>
           )}
         </div>
 
-        {showWithdraw && !withdrawn && (
-          <WithdrawPanel enrollmentId={enrollmentId} onDone={async () => { setShowWithdraw(false); await refetch(); }} />
-        )}
         {showRefund && canRefund && (
           <RefundPanel enrollmentId={enrollmentId} onDone={async () => { setShowRefund(false); await refetch(); }} />
         )}
+
+        <TcPanel enrollmentId={enrollmentId} capabilities={capabilities}
+          onChanged={refetch} studentName={profile.full_name} />
       </div>
     </div>
   );
 }
 
-function WithdrawPanel({ enrollmentId, onDone }) {
-  const [withdrawnOn, setWithdrawnOn] = useState(() => new Date().toISOString().slice(0, 10));
+/**
+ * The unified "student is leaving" flow — replaces the old one-step
+ * withdraw entirely, since every departure now needs a TC (confirmed:
+ * even a casual relocation). Self-contained: fetches its own TC
+ * request history and shows whichever action is next — request,
+ * clearance, or issue — based on the latest request's status and
+ * what the signed-in person is actually allowed to do.
+ */
+function TcPanel({ enrollmentId, capabilities, onChanged, studentName }) {
+  const [requests, setRequests] = useState(null);
+  const [showRequestForm, setShowRequestForm] = useState(false);
+  const [showClearForm, setShowClearForm] = useState(false);
+  const [showIssueForm, setShowIssueForm] = useState(false);
+  const canManageTc = (capabilities || []).includes("manage_tc");
+
+  async function refetch() {
+    setRequests(await api.get(`/students/enrollments/${enrollmentId}/tc-requests`));
+  }
+  useEffect(() => { refetch(); }, [enrollmentId]); // eslint-disable-line
+
+  if (requests === null) return null;
+
+  // Only ever one request is meaningfully "live" at a time — the
+  // backend refuses a second request while one is pending_clearance or
+  // cleared — so the most recent one (issued or not) is always the
+  // relevant one to show here.
+  const latest = requests[0];
+
+  async function downloadTc(id) {
+    try {
+      const data = await api.get(`/students/tc-requests/${id}/document-data`);
+      downloadTcCertificate(data);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Could not fetch that TC.");
+    }
+  }
+
+  return (
+    <div className="border-t border-slate-100">
+      {!latest && (
+        <div className="px-6 py-4">
+          <button onClick={() => setShowRequestForm((v) => !v)}
+            className="text-sm font-semibold text-slate-500 hover:text-red-500 flex items-center gap-1.5">
+            <UserMinus size={14} /> Request TC
+          </button>
+        </div>
+      )}
+
+      {latest?.status === "pending_clearance" && (
+        <div className="px-6 py-4">
+          <div className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm">
+            <span className="font-bold">TC requested</span> — {latest.reason}, last day{" "}
+            {displayDate(latest.last_day)}. Awaiting finance clearance.
+          </div>
+          {canManageTc && (
+            <button onClick={() => setShowClearForm((v) => !v)} className={`${ghost} mt-3`}>
+              <Check size={14} /> Give finance clearance
+            </button>
+          )}
+        </div>
+      )}
+
+      {latest?.status === "cleared" && (
+        <div className="px-6 py-4">
+          <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl px-4 py-3 text-sm">
+            <span className="font-bold">Finance cleared</span>
+            {latest.clearance_note ? ` — ${latest.clearance_note}` : ""}. Ready to issue.
+          </div>
+          {canManageTc && (
+            <button onClick={() => setShowIssueForm((v) => !v)} className={`${primary} mt-3`}>
+              <FileSpreadsheet size={14} /> Issue TC
+            </button>
+          )}
+        </div>
+      )}
+
+      {latest?.status === "issued" && (
+        <div className="px-6 py-4">
+          <div className="bg-amber-50 border border-amber-200 text-amber-800 rounded-xl px-4 py-3 text-sm flex items-center justify-between gap-3">
+            <span><span className="font-bold">TC issued</span> — {latest.tc_number}</span>
+            <button onClick={() => downloadTc(latest.id)}
+              className="text-xs font-bold rounded-lg px-3 py-1.5 border border-amber-300 text-amber-800 hover:bg-amber-100 flex items-center gap-1.5 shrink-0">
+              <Download size={13} /> Download TC
+            </button>
+          </div>
+        </div>
+      )}
+
+      {showRequestForm && !latest && (
+        <TcRequestForm enrollmentId={enrollmentId}
+          onDone={async () => { setShowRequestForm(false); await refetch(); await onChanged(); }} />
+      )}
+      {showClearForm && latest?.status === "pending_clearance" && (
+        <TcClearForm requestId={latest.id}
+          onDone={async () => { setShowClearForm(false); await refetch(); }} />
+      )}
+      {showIssueForm && latest?.status === "cleared" && (
+        <TcIssueForm requestId={latest.id} studentName={studentName}
+          onDone={async () => { setShowIssueForm(false); await refetch(); await onChanged(); }} />
+      )}
+    </div>
+  );
+}
+
+function TcRequestForm({ enrollmentId, onDone }) {
+  const [lastDay, setLastDay] = useState(() => new Date().toISOString().slice(0, 10));
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -3425,12 +3526,12 @@ function WithdrawPanel({ enrollmentId, onDone }) {
     setError("");
     setBusy(true);
     try {
-      await api.post(`/students/enrollments/${enrollmentId}/withdraw`, {
-        withdrawn_on: withdrawnOn, reason: reason.trim(),
+      await api.post(`/students/enrollments/${enrollmentId}/tc-requests`, {
+        last_day: lastDay, reason: reason.trim(),
       });
       await onDone();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not withdraw this student.");
+      setError(err instanceof Error ? err.message : "Could not request a TC for this student.");
     } finally {
       setBusy(false);
     }
@@ -3438,23 +3539,117 @@ function WithdrawPanel({ enrollmentId, onDone }) {
 
   return (
     <div className="px-6 py-5 border-t border-slate-100 bg-red-50/40">
-      <h3 className="font-bold text-sm mb-3">Withdraw this student</h3>
+      <h3 className="font-bold text-sm mb-3">Request a TC</h3>
       {error && <p className="text-xs font-semibold text-red-600 mb-2">{error}</p>}
       <div className="grid sm:grid-cols-2 gap-3">
         <div>
           <label className={eyebrow}>Last day</label>
-          <input type="date" className={`${field} mt-2`} value={withdrawnOn}
-            onChange={(e) => setWithdrawnOn(e.target.value)} />
+          <input type="date" className={`${field} mt-2`} value={lastDay}
+            onChange={(e) => setLastDay(e.target.value)} />
         </div>
         <div>
           <label className={eyebrow}>Reason</label>
           <input className={`${field} mt-2`} value={reason} onChange={(e) => setReason(e.target.value)}
-            placeholder="Family relocating, etc." />
+            placeholder="Family relocating, transfer, etc." />
         </div>
       </div>
       <button onClick={submit} disabled={busy}
         className="mt-3 text-sm font-bold rounded-lg px-4 py-2.5 bg-red-600 text-white hover:bg-red-700 disabled:opacity-50">
-        {busy ? "Withdrawing…" : "Confirm withdrawal"}
+        {busy ? "Requesting…" : "Request TC"}
+      </button>
+    </div>
+  );
+}
+
+function TcClearForm({ requestId, onDone }) {
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit() {
+    setError("");
+    setBusy(true);
+    try {
+      await api.post(`/students/tc-requests/${requestId}/clear`, { clearance_note: note.trim() });
+      await onDone();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not clear this TC request.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="px-6 py-5 border-t border-slate-100 bg-slate-50">
+      <h3 className="font-bold text-sm mb-3">Finance clearance</h3>
+      {error && <p className="text-xs font-semibold text-red-600 mb-2">{error}</p>}
+      <label className={eyebrow}>Note</label>
+      <input className={`${field} mt-2`} value={note} onChange={(e) => setNote(e.target.value)}
+        placeholder="All dues cleared, or how any remaining balance is being handled" />
+      <button onClick={submit} disabled={busy} className={`${primary} mt-3`}>
+        {busy ? "Clearing…" : "Confirm clearance"}
+      </button>
+    </div>
+  );
+}
+
+function TcIssueForm({ requestId, studentName, onDone }) {
+  const [conduct, setConduct] = useState("Good");
+  const [qualified, setQualified] = useState(true);
+  const [remarks, setRemarks] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit() {
+    setError("");
+    setBusy(true);
+    try {
+      const issued = await api.post(`/students/tc-requests/${requestId}/issue`, {
+        conduct, qualified_for_promotion: qualified, remarks: remarks.trim(),
+      });
+      // The button promises "& download" — fetch the document data this
+      // same issued request now unlocks (document-data 400s until
+      // status is 'issued', so this couldn't have been done any
+      // earlier) and trigger the PDF immediately, rather than making
+      // the office find and click a separate download action after.
+      const data = await api.get(`/students/tc-requests/${issued.id}/document-data`);
+      downloadTcCertificate(data);
+      await onDone();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not issue this TC.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="px-6 py-5 border-t border-slate-100 bg-brand-50/30">
+      <h3 className="font-bold text-sm mb-3">Issue TC for {studentName}</h3>
+      {error && <p className="text-xs font-semibold text-red-600 mb-2">{error}</p>}
+      <div className="grid sm:grid-cols-2 gap-3">
+        <div>
+          <label className={eyebrow}>Conduct</label>
+          <select className={`${field} mt-2`} value={conduct} onChange={(e) => setConduct(e.target.value)}>
+            <option>Good</option>
+            <option>Satisfactory</option>
+            <option>Excellent</option>
+          </select>
+        </div>
+        <div>
+          <label className={eyebrow}>Qualified for promotion</label>
+          <select className={`${field} mt-2`} value={qualified ? "yes" : "no"}
+            onChange={(e) => setQualified(e.target.value === "yes")}>
+            <option value="yes">Yes</option>
+            <option value="no">No</option>
+          </select>
+        </div>
+      </div>
+      <div className="mt-3">
+        <label className={eyebrow}>Remarks (optional)</label>
+        <input className={`${field} mt-2`} value={remarks} onChange={(e) => setRemarks(e.target.value)} />
+      </div>
+      <button onClick={submit} disabled={busy} className={`${primary} mt-3`}>
+        {busy ? "Issuing…" : "Issue TC & download"}
       </button>
     </div>
   );
