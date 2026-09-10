@@ -14,6 +14,8 @@ export interface EnrollmentLedger {
   conceded: number;
   paid: number;
   balance: number;
+  arrearsCharged: number;
+  arrearsBalance: number;
 }
 
 export async function getEnrollmentLedger(
@@ -42,9 +44,34 @@ export async function getEnrollmentLedger(
     [enrollmentId],
   );
 
+  // Same shape as the totals above, restricted to is_arrear charges —
+  // lets the UI show "of this balance, ₹X is carried forward from last
+  // year" instead of one undifferentiated number, since staff (and
+  // parents) reading the screen have no other way to tell a fresh
+  // charge from an old one still owed.
+  const arrearsChargedResult = await client.query(
+    `SELECT COALESCE(SUM(amount), 0) AS total FROM charges
+     WHERE enrollment_id = $1 AND reversed_by IS NULL AND is_arrear = true`,
+    [enrollmentId],
+  );
+  const arrearsPaidResult = await client.query(
+    `SELECT COALESCE(SUM(a.amount), 0) AS total
+     FROM allocations a
+     JOIN payments p ON p.id = a.payment_id
+     JOIN charges c ON c.id = a.charge_id
+     WHERE c.enrollment_id = $1 AND c.reversed_by IS NULL AND c.is_arrear = true
+       AND p.clearing_status = 'cleared' AND p.reversed_by IS NULL`,
+    [enrollmentId],
+  );
+
   const charged = chargedResult.rows[0].total;
   const conceded = concededResult.rows[0].total;
   const paid = paidResult.rows[0].total;
+  const arrearsCharged = arrearsChargedResult.rows[0].total;
+  const arrearsPaid = arrearsPaidResult.rows[0].total;
 
-  return { charged, conceded, paid, balance: charged - conceded - paid };
+  return {
+    charged, conceded, paid, balance: charged - conceded - paid,
+    arrearsCharged, arrearsBalance: arrearsCharged - arrearsPaid,
+  };
 }

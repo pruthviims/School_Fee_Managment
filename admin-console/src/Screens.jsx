@@ -2461,6 +2461,11 @@ export function ConcessionScreen({ academicYears, state, feeHeads, refreshFeeHea
                         : balance < 0
                           ? <span className="text-amber-600">Credit {inr(-balance)}</span>
                           : <span className="text-emerald-600">Paid up</span>}
+                      {e.ledger.arrearsBalance > 0 && (
+                        <span className="block text-[11px] font-bold text-amber-600 mt-0.5">
+                          incl. {inr(e.ledger.arrearsBalance / 100)} carried forward
+                        </span>
+                      )}
                     </td>
                     <td className="px-5 py-3 text-right">
                       <button
@@ -2641,6 +2646,14 @@ export function PaymentModal({ enrollmentId, student, academicYearId, capabiliti
         {transportChargePaise > 0 && (
           <ConcessionEditor enrollmentId={enrollmentId} grossPaise={transportChargePaise}
             feeHeadId={transportFeeHeadId} onChanged={refetch} compact />
+        )}
+
+        {ledger.arrearsBalance > 0 && (
+          <div className="mx-6 mt-5 bg-amber-50 border border-amber-200 text-amber-800 rounded-xl px-4 py-3 text-sm font-semibold flex items-center gap-2">
+            <History size={15} className="shrink-0" />
+            Includes {inr(ledger.arrearsBalance / 100)} carried forward from last year — collection is
+            applied to this first.
+          </div>
         )}
 
         <div className="px-6 py-5 grid grid-cols-3 gap-4 border-b border-slate-100 text-sm">

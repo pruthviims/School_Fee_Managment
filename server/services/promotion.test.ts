@@ -2,6 +2,7 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { pool } from "../db/index.js";
 import { generateCharges } from "./billing.js";
 import { recordPayment } from "./collection.js";
+import { getEnrollmentLedger } from "./ledger.js";
 import {
   PromotionError, assignSections, commit, isActionable, preview, previewSummary, reverseBatch,
 } from "./promotion.js";
@@ -254,6 +255,33 @@ describe("commit", () => {
       [newEnrollment.rows[0].id],
     );
     expect(currentTuition.rows[0].amount).toBe(4200000); // this year's tuition, not last year's
+  });
+
+  it("the ledger separately reports the arrears portion of the balance, and it shrinks first when paid", async () => {
+    const { enrollment: oldEnrollment } = await studentInVIII();
+    await generateCharges(oldEnrollment.id); // owes 40,000, unpaid
+    const { moves } = await previewAndAssign();
+    const batch = await commit({ fromYearId: fromYear.id, toYearId: toYear.id, moves }) as any;
+    const newEnrollment = await pool.query(
+      `SELECT id FROM enrollments WHERE promotion_batch_id = $1`, [batch.id],
+    );
+    const enrollmentId = newEnrollment.rows[0].id;
+
+    const before = await getEnrollmentLedger(enrollmentId);
+    expect(before.charged).toBe(4000000 + 4200000); // arrears + this year's tuition
+    expect(before.arrearsCharged).toBe(4000000);
+    expect(before.arrearsBalance).toBe(4000000); // nothing paid toward it yet
+    expect(before.balance).toBe(8200000);
+
+    // A partial payment, smaller than the arrears alone — should go
+    // entirely toward the arrears first, per the allocation ordering
+    // (is_arrear DESC), leaving the arrears balance still owing but
+    // smaller, and this year's own tuition completely untouched.
+    await recordPayment({ enrollmentId, amount: 1500000, mode: "cash" });
+    const after = await getEnrollmentLedger(enrollmentId);
+    expect(after.arrearsCharged).toBe(4000000); // the original charge amount never changes
+    expect(after.arrearsBalance).toBe(4000000 - 1500000);
+    expect(after.balance).toBe(8200000 - 1500000);
   });
 
   it("marks a terminal-class student alumni instead of creating a new enrollment", async () => {
