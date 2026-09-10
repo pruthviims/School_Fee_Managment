@@ -200,6 +200,131 @@ describe("setup routes", () => {
     expect(created.description).toContain("Tuition fee");
   });
 
+  it("rejects a true duplicate fee-structure line even with stream_id NULL — the actual bug found", async () => {
+    // Reported scenario: "copy fees to other classes" appeared to
+    // error but the fee got copied anyway. The real bug underneath:
+    // Postgres treats every NULL as distinct from every other NULL in
+    // a unique constraint by default, so two lines for the identical
+    // (school, year, class, fee_head, term) never actually conflicted
+    // whenever stream_id was NULL — true for nearly every class, since
+    // only PU classes typically have a stream. This proves the fix
+    // (NULLS NOT DISTINCT) actually closes that gap, not just that the
+    // migration ran without erroring.
+    const cookie = await loginAs("owner@http.test");
+    const year = await request(app).post("/api/setup/academic-years").set("Cookie", cookie)
+      .send({ name: "2026-27", starts_on: "2026-06-01", ends_on: "2027-03-31" });
+    const classLevel = await request(app).post("/api/setup/class-levels").set("Cookie", cookie)
+      .send({ name: "VIII", ladder_order: 8, stage: "middle" });
+    const feeHead = await request(app).post("/api/setup/fee-heads").set("Cookie", cookie)
+      .send({ name: "Tuition fee" });
+    const first = await request(app).post("/api/setup/fee-structure").set("Cookie", cookie).send({
+      academic_year_id: year.body.id, class_level_id: classLevel.body.id,
+      fee_head_id: feeHead.body.id, amount: 4000000, due_on: "2026-06-15",
+    });
+    expect(first.status).toBe(201);
+
+    const duplicate = await request(app).post("/api/setup/fee-structure").set("Cookie", cookie).send({
+      academic_year_id: year.body.id, class_level_id: classLevel.body.id,
+      fee_head_id: feeHead.body.id, amount: 4000000, due_on: "2026-06-15",
+    });
+    expect(duplicate.status).toBe(409);
+
+    const rows = await pool.query(
+      `SELECT count(*) FROM fee_structures WHERE class_level_id = $1`, [classLevel.body.id],
+    );
+    expect(Number(rows.rows[0].count)).toBe(1); // never actually duplicated in the database
+  });
+
+  describe("copying a class's fee structure to other classes", () => {
+    async function setUpSourceAndTargets(cookie: string) {
+      const year = await request(app).post("/api/setup/academic-years").set("Cookie", cookie)
+        .send({ name: "2026-27", starts_on: "2026-06-01", ends_on: "2027-03-31" });
+      const source = await request(app).post("/api/setup/class-levels").set("Cookie", cookie)
+        .send({ name: "VIII", ladder_order: 8, stage: "middle" });
+      const targetA = await request(app).post("/api/setup/class-levels").set("Cookie", cookie)
+        .send({ name: "IX", ladder_order: 9, stage: "middle" });
+      const targetB = await request(app).post("/api/setup/class-levels").set("Cookie", cookie)
+        .send({ name: "X", ladder_order: 10, stage: "middle" });
+      const tuition = await request(app).post("/api/setup/fee-heads").set("Cookie", cookie)
+        .send({ name: "Tuition fee" });
+      const admission = await request(app).post("/api/setup/fee-heads").set("Cookie", cookie)
+        .send({ name: "Admission fee", is_one_time: true });
+      await request(app).post("/api/setup/fee-structure").set("Cookie", cookie).send({
+        academic_year_id: year.body.id, class_level_id: source.body.id,
+        fee_head_id: tuition.body.id, amount: 4000000, due_on: "2026-06-15",
+      });
+      await request(app).post("/api/setup/fee-structure").set("Cookie", cookie).send({
+        academic_year_id: year.body.id, class_level_id: source.body.id,
+        fee_head_id: admission.body.id, amount: 500000, due_on: "2026-06-15",
+      });
+      return { year: year.body, source: source.body, targetA: targetA.body, targetB: targetB.body };
+    }
+
+    it("copies every priced line to all target classes in one call", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const { year, source, targetA, targetB } = await setUpSourceAndTargets(cookie);
+
+      const res = await request(app).post("/api/setup/fee-structure/copy").set("Cookie", cookie).send({
+        academic_year_id: year.id, source_class_id: source.id,
+        target_class_ids: [targetA.id, targetB.id],
+      });
+      expect(res.status).toBe(200);
+      expect(res.body.created).toBe(4); // 2 fee heads x 2 target classes
+
+      const targetALines = await request(app)
+        .get(`/api/setup/fee-structure?academic_year_id=${year.id}&class_level_id=${targetA.id}`)
+        .set("Cookie", cookie);
+      expect(targetALines.body).toHaveLength(2);
+      expect(targetALines.body.map((l: any) => l.amount).sort((a: number, b: number) => a - b))
+        .toEqual([500000, 4000000]);
+    });
+
+    it("running it again leaves existing lines alone rather than erroring or duplicating", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const { year, source, targetA, targetB } = await setUpSourceAndTargets(cookie);
+      await request(app).post("/api/setup/fee-structure/copy").set("Cookie", cookie).send({
+        academic_year_id: year.id, source_class_id: source.id,
+        target_class_ids: [targetA.id, targetB.id],
+      });
+
+      const second = await request(app).post("/api/setup/fee-structure/copy").set("Cookie", cookie).send({
+        academic_year_id: year.id, source_class_id: source.id,
+        target_class_ids: [targetA.id, targetB.id],
+      });
+      expect(second.status).toBe(200);
+      expect(second.body.created).toBe(0); // everything already existed, nothing new
+
+      const targetALines = await request(app)
+        .get(`/api/setup/fee-structure?academic_year_id=${year.id}&class_level_id=${targetA.id}`)
+        .set("Cookie", cookie);
+      expect(targetALines.body).toHaveLength(2); // not 4 — no duplicates from running it twice
+    });
+
+    it("front desk cannot copy fee structure (manage_fee_structure required)", async () => {
+      const ownerCookie = await loginAs("owner@http.test");
+      const { year, source, targetA } = await setUpSourceAndTargets(ownerCookie);
+      const deskCookie = await loginAs("desk@http.test");
+      const res = await request(app).post("/api/setup/fee-structure/copy").set("Cookie", deskCookie).send({
+        academic_year_id: year.id, source_class_id: source.id, target_class_ids: [targetA.id],
+      });
+      expect(res.status).toBe(403);
+    });
+
+    it("logs the copy with a readable description", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const { year, source, targetA, targetB } = await setUpSourceAndTargets(cookie);
+      await request(app).post("/api/setup/fee-structure/copy").set("Cookie", cookie).send({
+        academic_year_id: year.id, source_class_id: source.id,
+        target_class_ids: [targetA.id, targetB.id],
+      });
+      const log = await request(app).get("/api/audit-log?entity_type=fee_structure").set("Cookie", cookie);
+      const entry = log.body.find((e: any) => e.action === "fee_structure.copy");
+      expect(entry).toBeDefined();
+      expect(entry.description).toContain("VIII");
+      expect(entry.description).toContain("2 other classes");
+    });
+  });
+
   it("front desk cannot update or delete a fee-structure line", async () => {
     const ownerCookie = await loginAs("owner@http.test");
     const year = await request(app).post("/api/setup/academic-years").set("Cookie", ownerCookie)

@@ -1227,24 +1227,19 @@ export function FeeScreen({ state, save, classLevels, feeHeads, academicYears, r
 
   async function copyTo(targetNames) {
     try {
-      for (const targetName of targetNames) {
-        const targetClass = classLevels.find((c) => c.name === targetName);
-        if (!targetClass) continue;
-        for (const row of rows) {
-          for (let i = 0; i < 3; i++) {
-            const rupees = row.terms[i].amount;
-            if (rupees <= 0) continue;
-            try {
-              await api.post("/setup/fee-structure", {
-                academic_year_id: year.id, class_level_id: targetClass.id, fee_head_id: row.id,
-                amount: rupees * 100, term_no: i + 1, due_on: dueOnForTerm(i + 1, year),
-              });
-            } catch { /* a line may already exist for that class — skip it, not fatal */ }
-          }
-        }
-      }
+      const sourceClass = classLevels.find((c) => c.name === active);
+      const targetIds = targetNames
+        .map((name) => classLevels.find((c) => c.name === name)?.id)
+        .filter(Boolean);
+      const result = await api.post("/setup/fee-structure/copy", {
+        academic_year_id: year.id, source_class_id: sourceClass.id, target_class_ids: targetIds,
+      });
       setCopyOpen(false);
       await refetch();
+      alert(result.created > 0
+        ? `Copied ${result.created} fee line${result.created === 1 ? "" : "s"} to ${targetIds.length} ` +
+          `${targetIds.length === 1 ? "class" : "classes"}.`
+        : "Nothing to copy — those classes already have this fee structure.");
     } catch (err) {
       alert(err instanceof Error ? err.message : "Could not copy to those classes.");
     }

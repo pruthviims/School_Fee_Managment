@@ -399,6 +399,60 @@ setupRouter.post("/fee-structure", writeGuard, async (req, res) => {
   }
 });
 
+const copyFeeStructureSchema = z.object({
+  academic_year_id: z.string().uuid(),
+  source_class_id: z.string().uuid(),
+  target_class_ids: z.array(z.string().uuid()).min(1),
+});
+
+// One server-side query for every target class at once, replacing what
+// the frontend previously did as one sequential browser request per
+// (target class × fee head × term) — for even a modest fee structure
+// copied across the rest of a 15-class ladder, that was dozens of
+// individual round trips, slow enough to genuinely time out, and
+// structured to silently swallow any failure per line (not just an
+// "already exists" conflict), which is exactly how a school could end
+// up with a partial copy and no real indication of what actually
+// happened. ON CONFLICT DO NOTHING here relies on
+// uniq_fee_structure_line correctly catching a duplicate even when
+// stream_id is NULL (see the NULLS NOT DISTINCT migration sitting
+// right next to this route) — without that fix, the exact same
+// "silently didn't skip a real duplicate" gap would just move here.
+setupRouter.post("/fee-structure/copy", writeGuard, async (req, res) => {
+  const parsed = copyFeeStructureSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ detail: parsed.error.issues[0]?.message });
+  const d = parsed.data;
+
+  const result = await pool.query(
+    `INSERT INTO fee_structures
+       (school_id, academic_year_id, class_level_id, fee_head_id, stream_id, amount, term_no, due_on)
+     SELECT fs.school_id, fs.academic_year_id, t.target_id, fs.fee_head_id, fs.stream_id,
+            fs.amount, fs.term_no, fs.due_on
+     FROM fee_structures fs
+     CROSS JOIN unnest($1::uuid[]) AS t(target_id)
+     WHERE fs.school_id = $2 AND fs.academic_year_id = $3 AND fs.class_level_id = $4 AND fs.amount > 0
+     ON CONFLICT ON CONSTRAINT uniq_fee_structure_line DO NOTHING
+     RETURNING id`,
+    [d.target_class_ids, req.school!.id, d.academic_year_id, d.source_class_id],
+  );
+
+  const names = await pool.query(
+    `SELECT name FROM class_levels WHERE id = $1`, [d.source_class_id],
+  );
+  await logActivity(pool, req, {
+    action: "fee_structure.copy",
+    entityType: "fee_structure",
+    entityId: null,
+    description: `Copied ${names.rows[0]?.name || "a class"}'s fee structure to ` +
+      `${d.target_class_ids.length} other class${d.target_class_ids.length === 1 ? "" : "es"} ` +
+      `(${result.rows.length} new line${result.rows.length === 1 ? "" : "s"} — existing ones left alone)`,
+    metadata: { source_class_id: d.source_class_id, target_class_ids: d.target_class_ids,
+      created: result.rows.length },
+  });
+
+  res.json({ created: result.rows.length });
+});
+
 const feeStructureUpdateSchema = z.object({
   amount: z.number().int().nonnegative().optional(),
   due_on: z.string().optional(),
