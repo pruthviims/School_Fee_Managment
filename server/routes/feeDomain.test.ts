@@ -538,6 +538,162 @@ describe("admission -> billing -> collection, end to end", () => {
     expect(res.status).toBe(200);
   });
 
+  describe("TC (Transfer Certificate) workflow", () => {
+    async function admitForTc(cookie: string) {
+      const { year, classLevel, section } = await setUpAcademicStructure(cookie);
+      const admission = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
+        admission_no: "2026/950", full_name: "Leaving Student",
+        academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
+      });
+      return admission.body.enrollment;
+    }
+
+    it("goes through the full flow: request, clear, issue — and updates the enrollment", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const enrollment = await admitForTc(cookie);
+
+      const req1 = await request(app).post(`/api/students/enrollments/${enrollment.id}/tc-requests`)
+        .set("Cookie", cookie).send({ reason: "Family relocating to another city", last_day: "2026-11-30" });
+      expect(req1.status).toBe(201);
+      expect(req1.body.status).toBe("pending_clearance");
+
+      const clear = await request(app).post(`/api/students/tc-requests/${req1.body.id}/clear`)
+        .set("Cookie", cookie).send({ clearance_note: "All dues cleared" });
+      expect(clear.status).toBe(200);
+      expect(clear.body.status).toBe("cleared");
+      expect(clear.body.cleared_by).toBeTruthy();
+
+      const issue = await request(app).post(`/api/students/tc-requests/${req1.body.id}/issue`)
+        .set("Cookie", cookie).send({ conduct: "Good", qualified_for_promotion: true, remarks: "" });
+      expect(issue.status).toBe(200);
+      expect(issue.body.status).toBe("issued");
+      expect(issue.body.tc_number).toMatch(/^TC\//);
+
+      const enrollmentRow = await pool.query(`SELECT outcome, is_active, withdrawn_on, withdrawal_reason
+        FROM enrollments WHERE id = $1`, [enrollment.id]);
+      expect(enrollmentRow.rows[0].outcome).toBe("tc_issued");
+      expect(enrollmentRow.rows[0].is_active).toBe(false);
+      expect(enrollmentRow.rows[0].withdrawal_reason).toBe("Family relocating to another city");
+    });
+
+    it("accountant can complete clearance and issue alone, with its own actor per step", async () => {
+      const ownerCookie = await loginAs("owner@http.test");
+      const enrollment = await admitForTc(ownerCookie);
+      // Initiating still requires manage_admissions (Owner/Front Desk) —
+      // it's specifically clearance and issue that Accountant handles
+      // alone here, matching the design: paperwork stays with whoever
+      // already manages admissions, the sensitive money-and-certificate
+      // steps are Accountant/Owner only.
+      const req1 = await request(app).post(`/api/students/enrollments/${enrollment.id}/tc-requests`)
+        .set("Cookie", ownerCookie).send({ reason: "Transfer", last_day: "2026-11-30" });
+
+      const accCookie = await loginAs("acc@http.test");
+      const clear = await request(app).post(`/api/students/tc-requests/${req1.body.id}/clear`)
+        .set("Cookie", accCookie).send({ clearance_note: "Cleared" });
+      const issue = await request(app).post(`/api/students/tc-requests/${req1.body.id}/issue`)
+        .set("Cookie", accCookie).send({ conduct: "Good" });
+      expect(issue.status).toBe(200);
+      expect(issue.body.status).toBe("issued");
+    });
+
+    it("cannot issue before clearance", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const enrollment = await admitForTc(cookie);
+      const req1 = await request(app).post(`/api/students/enrollments/${enrollment.id}/tc-requests`)
+        .set("Cookie", cookie).send({ reason: "Transfer", last_day: "2026-11-30" });
+      const issue = await request(app).post(`/api/students/tc-requests/${req1.body.id}/issue`)
+        .set("Cookie", cookie).send({ conduct: "Good" });
+      expect(issue.status).toBe(400);
+    });
+
+    it("cannot request a second TC while one is already in progress", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const enrollment = await admitForTc(cookie);
+      await request(app).post(`/api/students/enrollments/${enrollment.id}/tc-requests`)
+        .set("Cookie", cookie).send({ reason: "Transfer", last_day: "2026-11-30" });
+      const second = await request(app).post(`/api/students/enrollments/${enrollment.id}/tc-requests`)
+        .set("Cookie", cookie).send({ reason: "Changed mind", last_day: "2026-12-15" });
+      expect(second.status).toBe(409);
+    });
+
+    it("front desk can request a TC but not clear or issue it (manage_tc required)", async () => {
+      const ownerCookie = await loginAs("owner@http.test");
+      const enrollment = await admitForTc(ownerCookie);
+      const deskCookie = await loginAs("desk@http.test");
+
+      const req1 = await request(app).post(`/api/students/enrollments/${enrollment.id}/tc-requests`)
+        .set("Cookie", deskCookie).send({ reason: "Transfer", last_day: "2026-11-30" });
+      expect(req1.status).toBe(201);
+
+      const clear = await request(app).post(`/api/students/tc-requests/${req1.body.id}/clear`)
+        .set("Cookie", deskCookie).send({ clearance_note: "Cleared" });
+      expect(clear.status).toBe(403);
+    });
+
+    it("TC numbers are sequential and gapless", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const { year, classLevel, section } = await setUpAcademicStructure(cookie);
+      const numbers: string[] = [];
+      for (let i = 0; i < 2; i++) {
+        const admission = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
+          admission_no: `2026/96${i}`, full_name: `TC Student ${i}`,
+          academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
+        });
+        const req1 = await request(app).post(`/api/students/enrollments/${admission.body.enrollment.id}/tc-requests`)
+          .set("Cookie", cookie).send({ reason: "Transfer", last_day: "2026-11-30" });
+        await request(app).post(`/api/students/tc-requests/${req1.body.id}/clear`)
+          .set("Cookie", cookie).send({ clearance_note: "Cleared" });
+        const issue = await request(app).post(`/api/students/tc-requests/${req1.body.id}/issue`)
+          .set("Cookie", cookie).send({ conduct: "Good" });
+        numbers.push(issue.body.tc_number);
+      }
+      expect(numbers[0]).not.toBe(numbers[1]);
+      const suffix0 = parseInt(numbers[0].split("/").pop()!, 10);
+      const suffix1 = parseInt(numbers[1].split("/").pop()!, 10);
+      expect(suffix1).toBe(suffix0 + 1);
+    });
+
+    it("fetches TC document data once issued, refuses before", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const enrollment = await admitForTc(cookie);
+      const req1 = await request(app).post(`/api/students/enrollments/${enrollment.id}/tc-requests`)
+        .set("Cookie", cookie).send({ reason: "Transfer", last_day: "2026-11-30" });
+
+      const tooEarly = await request(app).get(`/api/students/tc-requests/${req1.body.id}/document-data`)
+        .set("Cookie", cookie);
+      expect(tooEarly.status).toBe(400);
+
+      await request(app).post(`/api/students/tc-requests/${req1.body.id}/clear`)
+        .set("Cookie", cookie).send({ clearance_note: "Cleared" });
+      await request(app).post(`/api/students/tc-requests/${req1.body.id}/issue`)
+        .set("Cookie", cookie).send({ conduct: "Good", qualified_for_promotion: true });
+
+      const doc = await request(app).get(`/api/students/tc-requests/${req1.body.id}/document-data`)
+        .set("Cookie", cookie);
+      expect(doc.status).toBe(200);
+      expect(doc.body.full_name).toBe("Leaving Student");
+      expect(doc.body.school_name).toBeTruthy();
+      expect(doc.body.qualified_for_promotion).toBe(true);
+    });
+
+    it("logs every step of the TC workflow", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const enrollment = await admitForTc(cookie);
+      const req1 = await request(app).post(`/api/students/enrollments/${enrollment.id}/tc-requests`)
+        .set("Cookie", cookie).send({ reason: "Transfer", last_day: "2026-11-30" });
+      await request(app).post(`/api/students/tc-requests/${req1.body.id}/clear`)
+        .set("Cookie", cookie).send({ clearance_note: "Cleared" });
+      await request(app).post(`/api/students/tc-requests/${req1.body.id}/issue`)
+        .set("Cookie", cookie).send({ conduct: "Good" });
+
+      const log = await request(app).get("/api/audit-log?entity_type=tc_request").set("Cookie", cookie);
+      const actions = log.body.map((e: any) => e.action);
+      expect(actions).toContain("tc.request");
+      expect(actions).toContain("tc.clear");
+      expect(actions).toContain("tc.issue");
+    });
+  });
+
   it("an accountant can see the day book after front desk collects", async () => {
     const ownerCookie = await loginAs("owner@http.test");
     const { year, classLevel, section } = await setUpAcademicStructure(ownerCookie);

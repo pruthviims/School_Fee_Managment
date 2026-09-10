@@ -12,6 +12,7 @@ import { pool } from "../db/index.js";
 import { requireCapability, requireMember } from "../middleware/permissions.js";
 import { logActivity } from "../services/auditLog.js";
 import { BillingError, generateCharges } from "../services/billing.js";
+import { fiscalYearFor, issueDocumentNumber } from "../services/documentCounter.js";
 import { getEnrollmentLedger } from "../services/ledger.js";
 
 export const studentsRouter = Router();
@@ -344,6 +345,204 @@ studentsRouter.get("/enrollments/:id/refunds", async (req, res) => {
     [req.params.id, req.school!.id],
   );
   res.json(result.rows);
+});
+
+// ---------------------------------------------------------------------
+// TC (Transfer Certificate) — every student leaving, for any reason,
+// goes through this same three-stage process: pending_clearance ->
+// cleared -> issued. Accountant/Owner can complete both the clearance
+// and issue steps alone (manage_tc covers both) — this isn't a hard
+// two-person requirement, but the two steps still get their own actor
+// and timestamp each, even when it's the same person doing both back
+// to back, so there's always a real record of when dues were actually
+// checked versus when the certificate was actually issued.
+// ---------------------------------------------------------------------
+
+const tcRequestSchema = z.object({
+  reason: z.string().max(500),
+  last_day: z.string(),
+});
+
+studentsRouter.post(
+  "/enrollments/:id/tc-requests", requireCapability("manage_admissions"),
+  async (req, res) => {
+    const parsed = tcRequestSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ detail: parsed.error.issues[0]?.message });
+    const d = parsed.data;
+
+    const existing = await pool.query(
+      `SELECT id FROM tc_requests WHERE enrollment_id = $1 AND status != 'issued'`,
+      [req.params.id],
+    );
+    if (existing.rows[0]) {
+      return res.status(409).json({ detail: "A TC request is already in progress for this student." });
+    }
+
+    const result = await pool.query(
+      `INSERT INTO tc_requests (school_id, enrollment_id, reason, last_day, requested_by)
+       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [req.school!.id, req.params.id, d.reason, d.last_day, req.user!.id],
+    );
+
+    const student = await pool.query(
+      `SELECT s.full_name FROM enrollments e JOIN students s ON s.id = e.student_id WHERE e.id = $1`,
+      [req.params.id],
+    );
+    await logActivity(pool, req, {
+      action: "tc.request",
+      entityType: "tc_request",
+      entityId: result.rows[0].id,
+      description: `Requested a TC for ${student.rows[0]?.full_name || "a student"} — ${d.reason}`,
+      metadata: { last_day: d.last_day, reason: d.reason },
+    });
+
+    res.status(201).json(result.rows[0]);
+  },
+);
+
+studentsRouter.get("/enrollments/:id/tc-requests", async (req, res) => {
+  const result = await pool.query(
+    `SELECT tr.*, req.full_name AS requested_by_name, clr.full_name AS cleared_by_name,
+            iss.full_name AS issued_by_name
+     FROM tc_requests tr
+     LEFT JOIN users req ON req.id = tr.requested_by
+     LEFT JOIN users clr ON clr.id = tr.cleared_by
+     LEFT JOIN users iss ON iss.id = tr.issued_by
+     WHERE tr.enrollment_id = $1 AND tr.school_id = $2
+     ORDER BY tr.requested_on DESC`,
+    [req.params.id, req.school!.id],
+  );
+  res.json(result.rows);
+});
+
+const tcClearSchema = z.object({ clearance_note: z.string().max(500).optional().default("") });
+
+studentsRouter.post(
+  "/tc-requests/:id/clear", requireCapability("manage_tc"),
+  async (req, res) => {
+    const parsed = tcClearSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ detail: parsed.error.issues[0]?.message });
+
+    const current = await pool.query(
+      `SELECT status FROM tc_requests WHERE id = $1 AND school_id = $2`,
+      [req.params.id, req.school!.id],
+    );
+    if (!current.rows[0]) return res.status(404).end();
+    if (current.rows[0].status !== "pending_clearance") {
+      return res.status(400).json({ detail: "This request has already been cleared or issued." });
+    }
+
+    const result = await pool.query(
+      `UPDATE tc_requests
+       SET status = 'cleared', clearance_note = $1, cleared_by = $2, cleared_on = now()
+       WHERE id = $3 RETURNING *`,
+      [parsed.data.clearance_note, req.user!.id, req.params.id],
+    );
+
+    await logActivity(pool, req, {
+      action: "tc.clear",
+      entityType: "tc_request",
+      entityId: String(req.params.id),
+      description: `Gave finance clearance for a TC — ${parsed.data.clearance_note || "no dues outstanding"}`,
+      metadata: { clearance_note: parsed.data.clearance_note },
+    });
+
+    res.json(result.rows[0]);
+  },
+);
+
+const tcIssueSchema = z.object({
+  conduct: z.string().max(200).optional().default(""),
+  qualified_for_promotion: z.boolean().optional(),
+  remarks: z.string().max(500).optional().default(""),
+});
+
+studentsRouter.post(
+  "/tc-requests/:id/issue", requireCapability("manage_tc"),
+  async (req, res) => {
+    const parsed = tcIssueSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ detail: parsed.error.issues[0]?.message });
+    const d = parsed.data;
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+
+      const current = await client.query(
+        `SELECT * FROM tc_requests WHERE id = $1 AND school_id = $2 FOR UPDATE`,
+        [req.params.id, req.school!.id],
+      );
+      const request = current.rows[0];
+      if (!request) { await client.query("ROLLBACK"); return res.status(404).end(); }
+      if (request.status !== "cleared") {
+        await client.query("ROLLBACK");
+        return res.status(400).json({ detail: "This request needs finance clearance before it can be issued." });
+      }
+
+      const fiscalYear = fiscalYearFor(new Date());
+      const tcNumber = await issueDocumentNumber(client, {
+        schoolId: req.school!.id, docType: "tc", fiscalYear, prefix: "TC/",
+      });
+
+      const updated = await client.query(
+        `UPDATE tc_requests
+         SET status = 'issued', tc_number = $1, conduct = $2, qualified_for_promotion = $3,
+             remarks = $4, issued_by = $5, issued_on = now()
+         WHERE id = $6 RETURNING *`,
+        [tcNumber, d.conduct, d.qualified_for_promotion ?? null, d.remarks, req.user!.id, req.params.id],
+      );
+
+      await client.query(
+        `UPDATE enrollments
+         SET outcome = 'tc_issued', is_active = false, withdrawn_on = $1, withdrawal_reason = $2
+         WHERE id = $3`,
+        [request.last_day, request.reason, request.enrollment_id],
+      );
+
+      await client.query("COMMIT");
+
+      const student = await pool.query(
+        `SELECT s.full_name FROM enrollments e JOIN students s ON s.id = e.student_id WHERE e.id = $1`,
+        [request.enrollment_id],
+      );
+      await logActivity(pool, req, {
+        action: "tc.issue",
+        entityType: "tc_request",
+        entityId: String(req.params.id),
+        description: `Issued TC ${tcNumber} for ${student.rows[0]?.full_name || "a student"}`,
+        metadata: { tc_number: tcNumber, conduct: d.conduct },
+      });
+
+      res.json(updated.rows[0]);
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+  },
+);
+
+studentsRouter.get("/tc-requests/:id/document-data", async (req, res) => {
+  const result = await pool.query(
+    `SELECT tr.*, s.full_name, s.admission_no, s.date_of_birth, s.guardian_name,
+            e.academic_year_id, cl.name AS class_name, sc.name AS school_name,
+            sc.address AS school_address, sc.logo_data_url,
+            ay.name AS academic_year_name
+     FROM tc_requests tr
+     JOIN enrollments e ON e.id = tr.enrollment_id
+     JOIN students s ON s.id = e.student_id
+     JOIN class_levels cl ON cl.id = e.class_level_id
+     JOIN academic_years ay ON ay.id = e.academic_year_id
+     JOIN schools sc ON sc.id = tr.school_id
+     WHERE tr.id = $1 AND tr.school_id = $2`,
+    [req.params.id, req.school!.id],
+  );
+  if (!result.rows[0]) return res.status(404).end();
+  if (result.rows[0].status !== "issued") {
+    return res.status(400).json({ detail: "This TC hasn't been issued yet." });
+  }
+  res.json(result.rows[0]);
 });
 
 // ---------------------------------------------------------------------

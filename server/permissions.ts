@@ -12,11 +12,11 @@ export const ROLE_CAPABILITIES: Record<Role, Set<string>> = {
   owner: new Set([
     "manage_staff", "manage_fee_structure", "manage_transport",
     "manage_admissions", "collect_payments", "manage_concessions",
-    "view_reports", "edit_school_profile", "void_payments", "view_audit_log",
+    "view_reports", "edit_school_profile", "void_payments", "view_audit_log", "manage_tc",
   ]),
   accountant: new Set([
     "manage_fee_structure", "manage_transport", "collect_payments",
-    "manage_concessions", "view_reports", "void_payments", "view_audit_log",
+    "manage_concessions", "view_reports", "void_payments", "view_audit_log", "manage_tc",
   ]),
   front_desk: new Set(["manage_admissions", "collect_payments"]),
   viewer: new Set(["view_reports"]),
