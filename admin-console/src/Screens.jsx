@@ -22,7 +22,9 @@ import {
   ShieldCheck,
   Sparkles,
   Trash2,
+  Undo2,
   Upload,
+  UserMinus,
   UserPlus,
   Users,
   Wallet,
@@ -2491,7 +2493,7 @@ export function ConcessionScreen({ academicYears, state, feeHeads, refreshFeeHea
       )}
 
       {viewingProfileFor && (
-        <StudentProfileModal enrollmentId={viewingProfileFor}
+        <StudentProfileModal enrollmentId={viewingProfileFor} capabilities={state.school.capabilities}
           onClose={() => { setViewingProfileFor(null); refetch(); }}
           onCollectPayment={(student) => {
             setViewingProfileFor(null);
@@ -3115,13 +3117,16 @@ export function ActivityLogScreen() {
  * Collection; "Collect Payment" here hands off to that existing modal
  * rather than duplicating any of it.
  */
-function StudentProfileModal({ enrollmentId, onClose, onCollectPayment }) {
+function StudentProfileModal({ enrollmentId, capabilities, onClose, onCollectPayment }) {
   const [profile, setProfile] = useState(null);
   const [sections, setSections] = useState([]);
+  const [refunds, setRefunds] = useState([]);
   const [form, setForm] = useState(null);
   const [saved, setSaved] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [showWithdraw, setShowWithdraw] = useState(false);
+  const [showRefund, setShowRefund] = useState(false);
 
   async function refetch() {
     const p = await api.get(`/students/enrollments/${enrollmentId}/profile`);
@@ -3130,9 +3135,12 @@ function StudentProfileModal({ enrollmentId, onClose, onCollectPayment }) {
       guardian_name: p.guardian_name, guardian_phone: p.guardian_phone,
       guardian_email: p.guardian_email, address: p.address, section_id: p.section_id,
     });
-    const s = await api.get(
-      `/setup/sections?academic_year_id=${p.academic_year_id}&class_level_id=${p.class_level_id}`);
+    const [s, r] = await Promise.all([
+      api.get(`/setup/sections?academic_year_id=${p.academic_year_id}&class_level_id=${p.class_level_id}`),
+      api.get(`/students/enrollments/${enrollmentId}/refunds`),
+    ]);
     setSections(s);
+    setRefunds(r);
   }
   useEffect(() => { refetch(); }, [enrollmentId]); // eslint-disable-line
 
@@ -3169,6 +3177,8 @@ function StudentProfileModal({ enrollmentId, onClose, onCollectPayment }) {
   }
 
   const set = (k) => (e) => { setForm({ ...form, [k]: e.target.value }); setSaved(false); };
+  const withdrawn = profile.outcome === "left";
+  const canRefund = (capabilities || []).includes("void_payments");
 
   return (
     <div className="fixed inset-0 bg-slate-900/40 flex items-center justify-center p-4 z-50"
@@ -3188,6 +3198,14 @@ function StudentProfileModal({ enrollmentId, onClose, onCollectPayment }) {
         </div>
 
         <div className="px-6 py-5 space-y-4">
+          {withdrawn && (
+            <div className="bg-amber-50 border border-amber-200 text-amber-800 rounded-xl px-4 py-3 text-sm">
+              <span className="font-bold">Withdrawn</span>
+              {profile.withdrawn_on && ` on ${displayDate(profile.withdrawn_on)}`}
+              {profile.withdrawal_reason && ` — ${profile.withdrawal_reason}`}
+            </div>
+          )}
+
           {error && (
             <div className="flex items-start gap-2 bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-3 text-sm font-semibold">
               <AlertTriangle size={15} className="mt-0.5 shrink-0" /> {error}
@@ -3242,7 +3260,158 @@ function StudentProfileModal({ enrollmentId, onClose, onCollectPayment }) {
             </button>
           </div>
         </div>
+
+        {refunds.length > 0 && (
+          <div className="px-6 py-4 border-t border-slate-100">
+            <label className={eyebrow}>Refund history</label>
+            <div className="mt-2 space-y-1.5">
+              {refunds.map((r) => (
+                <div key={r.id} className="flex items-center justify-between text-sm">
+                  <span className="text-slate-500">
+                    {displayDate(r.created_at)} · {r.mode}{r.reason ? ` — ${r.reason}` : ""}
+                  </span>
+                  <span className="font-bold">{inr(r.amount / 100)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="px-6 py-4 border-t border-slate-100 flex flex-wrap gap-2">
+          {!withdrawn && (
+            <button onClick={() => setShowWithdraw((v) => !v)}
+              className="text-sm font-semibold text-slate-500 hover:text-red-500 flex items-center gap-1.5">
+              <UserMinus size={14} /> Withdraw student
+            </button>
+          )}
+          {canRefund && (
+            <button onClick={() => setShowRefund((v) => !v)}
+              className="text-sm font-semibold text-slate-500 hover:text-brand-600 flex items-center gap-1.5 sm:ml-auto">
+              <Undo2 size={14} /> Record refund
+            </button>
+          )}
+        </div>
+
+        {showWithdraw && !withdrawn && (
+          <WithdrawPanel enrollmentId={enrollmentId} onDone={async () => { setShowWithdraw(false); await refetch(); }} />
+        )}
+        {showRefund && canRefund && (
+          <RefundPanel enrollmentId={enrollmentId} onDone={async () => { setShowRefund(false); await refetch(); }} />
+        )}
       </div>
+    </div>
+  );
+}
+
+function WithdrawPanel({ enrollmentId, onDone }) {
+  const [withdrawnOn, setWithdrawnOn] = useState(() => new Date().toISOString().slice(0, 10));
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit() {
+    setError("");
+    setBusy(true);
+    try {
+      await api.post(`/students/enrollments/${enrollmentId}/withdraw`, {
+        withdrawn_on: withdrawnOn, reason: reason.trim(),
+      });
+      await onDone();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not withdraw this student.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="px-6 py-5 border-t border-slate-100 bg-red-50/40">
+      <h3 className="font-bold text-sm mb-3">Withdraw this student</h3>
+      {error && <p className="text-xs font-semibold text-red-600 mb-2">{error}</p>}
+      <div className="grid sm:grid-cols-2 gap-3">
+        <div>
+          <label className={eyebrow}>Last day</label>
+          <input type="date" className={`${field} mt-2`} value={withdrawnOn}
+            onChange={(e) => setWithdrawnOn(e.target.value)} />
+        </div>
+        <div>
+          <label className={eyebrow}>Reason</label>
+          <input className={`${field} mt-2`} value={reason} onChange={(e) => setReason(e.target.value)}
+            placeholder="Family relocating, etc." />
+        </div>
+      </div>
+      <button onClick={submit} disabled={busy}
+        className="mt-3 text-sm font-bold rounded-lg px-4 py-2.5 bg-red-600 text-white hover:bg-red-700 disabled:opacity-50">
+        {busy ? "Withdrawing…" : "Confirm withdrawal"}
+      </button>
+    </div>
+  );
+}
+
+function RefundPanel({ enrollmentId, onDone }) {
+  const [amount, setAmount] = useState("");
+  const [mode, setMode] = useState("cash");
+  const [reference, setReference] = useState("");
+  const [reason, setReason] = useState("");
+  const [approverName, setApproverName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit() {
+    setError("");
+    const amt = Math.round(parseFloat(amount) || 0);
+    if (!(amt > 0)) return setError("Enter an amount greater than zero.");
+    setBusy(true);
+    try {
+      await api.post(`/students/enrollments/${enrollmentId}/refund`, {
+        amount: amt * 100, mode, instrument_ref: reference.trim(),
+        reason: reason.trim(), approver_name: approverName.trim(),
+      });
+      await onDone();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not record that refund.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="px-6 py-5 border-t border-slate-100 bg-brand-50/30">
+      <h3 className="font-bold text-sm mb-3">Record a refund</h3>
+      {error && <p className="text-xs font-semibold text-red-600 mb-2">{error}</p>}
+      <div className="grid sm:grid-cols-2 gap-3">
+        <div>
+          <label className={eyebrow}>Amount</label>
+          <input inputMode="numeric" className={`${field} mt-2`} value={amount}
+            onChange={(e) => setAmount(e.target.value)} placeholder="0" />
+        </div>
+        <div>
+          <label className={eyebrow}>Mode</label>
+          <select className={`${field} mt-2`} value={mode} onChange={(e) => setMode(e.target.value)}>
+            {PAYMENT_MODES.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+          </select>
+        </div>
+      </div>
+      <div className="grid sm:grid-cols-2 gap-3 mt-3">
+        <div>
+          <label className={eyebrow}>Reference (optional)</label>
+          <input className={`${field} mt-2`} value={reference} onChange={(e) => setReference(e.target.value)}
+            placeholder="Cheque no., UTR, etc." />
+        </div>
+        <div>
+          <label className={eyebrow}>Approved by</label>
+          <input className={`${field} mt-2`} value={approverName}
+            onChange={(e) => setApproverName(e.target.value)} placeholder="Management name" />
+        </div>
+      </div>
+      <div className="mt-3">
+        <label className={eyebrow}>Reason</label>
+        <input className={`${field} mt-2`} value={reason} onChange={(e) => setReason(e.target.value)}
+          placeholder="Withdrawal, overpayment, etc." />
+      </div>
+      <button onClick={submit} disabled={busy} className={`${primary} mt-3`}>
+        {busy ? "Recording…" : "Record refund"}
+      </button>
     </div>
   );
 }

@@ -97,7 +97,9 @@ export const PAYMENT_MODES = [
   { id: "upi", label: "UPI" },
   { id: "card", label: "Card" },
   { id: "netbanking", label: "Net banking" },
+  { id: "neft", label: "NEFT" },
   { id: "cheque", label: "Cheque" },
+  { id: "dd", label: "Demand draft" },
 ];
 
 // Gapless within a year is what a real ledger needs (a Postgres row lock in

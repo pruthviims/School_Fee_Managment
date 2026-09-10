@@ -147,7 +147,7 @@ studentsRouter.get("/enrollments/:id/profile", async (req, res) => {
     `SELECT s.id AS student_id, s.admission_no, s.full_name, s.date_of_birth, s.gender,
             s.guardian_name, s.guardian_phone, s.guardian_email, s.address, s.status,
             e.id AS enrollment_id, e.academic_year_id, e.class_level_id, e.section_id,
-            e.outcome, e.is_active,
+            e.outcome, e.is_active, e.withdrawn_on, e.withdrawal_reason,
             cl.name AS class_name, sec.name AS section_name
      FROM enrollments e
      JOIN students s ON s.id = e.student_id

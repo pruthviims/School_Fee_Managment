@@ -640,6 +640,19 @@ describe("concessions and enrollment editing", () => {
     expect(res.status).toBe(200);
   });
 
+  it("the profile endpoint reflects withdrawal details after withdrawing", async () => {
+    const cookie = await loginAs("owner@http.test");
+    const { enrollment } = await setUpAdmittedStudent(cookie);
+    await request(app).post(`/api/students/enrollments/${enrollment.id}/withdraw`)
+      .set("Cookie", cookie).send({ withdrawn_on: "2026-11-15", reason: "Transferred to another school" });
+
+    const profile = await request(app).get(`/api/students/enrollments/${enrollment.id}/profile`)
+      .set("Cookie", cookie);
+    expect(profile.body.outcome).toBe("left");
+    expect(profile.body.withdrawal_reason).toBe("Transferred to another school");
+    expect(profile.body.withdrawn_on).toContain("2026-11-15");
+  });
+
   it("withdraws a student — sets outcome, is_active, and logs it", async () => {
     const cookie = await loginAs("owner@http.test");
     const { enrollment } = await setUpAdmittedStudent(cookie);
