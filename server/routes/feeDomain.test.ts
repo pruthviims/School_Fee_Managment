@@ -173,6 +173,33 @@ describe("setup routes", () => {
     expect(list.body).toHaveLength(0);
   });
 
+  it("logs creating, updating, and deleting a fee-structure line", async () => {
+    const cookie = await loginAs("owner@http.test");
+    const year = await request(app).post("/api/setup/academic-years").set("Cookie", cookie)
+      .send({ name: "2026-27", starts_on: "2026-06-01", ends_on: "2027-03-31" });
+    const classLevel = await request(app).post("/api/setup/class-levels").set("Cookie", cookie)
+      .send({ name: "VIII", ladder_order: 8, stage: "middle" });
+    const feeHead = await request(app).post("/api/setup/fee-heads").set("Cookie", cookie)
+      .send({ name: "Tuition fee" });
+    const line = await request(app).post("/api/setup/fee-structure").set("Cookie", cookie).send({
+      academic_year_id: year.body.id, class_level_id: classLevel.body.id,
+      fee_head_id: feeHead.body.id, amount: 4000000, due_on: "2026-06-15",
+    });
+    await request(app).patch(`/api/setup/fee-structure/${line.body.id}`)
+      .set("Cookie", cookie).send({ amount: 4500000 });
+    await request(app).delete(`/api/setup/fee-structure/${line.body.id}`).set("Cookie", cookie);
+
+    const log = await request(app).get("/api/audit-log?entity_type=fee_structure").set("Cookie", cookie);
+    const actions = log.body.map((e: any) => e.action);
+    expect(actions).toContain("fee_structure.create");
+    expect(actions).toContain("fee_structure.update");
+    expect(actions).toContain("fee_structure.delete");
+    // Readable, not just an id — VIII and Tuition fee should both appear.
+    const created = log.body.find((e: any) => e.action === "fee_structure.create");
+    expect(created.description).toContain("VIII");
+    expect(created.description).toContain("Tuition fee");
+  });
+
   it("front desk cannot update or delete a fee-structure line", async () => {
     const ownerCookie = await loginAs("owner@http.test");
     const year = await request(app).post("/api/setup/academic-years").set("Cookie", ownerCookie)
@@ -375,6 +402,24 @@ describe("admission -> billing -> collection, end to end", () => {
       .get(`/api/students/enrollments/${admission.body.enrollment.id}/ledger`)
       .set("Cookie", deskCookie);
     expect(ledger.body.balance).toBe(4000000 - 1500000);
+  });
+
+  it("logs recording a payment, with the real student name and amount", async () => {
+    const ownerCookie = await loginAs("owner@http.test");
+    const { year, classLevel, section } = await setUpAcademicStructure(ownerCookie);
+    const admission = await request(app).post("/api/students/admit").set("Cookie", ownerCookie).send({
+      admission_no: "2026/920", full_name: "Logged Payment Student",
+      academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
+    });
+    await request(app).post("/api/collection/payments").set("Cookie", ownerCookie).send({
+      enrollment_id: admission.body.enrollment.id, amount: 1500000, mode: "upi",
+    });
+
+    const log = await request(app).get("/api/audit-log?entity_type=payment").set("Cookie", ownerCookie);
+    const entry = log.body.find((e: any) => e.action === "payment.record");
+    expect(entry).toBeDefined();
+    expect(entry.description).toContain("Logged Payment Student");
+    expect(entry.description).toContain("upi");
   });
 
   it("lists payments for an enrollment, most recent first", async () => {
@@ -585,6 +630,21 @@ describe("concessions and enrollment editing", () => {
     expect(ledger.body.charged).toBe(4000000);
     expect(ledger.body.conceded).toBe(1000000);
     expect(ledger.body.balance).toBe(3000000);
+  });
+
+  it("logs both granting and reversing a concession", async () => {
+    const cookie = await loginAs("owner@http.test");
+    const { enrollment } = await setUpAdmittedStudent(cookie);
+    const concession = await request(app)
+      .post(`/api/students/enrollments/${enrollment.id}/concessions`).set("Cookie", cookie)
+      .send({ amount: 1000000, reason: "sibling" });
+    await request(app).post(`/api/students/concessions/${concession.body.id}/reverse`)
+      .set("Cookie", cookie).send({ reason: "Granted in error" });
+
+    const log = await request(app).get("/api/audit-log?entity_type=concession").set("Cookie", cookie);
+    const actions = log.body.map((e: any) => e.action);
+    expect(actions).toContain("concession.grant");
+    expect(actions).toContain("concession.reverse");
   });
 
   it("records who in management approved a concession, separate from who recorded it", async () => {

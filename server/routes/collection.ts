@@ -43,7 +43,21 @@ collectionRouter.post("/payments", requireCapability("collect_payments"), async 
       enrollmentId: d.enrollment_id, amount: d.amount, mode: d.mode,
       instrumentRef: d.instrument_ref, collectedBy: req.user!.id,
       chargeAmounts: d.charge_amounts?.map((c) => ({ chargeId: c.charge_id, amount: c.amount })),
+    }) as { id: string; amount: number };
+
+    const student = await pool.query(
+      `SELECT s.full_name FROM enrollments e JOIN students s ON s.id = e.student_id WHERE e.id = $1`,
+      [d.enrollment_id],
+    );
+    await logActivity(pool, req, {
+      action: "payment.record",
+      entityType: "payment",
+      entityId: payment.id,
+      description: `Collected ₹${(payment.amount / 100).toFixed(2)} from ` +
+        `${student.rows[0]?.full_name || "a student"} (${d.mode})`,
+      metadata: { amount: payment.amount, mode: d.mode },
     });
+
     res.status(201).json(payment);
   } catch (err) {
     if (err instanceof CollectionError) return res.status(400).json({ detail: err.message });

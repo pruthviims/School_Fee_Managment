@@ -128,6 +128,28 @@ describe("fares", () => {
     expect(list.body[0].stop_name).toBe("4th Block");
     expect(list.body[0].route_code).toBe("R-01");
   });
+
+  it("logs setting and updating a fare, with the real stop name", async () => {
+    const cookie = await loginAs("owner@transport.test");
+    // This helper already creates one fare via POST /fares as part of its setup.
+    const { year, stop } = await setUpRouteStopFareAndStudent(cookie);
+
+    const log = await request(app).get("/api/audit-log?entity_type=transport").set("Cookie", cookie);
+    const createEntry = log.body.find((e: any) => e.action === "transport_fare.create");
+    expect(createEntry).toBeDefined();
+    expect(createEntry.description).toContain("4th Block");
+
+    const fareList = await request(app).get(`/api/transport/fares?academic_year_id=${year.id}`)
+      .set("Cookie", cookie);
+    const fare = fareList.body.find((f: any) => f.stop_id === stop.id);
+    await request(app).patch(`/api/transport/fares/${fare.id}`).set("Cookie", cookie)
+      .send({ amount: 6000000 });
+
+    const afterUpdate = await request(app).get("/api/audit-log?entity_type=transport").set("Cookie", cookie);
+    const updateEntry = afterUpdate.body.find((e: any) => e.action === "transport_fare.update");
+    expect(updateEntry).toBeDefined();
+    expect(updateEntry.description).toContain("4th Block");
+  });
 });
 
 describe("assigning a student — the actual proration", () => {

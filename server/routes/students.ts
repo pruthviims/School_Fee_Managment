@@ -397,6 +397,20 @@ studentsRouter.post(
       [req.school!.id, req.params.id, d.fee_head_id, d.reason, d.note, d.amount,
        d.is_government_reimbursed, d.approver_name, req.user!.id],
     );
+
+    const student = await pool.query(
+      `SELECT s.full_name FROM enrollments e JOIN students s ON s.id = e.student_id WHERE e.id = $1`,
+      [req.params.id],
+    );
+    await logActivity(pool, req, {
+      action: "concession.grant",
+      entityType: "concession",
+      entityId: result.rows[0].id,
+      description: `Granted a concession of ₹${(d.amount / 100).toFixed(2)} to ` +
+        `${student.rows[0]?.full_name || "a student"}${d.fee_head_id ? " (transport)" : ""}`,
+      metadata: { amount: d.amount, reason: d.reason, fee_head_id: d.fee_head_id },
+    });
+
     res.status(201).json(result.rows[0]);
   },
 );
@@ -437,6 +451,20 @@ studentsRouter.post(
         [marker.rows[0].id, reason, row.id],
       );
       await client.query("COMMIT");
+
+      const student = await pool.query(
+        `SELECT s.full_name FROM enrollments e JOIN students s ON s.id = e.student_id WHERE e.id = $1`,
+        [row.enrollment_id],
+      );
+      await logActivity(pool, req, {
+        action: "concession.reverse",
+        entityType: "concession",
+        entityId: String(req.params.id),
+        description: `Reversed a ₹${(row.amount / 100).toFixed(2)} concession for ` +
+          `${student.rows[0]?.full_name || "a student"} — ${reason}`,
+        metadata: { amount: row.amount, reason },
+      });
+
       res.status(204).end();
     } catch (err) {
       await client.query("ROLLBACK");

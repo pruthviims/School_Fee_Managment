@@ -13,6 +13,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { pool } from "../db/index.js";
 import { requireCapability, requireMember } from "../middleware/permissions.js";
+import { logActivity } from "../services/auditLog.js";
 
 export const transportRouter = Router();
 transportRouter.use(requireMember);
@@ -237,6 +238,14 @@ transportRouter.post("/fares", configGuard, async (req, res) => {
        VALUES ($1, $2, $3, $4, 1, $5) RETURNING *`,
       [req.school!.id, d.academic_year_id, d.stop_id, d.amount, d.due_on],
     );
+    const stop = await pool.query(`SELECT name FROM route_stops WHERE id = $1`, [d.stop_id]);
+    await logActivity(pool, req, {
+      action: "transport_fare.create",
+      entityType: "transport",
+      entityId: result.rows[0].id,
+      description: `Set the yearly fare for ${stop.rows[0]?.name || "a stop"} to ₹${(d.amount / 100).toFixed(2)}`,
+      metadata: { stop_id: d.stop_id, amount: d.amount },
+    });
     res.status(201).json(result.rows[0]);
   } catch (err) {
     if ((err as { code?: string }).code === "23505") {
@@ -261,6 +270,16 @@ transportRouter.patch("/fares/:id", configGuard, async (req, res) => {
     [String(req.params.id), req.school!.id, ...fields.map((f) => (parsed.data as any)[f])],
   );
   if (!result.rows[0]) return res.status(404).end();
+
+  const stop = await pool.query(`SELECT name FROM route_stops WHERE id = $1`, [result.rows[0].stop_id]);
+  await logActivity(pool, req, {
+    action: "transport_fare.update",
+    entityType: "transport",
+    entityId: String(req.params.id),
+    description: `Updated the yearly fare for ${stop.rows[0]?.name || "a stop"} (${fields.join(", ")})`,
+    metadata: parsed.data,
+  });
+
   res.json(result.rows[0]);
 });
 

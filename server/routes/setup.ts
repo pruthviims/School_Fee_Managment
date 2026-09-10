@@ -11,6 +11,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { pool } from "../db/index.js";
 import { requireCapability, requireMember } from "../middleware/permissions.js";
+import { logActivity } from "../services/auditLog.js";
 
 export const setupRouter = Router();
 setupRouter.use(requireMember);
@@ -374,6 +375,21 @@ setupRouter.post("/fee-structure", writeGuard, async (req, res) => {
       [req.school!.id, d.academic_year_id, d.class_level_id, d.fee_head_id, d.stream_id,
        d.amount, d.term_no, d.due_on],
     );
+
+    const names = await pool.query(
+      `SELECT cl.name AS class_name, fh.name AS head_name
+       FROM class_levels cl, fee_heads fh WHERE cl.id = $1 AND fh.id = $2`,
+      [d.class_level_id, d.fee_head_id],
+    );
+    await logActivity(pool, req, {
+      action: "fee_structure.create",
+      entityType: "fee_structure",
+      entityId: result.rows[0].id,
+      description: `Set ${names.rows[0]?.head_name || "a fee"} for ${names.rows[0]?.class_name || "a class"} ` +
+        `to ₹${(d.amount / 100).toFixed(2)} (term ${d.term_no})`,
+      metadata: { amount: d.amount, class_level_id: d.class_level_id, fee_head_id: d.fee_head_id },
+    });
+
     res.status(201).json(result.rows[0]);
   } catch (err) {
     if ((err as { code?: string }).code === "23505") {
@@ -399,6 +415,24 @@ setupRouter.patch("/fee-structure/:id", writeGuard, async (req, res) => {
     [String(req.params.id), req.school!.id, ...fields.map((f) => (parsed.data as any)[f])],
   );
   if (!result.rows[0]) return res.status(404).end();
+
+  const names = await pool.query(
+    `SELECT cl.name AS class_name, fh.name AS head_name
+     FROM fee_structures fs
+     JOIN class_levels cl ON cl.id = fs.class_level_id
+     JOIN fee_heads fh ON fh.id = fs.fee_head_id
+     WHERE fs.id = $1`,
+    [result.rows[0].id],
+  );
+  await logActivity(pool, req, {
+    action: "fee_structure.update",
+    entityType: "fee_structure",
+    entityId: String(req.params.id),
+    description: `Updated ${names.rows[0]?.head_name || "a fee"} for ${names.rows[0]?.class_name || "a class"} ` +
+      `(${fields.join(", ")})`,
+    metadata: parsed.data,
+  });
+
   res.json(result.rows[0]);
 });
 
@@ -407,10 +441,26 @@ setupRouter.delete("/fee-structure/:id", writeGuard, async (req, res) => {
   // row when the admission happened (see billing.generateCharges) — this
   // only removes the price-list entry going forward, never touches a
   // charge that already exists.
+  const before = await pool.query(
+    `SELECT cl.name AS class_name, fh.name AS head_name, fs.amount
+     FROM fee_structures fs
+     JOIN class_levels cl ON cl.id = fs.class_level_id
+     JOIN fee_heads fh ON fh.id = fs.fee_head_id
+     WHERE fs.id = $1 AND fs.school_id = $2`,
+    [String(req.params.id), req.school!.id],
+  );
   const result = await pool.query(
     `DELETE FROM fee_structures WHERE id = $1 AND school_id = $2 RETURNING id`,
     [String(req.params.id), req.school!.id],
   );
   if (!result.rows[0]) return res.status(404).end();
+
+  await logActivity(pool, req, {
+    action: "fee_structure.delete",
+    entityType: "fee_structure",
+    entityId: String(req.params.id),
+    description: `Removed ${before.rows[0]?.head_name || "a fee"} from ${before.rows[0]?.class_name || "a class"}`,
+  });
+
   res.status(204).end();
 });
