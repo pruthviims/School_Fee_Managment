@@ -137,6 +137,74 @@ studentsRouter.get("/enrollments/:id/ledger", async (req, res) => {
   res.json(ledger);
 });
 
+// Everything the Student Profile screen needs in one call: the
+// student's own record (name, contact details — the editable fields),
+// plus this enrollment's class/section, rather than the frontend
+// piecing it together from the flat enrollments list it already has
+// for other screens.
+studentsRouter.get("/enrollments/:id/profile", async (req, res) => {
+  const result = await pool.query(
+    `SELECT s.id AS student_id, s.admission_no, s.full_name, s.date_of_birth, s.gender,
+            s.guardian_name, s.guardian_phone, s.guardian_email, s.address, s.status,
+            e.id AS enrollment_id, e.academic_year_id, e.class_level_id, e.section_id,
+            e.outcome, e.is_active,
+            cl.name AS class_name, sec.name AS section_name
+     FROM enrollments e
+     JOIN students s ON s.id = e.student_id
+     JOIN class_levels cl ON cl.id = e.class_level_id
+     JOIN sections sec ON sec.id = e.section_id
+     WHERE e.id = $1 AND e.school_id = $2`,
+    [req.params.id, req.school!.id],
+  );
+  if (!result.rows[0]) return res.status(404).end();
+  res.json(result.rows[0]);
+});
+
+const studentUpdateSchema = z.object({
+  guardian_name: z.string().max(150).optional(),
+  guardian_phone: z.string().max(20).optional(),
+  guardian_email: z.string().max(150).optional(),
+  address: z.string().max(500).optional(),
+}).refine((v) => Object.keys(v).length > 0, { message: "Nothing to update." });
+
+// Deliberately narrow: name, date of birth, gender, and admission
+// number aren't editable here — those are treated as fixed identity
+// records elsewhere in this app (matching how a receipt freezes a
+// student's name at the time it's issued). Only the contact details
+// that genuinely do change over a school year — a family moving
+// house, a new phone number — are writable through this endpoint.
+studentsRouter.patch(
+  "/:id", requireCapability("manage_admissions"),
+  async (req, res) => {
+    const parsed = studentUpdateSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ detail: parsed.error.issues[0]?.message });
+
+    const before = await pool.query(
+      `SELECT guardian_name, guardian_phone, guardian_email, address FROM students
+       WHERE id = $1 AND school_id = $2`,
+      [req.params.id, req.school!.id],
+    );
+    if (!before.rows[0]) return res.status(404).end();
+
+    const fields = Object.keys(parsed.data);
+    const setClause = fields.map((f, i) => `${f} = $${i + 3}`).join(", ");
+    const result = await pool.query(
+      `UPDATE students SET ${setClause} WHERE id = $1 AND school_id = $2 RETURNING *`,
+      [req.params.id, req.school!.id, ...fields.map((f) => (parsed.data as any)[f])],
+    );
+
+    await logActivity(pool, req, {
+      action: "student.update",
+      entityType: "student",
+      entityId: String(req.params.id),
+      description: `Updated ${result.rows[0].full_name}'s details (${fields.join(", ")})`,
+      metadata: { before: before.rows[0], after: parsed.data },
+    });
+
+    res.json(result.rows[0]);
+  },
+);
+
 const enrollmentUpdateSchema = z.object({
   section_id: z.string().uuid().optional(),
   stream_id: z.string().uuid().nullable().optional(),
@@ -157,6 +225,17 @@ studentsRouter.patch(
         [req.params.id, req.school!.id, ...fields.map((f) => (parsed.data as any)[f])],
       );
       if (!result.rows[0]) return res.status(404).end();
+
+      if (parsed.data.section_id !== undefined) {
+        await logActivity(pool, req, {
+          action: "enrollment.section_change",
+          entityType: "enrollment",
+          entityId: String(req.params.id),
+          description: "Changed the student's section",
+          metadata: { section_id: parsed.data.section_id },
+        });
+      }
+
       res.json(result.rows[0]);
     } catch (err) {
       if ((err as { code?: string }).code === "23505") {

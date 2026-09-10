@@ -2283,6 +2283,7 @@ export function ConcessionScreen({ academicYears, state, feeHeads, refreshFeeHea
   const [enrollments, setEnrollments] = useState([]);
   const [loading, setLoading] = useState(true);
   const [payingFor, setPayingFor] = useState(null); // {enrollmentId, student}
+  const [viewingProfileFor, setViewingProfileFor] = useState(null); // enrollmentId
   const [classFilter, setClassFilter] = useState("");
   const [sectionFilter, setSectionFilter] = useState("");
   const [query, setQuery] = useState("");
@@ -2423,7 +2424,10 @@ export function ConcessionScreen({ academicYears, state, feeHeads, refreshFeeHea
                           {e.full_name.charAt(0).toUpperCase()}
                         </span>
                         <span>
-                          <span className="block font-bold">{e.full_name}</span>
+                          <button onClick={() => setViewingProfileFor(e.id)}
+                            className="block font-bold hover:text-brand-600 hover:underline text-left">
+                            {e.full_name}
+                          </button>
                           <span className="block eyebrow text-slate-400">ID: {e.admission_no}</span>
                         </span>
                       </div>
@@ -2484,6 +2488,15 @@ export function ConcessionScreen({ academicYears, state, feeHeads, refreshFeeHea
           transportFeeHeadId={feeHeads.find((h) => h.name === "Transport fee")?.id || null}
           refreshFeeHeads={refreshFeeHeads}
           onClose={() => { setPayingFor(null); refetch(); }} onPaid={() => {}} />
+      )}
+
+      {viewingProfileFor && (
+        <StudentProfileModal enrollmentId={viewingProfileFor}
+          onClose={() => { setViewingProfileFor(null); refetch(); }}
+          onCollectPayment={(student) => {
+            setViewingProfileFor(null);
+            setPayingFor({ enrollmentId: viewingProfileFor, student });
+          }} />
       )}
     </div>
   );
@@ -3090,6 +3103,145 @@ export function ActivityLogScreen() {
             </table>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The student's own editable record — contact details and section,
+ * separate from PaymentModal (fees, transport, concessions) which
+ * stays exactly as it was. Opened by clicking a student's name in Fee
+ * Collection; "Collect Payment" here hands off to that existing modal
+ * rather than duplicating any of it.
+ */
+function StudentProfileModal({ enrollmentId, onClose, onCollectPayment }) {
+  const [profile, setProfile] = useState(null);
+  const [sections, setSections] = useState([]);
+  const [form, setForm] = useState(null);
+  const [saved, setSaved] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function refetch() {
+    const p = await api.get(`/students/enrollments/${enrollmentId}/profile`);
+    setProfile(p);
+    setForm({
+      guardian_name: p.guardian_name, guardian_phone: p.guardian_phone,
+      guardian_email: p.guardian_email, address: p.address, section_id: p.section_id,
+    });
+    const s = await api.get(
+      `/setup/sections?academic_year_id=${p.academic_year_id}&class_level_id=${p.class_level_id}`);
+    setSections(s);
+  }
+  useEffect(() => { refetch(); }, [enrollmentId]); // eslint-disable-line
+
+  async function save() {
+    setError(""); setSaved(false);
+    setBusy(true);
+    try {
+      const contactChanged = ["guardian_name", "guardian_phone", "guardian_email", "address"]
+        .some((k) => form[k] !== profile[k]);
+      if (contactChanged) {
+        await api.patch(`/students/${profile.student_id}`, {
+          guardian_name: form.guardian_name, guardian_phone: form.guardian_phone,
+          guardian_email: form.guardian_email, address: form.address,
+        });
+      }
+      if (form.section_id !== profile.section_id) {
+        await api.patch(`/students/enrollments/${enrollmentId}`, { section_id: form.section_id });
+      }
+      await refetch();
+      setSaved(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save those changes.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!profile || !form) {
+    return (
+      <div className="fixed inset-0 bg-slate-900/40 flex items-center justify-center p-4 z-50">
+        <div className={`${panel} p-10 text-center text-slate-400 font-semibold`}>Loading…</div>
+      </div>
+    );
+  }
+
+  const set = (k) => (e) => { setForm({ ...form, [k]: e.target.value }); setSaved(false); };
+
+  return (
+    <div className="fixed inset-0 bg-slate-900/40 flex items-center justify-center p-4 z-50"
+      onClick={onClose}>
+      <div className={`${panel} w-full max-w-lg max-h-[88vh] overflow-y-auto`}
+        onClick={(e) => e.stopPropagation()}>
+        <div className="px-6 py-5 border-b border-slate-100 flex items-start justify-between gap-4">
+          <div>
+            <h2 className="text-lg font-extrabold">{profile.full_name}</h2>
+            <p className="text-sm text-slate-500">
+              {profile.admission_no} · {profile.class_name}-{profile.section_name}
+            </p>
+          </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600 shrink-0">
+            <X size={20} />
+          </button>
+        </div>
+
+        <div className="px-6 py-5 space-y-4">
+          {error && (
+            <div className="flex items-start gap-2 bg-red-50 border border-red-200 text-red-700 rounded-xl px-4 py-3 text-sm font-semibold">
+              <AlertTriangle size={15} className="mt-0.5 shrink-0" /> {error}
+            </div>
+          )}
+          {saved && !error && (
+            <div className="bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-xl px-4 py-3 text-sm font-semibold">
+              Saved.
+            </div>
+          )}
+
+          <div>
+            <label className={eyebrow}>Section</label>
+            <FilterSelect value={form.section_id} active className="mt-2"
+              onChange={(e) => { setForm({ ...form, section_id: e.target.value }); setSaved(false); }}>
+              {sections.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </FilterSelect>
+          </div>
+
+          <div className="grid sm:grid-cols-2 gap-4">
+            <div>
+              <label className={eyebrow}>Guardian name</label>
+              <input className={`${field} mt-2`} value={form.guardian_name} onChange={set("guardian_name")} />
+            </div>
+            <div>
+              <label className={eyebrow}>Guardian phone</label>
+              <input className={`${field} mt-2`} value={form.guardian_phone}
+                onChange={set("guardian_phone")} inputMode="numeric" />
+            </div>
+          </div>
+          <div>
+            <label className={eyebrow}>Guardian email</label>
+            <input className={`${field} mt-2`} value={form.guardian_email} onChange={set("guardian_email")}
+              type="email" />
+          </div>
+          <div>
+            <label className={eyebrow}>Address</label>
+            <textarea rows={2} className={`${field} mt-2`} value={form.address} onChange={set("address")} />
+          </div>
+
+          <div className="flex items-center gap-3 pt-2">
+            <button onClick={save} disabled={busy} className={primary}>
+              {busy ? "Saving…" : "Save changes"}
+            </button>
+            <button
+              onClick={() => onCollectPayment({
+                name: profile.full_name, admissionNo: profile.admission_no,
+                classLabel: `${profile.class_name}-${profile.section_name}`,
+              })}
+              className={`${ghost} ml-auto`}>
+              <Wallet size={15} /> Collect Payment
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );

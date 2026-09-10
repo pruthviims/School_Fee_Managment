@@ -574,6 +574,72 @@ describe("concessions and enrollment editing", () => {
     expect(patch.body.roll_no).toBe(7);
   });
 
+  it("logs a section change to the audit log", async () => {
+    const cookie = await loginAs("owner@http.test");
+    const { enrollment, sectionB } = await setUpAdmittedStudent(cookie);
+    await request(app).patch(`/api/students/enrollments/${enrollment.id}`)
+      .set("Cookie", cookie).send({ section_id: sectionB.id });
+
+    const log = await request(app).get("/api/audit-log?entity_type=enrollment").set("Cookie", cookie);
+    const entry = log.body.find((e: any) => e.action === "enrollment.section_change");
+    expect(entry).toBeDefined();
+    expect(entry.entity_id).toBe(enrollment.id);
+  });
+
+  it("returns a full student profile for the profile screen", async () => {
+    const cookie = await loginAs("owner@http.test");
+    const { enrollment } = await setUpAdmittedStudent(cookie);
+    const profile = await request(app).get(`/api/students/enrollments/${enrollment.id}/profile`)
+      .set("Cookie", cookie);
+    expect(profile.status).toBe(200);
+    expect(profile.body.full_name).toBe("Test Student");
+    expect(profile.body.admission_no).toBe("2026/800");
+    expect(profile.body.class_name).toBe("VIII");
+    expect(profile.body.section_name).toBe("A");
+  });
+
+  it("edits a student's contact details, and logs it", async () => {
+    const cookie = await loginAs("owner@http.test");
+    const { enrollment } = await setUpAdmittedStudent(cookie);
+    const studentId = enrollment.student_id;
+
+    const patch = await request(app).patch(`/api/students/${studentId}`).set("Cookie", cookie).send({
+      address: "New address after moving house",
+      guardian_phone: "9999999999",
+    });
+    expect(patch.status).toBe(200);
+    expect(patch.body.address).toBe("New address after moving house");
+    expect(patch.body.guardian_phone).toBe("9999999999");
+
+    const profile = await request(app).get(`/api/students/enrollments/${enrollment.id}/profile`)
+      .set("Cookie", cookie);
+    expect(profile.body.address).toBe("New address after moving house");
+
+    const log = await request(app).get("/api/audit-log?entity_type=student").set("Cookie", cookie);
+    const entry = log.body.find((e: any) => e.action === "student.update");
+    expect(entry).toBeDefined();
+    expect(entry.description).toContain("Test Student");
+  });
+
+  it("student edits do not allow changing identity fields like name or admission number", async () => {
+    const cookie = await loginAs("owner@http.test");
+    const { enrollment } = await setUpAdmittedStudent(cookie);
+    const res = await request(app).patch(`/api/students/${enrollment.student_id}`)
+      .set("Cookie", cookie).send({ full_name: "Renamed Entirely" });
+    // full_name isn't in the schema at all — an unknown field alone
+    // with nothing recognized leaves nothing to update.
+    expect(res.status).toBe(400);
+  });
+
+  it("front desk can edit a student's contact details (manage_admissions)", async () => {
+    const ownerCookie = await loginAs("owner@http.test");
+    const { enrollment } = await setUpAdmittedStudent(ownerCookie);
+    const deskCookie = await loginAs("desk@http.test");
+    const res = await request(app).patch(`/api/students/${enrollment.student_id}`)
+      .set("Cookie", deskCookie).send({ guardian_email: "newemail@example.test" });
+    expect(res.status).toBe(200);
+  });
+
   it("rejects a duplicate roll number within the same section", async () => {
     const cookie = await loginAs("owner@http.test");
     const { year, sectionA, enrollment } = await setUpAdmittedStudent(cookie);
