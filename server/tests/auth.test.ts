@@ -138,6 +138,7 @@ describe("staff management", () => {
     // it — without these, a newly invited person could set their
     // password and then have no idea what to type to actually log in.
     expect(call.text).toContain("Hi Priya Rao,");
+    expect(call.text).toContain("Login email: new-accountant@school.test");
     expect(call.text).toContain("School ID: acc-test");
     expect(call.text).toContain("Role: Accountant");
 
@@ -192,6 +193,7 @@ describe("staff management", () => {
     // No full_name was given at invite time — falls back to a generic
     // greeting rather than "Hi ," with a blank left in it.
     expect(sendMailSpy.mock.calls[0][0].text).toContain("Hi there,");
+    expect(sendMailSpy.mock.calls[0][0].text).toContain("Login email: never-got-the-email@school.test");
     expect(sendMailSpy.mock.calls[0][0].text).toContain("School ID: acc-test");
     expect(sendMailSpy.mock.calls[0][0].text).toContain("Role: Accountant");
   });
@@ -349,7 +351,10 @@ describe("password reset", () => {
     // same email could belong to memberships at several — so there's
     // no single School ID or role to correctly show here, unlike the
     // invite/resend-invite emails, which are always about one specific
-    // school. Confirmed absent, not just unchecked.
+    // school. Login email is still shown, though: it's always the
+    // address this exact mail was sent to, always needed to sign in
+    // regardless of which flow sent the email.
+    expect(sendMailSpy.mock.calls[0][0].text).toContain("Login email: owner@school.test");
     expect(sendMailSpy.mock.calls[0][0].text).not.toContain("School ID:");
     expect(sendMailSpy.mock.calls[0][0].text).not.toContain("Role:");
 

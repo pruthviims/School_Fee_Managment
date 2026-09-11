@@ -305,15 +305,19 @@ export async function makeAndSendCredentialEmail(
   const frontendUrl = (process.env.FRONTEND_URL || "http://localhost:5173").replace(/\/$/, "");
   const resetUrl = `${frontendUrl}/reset-password?uid=${uid}&token=${token}`;
 
-  // School ID and role are shown as their own labelled lines, not
-  // folded into the intro sentence — the login screen asks for School
-  // ID as a separate required field alongside email and password (it's
-  // the school's short_code, not something guessable from the email
-  // address), so it needs to actually be legible on its own, not
-  // buried in prose. Both are optional here: the "forgot password"
-  // flow that also calls this has no single school to name (a user's
-  // email isn't scoped to one), so it correctly gets neither.
+  // Login email, School ID, and role are each shown as their own
+  // labelled line, matching the three fields the login screen actually
+  // asks for (School ID, then "Admin Username" — labelled that on
+  // screen, but its own placeholder text says "Mail ID," since it's
+  // really an email address — then Password) — not folded into prose,
+  // where they're easy to skim past. Login email is always shown,
+  // since it's always knowable (this is the address the mail itself
+  // was sent to) and always needed to sign in, regardless of which
+  // flow sent the email. School ID and role stay optional: the "forgot
+  // password" flow that also calls this has no single school in scope
+  // (a user's email isn't scoped to one), so it correctly shows neither.
   const details = [
+    `Login email: ${user.email}`,
     schoolShortCode ? `School ID: ${schoolShortCode}` : null,
     roleLabel ? `Role: ${roleLabel}` : null,
   ].filter(Boolean).join("\n");
