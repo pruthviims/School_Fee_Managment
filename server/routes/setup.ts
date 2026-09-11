@@ -12,6 +12,8 @@ import { z } from "zod";
 import { pool } from "../db/index.js";
 import { requireCapability, requireMember } from "../middleware/permissions.js";
 import { logActivity } from "../services/auditLog.js";
+import { generateCharges } from "../services/billing.js";
+import { recordPayment } from "../services/collection.js";
 
 export const setupRouter = Router();
 setupRouter.use(requireMember);
@@ -451,6 +453,122 @@ setupRouter.post("/fee-structure/copy", writeGuard, async (req, res) => {
   });
 
   res.json({ created: result.rows.length });
+});
+
+// A student enrolled into a class before it had any pricing — most
+// commonly via import, where a school's real roster often gets
+// brought in before every class is fully priced — never gets charges
+// generated for it, since nothing retroactively does that once
+// pricing catches up. This surfaces how many such students exist for
+// a given class/year, so Fee Structure can prompt to fix it right
+// after pricing is entered, rather than leaving it to be discovered
+// later as a student mysteriously owing nothing.
+setupRouter.get("/fee-structure/uncharged-count", async (req, res) => {
+  const { academic_year_id, class_level_id } = req.query;
+  if (!academic_year_id || !class_level_id) {
+    return res.status(400).json({ detail: "academic_year_id and class_level_id are required." });
+  }
+  const result = await pool.query(
+    `SELECT count(*) FROM enrollments e
+     WHERE e.school_id = $1 AND e.academic_year_id = $2 AND e.class_level_id = $3 AND e.is_active = true
+       AND NOT EXISTS (SELECT 1 FROM charges c WHERE c.enrollment_id = e.id AND c.source = 'structure')`,
+    [req.school!.id, academic_year_id, class_level_id],
+  );
+  res.json({ uncharged: Number(result.rows[0].count) });
+});
+
+const generateMissingChargesSchema = z.object({
+  academic_year_id: z.string().uuid(),
+  class_level_id: z.string().uuid(),
+});
+
+// generateCharges() is documented as idempotent per (enrollment,
+// fee_head, term) specifically so it can be safely re-run — this
+// leans on exactly that guarantee to "catch up" every enrollment in a
+// class at once, rather than requiring a per-student action. Also
+// recovers any "amount paid so far" that import captured but couldn't
+// apply at the time, because there was nothing to allocate it against
+// yet — that value never disappeared, it's still sitting in
+// import_rows.raw, unused until now.
+setupRouter.post("/fee-structure/generate-missing-charges", writeGuard, async (req, res) => {
+  const parsed = generateMissingChargesSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ detail: parsed.error.issues[0]?.message });
+  const d = parsed.data;
+
+  const priced = await pool.query(
+    `SELECT 1 FROM fee_structures
+     WHERE school_id = $1 AND academic_year_id = $2 AND class_level_id = $3 AND amount > 0
+     LIMIT 1`,
+    [req.school!.id, d.academic_year_id, d.class_level_id],
+  );
+  if (!priced.rows[0]) {
+    return res.status(400).json({ detail: "This class has no fees set up yet." });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const enrollmentsResult = await client.query(
+      `SELECT id, student_id FROM enrollments
+       WHERE school_id = $1 AND academic_year_id = $2 AND class_level_id = $3 AND is_active = true`,
+      [req.school!.id, d.academic_year_id, d.class_level_id],
+    );
+
+    let studentsBilled = 0, chargesCreated = 0, paymentsRecorded = 0;
+
+    for (const enrollment of enrollmentsResult.rows) {
+      const created = await generateCharges(enrollment.id, { createdBy: req.user!.id, client });
+      if (created.length === 0) continue;
+      studentsBilled++;
+      chargesCreated += created.length;
+
+      // Only ever applies once per enrollment — recorded payments are
+      // checked for the same marker import itself uses, so re-running
+      // this action (safe and expected, matching generateCharges' own
+      // idempotency) never records the opening balance twice.
+      const alreadyPaid = await client.query(
+        `SELECT 1 FROM payments
+         WHERE enrollment_id = $1 AND instrument_ref = 'Opening balance from import' LIMIT 1`,
+        [enrollment.id],
+      );
+      if (alreadyPaid.rows[0]) continue;
+
+      const importRow = await client.query(
+        `SELECT raw FROM import_rows WHERE student_id = $1 ORDER BY created_at DESC LIMIT 1`,
+        [enrollment.student_id],
+      );
+      const amountPaidPaise = Number(importRow.rows[0]?.raw?._amount_paid_paise ?? "0");
+      if (amountPaidPaise > 0) {
+        await recordPayment({
+          enrollmentId: enrollment.id, amount: amountPaidPaise, mode: "cash",
+          instrumentRef: "Opening balance from import", collectedBy: req.user!.id, client,
+        });
+        paymentsRecorded++;
+      }
+    }
+
+    const className = await client.query(`SELECT name FROM class_levels WHERE id = $1`,
+      [d.class_level_id]);
+    await logActivity(client, req, {
+      action: "fee_structure.generate_missing_charges",
+      entityType: "fee_structure",
+      entityId: null,
+      description: `Generated charges for ${studentsBilled} student${studentsBilled === 1 ? "" : "s"} ` +
+        `in ${className.rows[0]?.name || "a class"} who had none yet` +
+        (paymentsRecorded > 0 ? ` (${paymentsRecorded} opening-balance payment` +
+          `${paymentsRecorded === 1 ? "" : "s"} from import also applied)` : ""),
+      metadata: { class_level_id: d.class_level_id, studentsBilled, chargesCreated, paymentsRecorded },
+    });
+
+    await client.query("COMMIT");
+    res.json({ studentsBilled, chargesCreated, paymentsRecorded });
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
 });
 
 const feeStructureUpdateSchema = z.object({

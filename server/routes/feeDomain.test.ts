@@ -325,6 +325,112 @@ describe("setup routes", () => {
     });
   });
 
+  describe("generating missing charges for a class priced after students were already enrolled", () => {
+    async function importOneUnpriced(cookie: string, extraCsv = "") {
+      const year = await request(app).post("/api/setup/academic-years").set("Cookie", cookie)
+        .send({ name: "2026-27", starts_on: "2026-06-01", ends_on: "2027-03-31", status: "active" });
+      const classLevel = await request(app).post("/api/setup/class-levels").set("Cookie", cookie)
+        .send({ name: "IX", ladder_order: 9, stage: "middle" }); // deliberately never priced yet
+
+      const csv = "Admission No,Name,Class,Gender,Amount Paid So Far\n" +
+        `2026/500,Late Priced Student,IX,Male,12000\n${extraCsv}`;
+      const stage = await request(app).post("/api/import/stage").set("Cookie", cookie).send({
+        academic_year_id: year.body.id, filename: "roll.csv", content: csv,
+      });
+      await request(app).post(`/api/import/batches/${stage.body.id}/commit`)
+        .set("Cookie", cookie).send({});
+      return { year: year.body, classLevel: classLevel.body };
+    }
+
+    async function priceIt(cookie: string, yearId: string, classId: string) {
+      const feeHead = await request(app).post("/api/setup/fee-heads").set("Cookie", cookie)
+        .send({ name: "Tuition fee" });
+      await request(app).post("/api/setup/fee-structure").set("Cookie", cookie).send({
+        academic_year_id: yearId, class_level_id: classId,
+        fee_head_id: feeHead.body.id, amount: 4000000, due_on: "2026-06-15",
+      });
+    }
+
+    it("reports how many enrolled students have no charges yet", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const { year, classLevel } = await importOneUnpriced(cookie);
+
+      const before = await request(app)
+        .get(`/api/setup/fee-structure/uncharged-count?academic_year_id=${year.id}&class_level_id=${classLevel.id}`)
+        .set("Cookie", cookie);
+      expect(before.body.uncharged).toBe(1);
+    });
+
+    it("generates the missing charges once the class is priced, and recovers the opening-balance payment from import", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const { year, classLevel } = await importOneUnpriced(cookie);
+      await priceIt(cookie, year.id, classLevel.id);
+
+      const res = await request(app).post("/api/setup/fee-structure/generate-missing-charges")
+        .set("Cookie", cookie).send({ academic_year_id: year.id, class_level_id: classLevel.id });
+      expect(res.status).toBe(200);
+      expect(res.body.studentsBilled).toBe(1);
+      expect(res.body.chargesCreated).toBe(1);
+      expect(res.body.paymentsRecorded).toBe(1); // the ₹12,000 from the import sheet, recovered
+
+      const enrollment = await pool.query(
+        `SELECT e.id FROM enrollments e JOIN students s ON s.id = e.student_id
+         WHERE s.admission_no = '2026/500'`,
+      );
+      const ledger = await request(app).get(`/api/students/enrollments/${enrollment.rows[0].id}/ledger`)
+        .set("Cookie", cookie);
+      expect(ledger.body.charged).toBe(4000000);
+      expect(ledger.body.paid).toBe(1200000); // recovered from import_rows, not lost
+      expect(ledger.body.balance).toBe(4000000 - 1200000);
+
+      const after = await request(app)
+        .get(`/api/setup/fee-structure/uncharged-count?academic_year_id=${year.id}&class_level_id=${classLevel.id}`)
+        .set("Cookie", cookie);
+      expect(after.body.uncharged).toBe(0);
+    });
+
+    it("running it twice never duplicates the charge or the recovered payment", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const { year, classLevel } = await importOneUnpriced(cookie);
+      await priceIt(cookie, year.id, classLevel.id);
+
+      await request(app).post("/api/setup/fee-structure/generate-missing-charges")
+        .set("Cookie", cookie).send({ academic_year_id: year.id, class_level_id: classLevel.id });
+      const second = await request(app).post("/api/setup/fee-structure/generate-missing-charges")
+        .set("Cookie", cookie).send({ academic_year_id: year.id, class_level_id: classLevel.id });
+      expect(second.body.studentsBilled).toBe(0); // already billed, nothing left to do
+      expect(second.body.paymentsRecorded).toBe(0);
+
+      const enrollment = await pool.query(
+        `SELECT e.id FROM enrollments e JOIN students s ON s.id = e.student_id
+         WHERE s.admission_no = '2026/500'`,
+      );
+      const ledger = await request(app).get(`/api/students/enrollments/${enrollment.rows[0].id}/ledger`)
+        .set("Cookie", cookie);
+      expect(ledger.body.charged).toBe(4000000); // not doubled
+      expect(ledger.body.paid).toBe(1200000); // not doubled
+    });
+
+    it("refuses if the class still isn't priced", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const { year, classLevel } = await importOneUnpriced(cookie);
+      // Deliberately never priced.
+      const res = await request(app).post("/api/setup/fee-structure/generate-missing-charges")
+        .set("Cookie", cookie).send({ academic_year_id: year.id, class_level_id: classLevel.id });
+      expect(res.status).toBe(400);
+    });
+
+    it("front desk cannot generate missing charges (manage_fee_structure required)", async () => {
+      const ownerCookie = await loginAs("owner@http.test");
+      const { year, classLevel } = await importOneUnpriced(ownerCookie);
+      await priceIt(ownerCookie, year.id, classLevel.id);
+      const deskCookie = await loginAs("desk@http.test");
+      const res = await request(app).post("/api/setup/fee-structure/generate-missing-charges")
+        .set("Cookie", deskCookie).send({ academic_year_id: year.id, class_level_id: classLevel.id });
+      expect(res.status).toBe(403);
+    });
+  });
+
   it("front desk cannot update or delete a fee-structure line", async () => {
     const ownerCookie = await loginAs("owner@http.test");
     const year = await request(app).post("/api/setup/academic-years").set("Cookie", ownerCookie)
