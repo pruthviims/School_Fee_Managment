@@ -1524,7 +1524,11 @@ export function PromoteTab({ academicYears, classLevels, ensureUnassignedSection
     }
   }
 
-  const [classFilter, setClassFilter] = useState("");
+  // Defaults to Pre-LKG rather than "All" — showing every student
+  // across every class at once is rarely what's wanted when working
+  // through promotions class by class, and it's the heavier render
+  // besides.
+  const [classFilter, setClassFilter] = useState("Pre-LKG");
   const [query, setQuery] = useState("");
   const [preview, setPreview] = useState(null); // {moves, graduating, blocked, summary}
   const [loading, setLoading] = useState(false);
@@ -1639,7 +1643,7 @@ export function PromoteTab({ academicYears, classLevels, ensureUnassignedSection
         <div className="min-w-[150px]">
           <label className={eyebrow}>From</label>
           <FilterSelect value={sourceYearName} active
-            onChange={(e) => { setSourceYearPick(e.target.value); setClassFilter(""); setJustPromoted(null); }}
+            onChange={(e) => { setSourceYearPick(e.target.value); setClassFilter("Pre-LKG"); setJustPromoted(null); }}
             className="mt-2">
             {priorYears.map((y) => <option key={y.id} value={y.name}>{y.name}</option>)}
           </FilterSelect>
@@ -2575,8 +2579,12 @@ export function ConcessionScreen({ academicYears, state, feeHeads, refreshFeeHea
   const [loading, setLoading] = useState(true);
   const [payingFor, setPayingFor] = useState(null); // {enrollmentId, student}
   const [viewingProfileFor, setViewingProfileFor] = useState(null); // enrollmentId
-  const [classFilter, setClassFilter] = useState("");
-  const [sectionFilter, setSectionFilter] = useState("");
+  // Defaults to Pre-LKG/A rather than "All" — showing the whole
+  // school's roster at once is rarely what's actually wanted day to
+  // day, and it's the more expensive render besides; a specific class
+  // and section is both the more common real use and the lighter one.
+  const [classFilter, setClassFilter] = useState("Pre-LKG");
+  const [sectionFilter, setSectionFilter] = useState("A");
   const [query, setQuery] = useState("");
 
   // useCallback specifically so this stays the same function reference
@@ -2606,10 +2614,12 @@ export function ConcessionScreen({ academicYears, state, feeHeads, refreshFeeHea
     setLoading(false);
   }
   useEffect(() => { refetch(); }, [year?.id]); // eslint-disable-line
-  // Switching class invalidates whatever section was picked for the
-  // previous class — sections aren't shared across classes.
-  useEffect(() => { setSectionFilter(""); }, [classFilter]);
-
+  // Section resets to "All" when the class filter changes — handled
+  // directly in that dropdown's onChange, not as a separate effect
+  // keyed on classFilter: an effect like that fires on mount too
+  // (React runs it once regardless of whether the dependency
+  // "changed" from anything), which would silently wipe out the
+  // Pre-LKG/A default this screen opens with.
   // Hooks can't follow the early returns below — React requires the
   // same hooks in the same order on every render, and "loading" or
   // "no enrollments yet" returning early on some renders but not
@@ -2679,7 +2689,7 @@ export function ConcessionScreen({ academicYears, state, feeHeads, refreshFeeHea
         <div className="min-w-[150px]">
           <label className={eyebrow}>Class</label>
           <FilterSelect value={classFilter} active={Boolean(classFilter)} className="mt-2"
-            onChange={(e) => setClassFilter(e.target.value)}>
+            onChange={(e) => { setClassFilter(e.target.value); setSectionFilter(""); }}>
             <option value="">All classes</option>
             {classNames.map((c) => <option key={c} value={c}>{c}</option>)}
           </FilterSelect>
