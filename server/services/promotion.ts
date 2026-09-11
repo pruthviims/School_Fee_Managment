@@ -23,8 +23,8 @@
  */
 
 import { pool } from "../db/index.js";
-import { carryForwardArrears, generateCharges } from "./billing.js";
-import { getEnrollmentLedger } from "./ledger.js";
+import { generateChargesBulk } from "./billing.js";
+import { getBulkEnrollmentLedgers, getEnrollmentLedger } from "./ledger.js";
 
 export class PromotionError extends Error {}
 
@@ -110,10 +110,30 @@ export async function preview(
     [fromYearId],
   );
 
+  // Both of these used to be looked up per row inside the loop below —
+  // a real N+1 for a school with a real student count, since every
+  // enrolled student (not just the ones actually moving) got its own
+  // balance calculation and its own "what's the next class up" query.
+  // Neither actually depends on anything per-row that isn't already
+  // known up front: every class ladder rung is looked up here once
+  // regardless of how many students are in it, and every enrollment's
+  // balance is computed in a single query instead of one call each.
+  const classLevelsResult = await pool.query(
+    `SELECT id, name, ladder_order, requires_stream, requires_explicit_optin
+     FROM class_levels WHERE school_id = $1`,
+    [fromYear.school_id],
+  );
+  const classLevelsByLadderOrder = new Map(classLevelsResult.rows.map((c) => [c.ladder_order, c]));
+
+  const enrollmentIds = enrollmentsResult.rows
+    .filter((row) => !exclude.has(row.id))
+    .map((row) => row.id);
+  const ledgers = await getBulkEnrollmentLedgers(enrollmentIds);
+
   for (const row of enrollmentsResult.rows) {
     if (exclude.has(row.id)) continue;
 
-    const balance = (await getEnrollmentLedger(row.id)).balance;
+    const balance = ledgers.get(row.id)?.balance ?? 0;
     const base = {
       enrollmentId: row.id, studentId: row.student_id, admissionNo: row.admission_no,
       studentName: row.student_name, fromClassName: row.class_name,
@@ -138,12 +158,7 @@ export async function preview(
       continue;
     }
 
-    const nextResult = await pool.query(
-      `SELECT id, name, requires_stream, requires_explicit_optin
-       FROM class_levels WHERE school_id = $1 AND ladder_order = $2`,
-      [fromYear.school_id, row.ladder_order + 1],
-    );
-    const next = nextResult.rows[0];
+    const next = classLevelsByLadderOrder.get(row.ladder_order + 1);
     if (!next) {
       result.blocked.push({
         ...base, kind: "blocked", toClassId: null, toClassName: null, toSectionId: null,
@@ -257,7 +272,7 @@ export async function commit(
     await client.query("BEGIN");
 
     const toYearResult = await client.query(
-      `SELECT id, school_id, status FROM academic_years WHERE id = $1 FOR UPDATE`, [toYearId],
+      `SELECT id, school_id, status, starts_on FROM academic_years WHERE id = $1 FOR UPDATE`, [toYearId],
     );
     const toYear = toYearResult.rows[0];
     if (!toYear) throw new PromotionError("Target year not found.");
@@ -305,6 +320,39 @@ export async function commit(
     );
     const batch = batchResult.rows[0];
 
+    // The single biggest cost in this whole operation used to be here:
+    // carryForwardArrears (called once per student) is itself 5 queries
+    // just to compute one balance (getEnrollmentLedger), plus a few
+    // more to load both enrollments and check for an existing arrear —
+    // for a real promotion batch, that's the dominant share of what
+    // made this take over a minute. Replicating its exact logic here,
+    // batched, rather than modifying the shared function other callers
+    // (a standalone TC/withdrawal reconciliation, for instance) still
+    // rely on for a single enrollment at a time.
+    //
+    // Two things make batching this safe rather than just faster:
+    // every "from" enrollment shares the same fromYearId (already a
+    // parameter here, no per-student lookup needed for the year's own
+    // name), and every "to" enrollment is one this same call is about
+    // to INSERT fresh a few lines below — so the "does an arrear
+    // already exist for it" check carryForwardArrears normally does is
+    // structurally impossible to be true here and is correctly omitted,
+    // not merely skipped for speed.
+    let fromYearName = "";
+    if (carryArrears) {
+      const fromYearResult = await client.query(
+        `SELECT name FROM academic_years WHERE id = $1`, [fromYearId],
+      );
+      fromYearName = fromYearResult.rows[0]?.name ?? "";
+    }
+    const fromLedgers = carryArrears
+      ? await getBulkEnrollmentLedgers(actionable.map((m) => m.enrollmentId), client)
+      : new Map();
+
+    const enrollmentsForCharges: { enrollmentId: string; schoolId: string; academicYearId: string;
+      classLevelId: string; streamId: string | null; admissionType: string }[] = [];
+    const arrearRows: { enrollmentId: string; balance: number }[] = [];
+
     for (const move of actionable) {
       const newEnrollment = await client.query(
         `INSERT INTO enrollments
@@ -317,31 +365,54 @@ export async function commit(
       );
       const newEnrollmentId = newEnrollment.rows[0].id;
 
-      // Read the old balance BEFORE new charges land on the student.
+      // Read the old balance BEFORE new charges land on the student —
+      // satisfied here by fromLedgers already having been computed, in
+      // full, before this loop (and therefore before any new-year
+      // charge exists for anyone), not merely before this one student's
+      // own charges specifically.
       if (carryArrears) {
-        await carryForwardArrears({
-          fromEnrollmentId: move.enrollmentId, toEnrollmentId: newEnrollmentId,
-          createdBy: committedBy, client,
-        });
+        const balance = fromLedgers.get(move.enrollmentId)?.balance ?? 0;
+        if (balance > 0) arrearRows.push({ enrollmentId: newEnrollmentId, balance });
       }
       if (generateNewCharges) {
-        await generateCharges(newEnrollmentId, { createdBy: committedBy, client });
+        enrollmentsForCharges.push({
+          enrollmentId: newEnrollmentId, schoolId: toYear.school_id, academicYearId: toYearId,
+          classLevelId: move.toClassId!, streamId: move.streamId, admissionType: "carry_over",
+        });
       }
+    }
 
+    if (arrearRows.length > 0) {
       await client.query(
-        `UPDATE enrollments SET outcome = 'promoted', is_active = false WHERE id = $1`,
-        [move.enrollmentId],
+        `INSERT INTO charges
+           (school_id, enrollment_id, fee_head_id, head_name, amount, term_no,
+            due_on, source, is_arrear, source_year_id, created_by)
+         SELECT $1, enrollment_id, NULL, $2, amount, 1, $3, 'arrear', true, $4, $5
+         FROM unnest($6::uuid[], $7::bigint[]) AS t(enrollment_id, amount)`,
+        [toYear.school_id, `Arrears carried forward (${fromYearName})`, toYear.starts_on,
+         fromYearId, committedBy,
+         arrearRows.map((r) => r.enrollmentId), arrearRows.map((r) => r.balance)],
       );
     }
 
+    await generateChargesBulk(enrollmentsForCharges, { createdBy: committedBy, client });
+
+    await client.query(
+      `UPDATE enrollments SET outcome = 'promoted', is_active = false WHERE id = ANY($1::uuid[])`,
+      [actionable.map((m) => m.enrollmentId)],
+    );
+
     // Terminal-class students exit to alumni rather than a new enrollment.
     const graduating = moves.filter((m) => m.kind === "graduate");
-    for (const move of graduating) {
+    if (graduating.length > 0) {
       await client.query(
-        `UPDATE enrollments SET outcome = 'passed_out', is_active = false WHERE id = $1`,
-        [move.enrollmentId],
+        `UPDATE enrollments SET outcome = 'passed_out', is_active = false WHERE id = ANY($1::uuid[])`,
+        [graduating.map((m) => m.enrollmentId)],
       );
-      await client.query(`UPDATE students SET status = 'alumni' WHERE id = $1`, [move.studentId]);
+      await client.query(
+        `UPDATE students SET status = 'alumni' WHERE id = ANY($1::uuid[])`,
+        [graduating.map((m) => m.studentId)],
+      );
     }
 
     await client.query("COMMIT");
@@ -383,32 +454,41 @@ export async function reverseBatch(batchId: string): Promise<unknown> {
     const newEnrollments = await client.query(
       `SELECT id, student_id FROM enrollments WHERE promotion_batch_id = $1`, [batchId],
     );
+    const newEnrollmentIds = newEnrollments.rows.map((r) => r.id);
 
     const paidCheck = await client.query(
       `SELECT 1 FROM payments WHERE enrollment_id = ANY($1::uuid[]) LIMIT 1`,
-      [newEnrollments.rows.map((r) => r.id)],
+      [newEnrollmentIds],
     );
     if (paidCheck.rows.length > 0) {
       throw new PromotionError("Payments already recorded against this batch; cannot reverse.");
     }
 
-    for (const enrollment of newEnrollments.rows) {
-      // Only structure/arrear charges can exist here — nothing paid, by
-      // the check above — so this never deletes a charge with money
-      // against it.
-      await client.query(`DELETE FROM charges WHERE enrollment_id = $1`, [enrollment.id]);
+    // Only structure/arrear charges can exist here — nothing paid, by
+    // the check above — so this never deletes a charge with money
+    // against it. Same operations as before (delete this batch's
+    // charges, reactivate whichever old enrollment each student came
+    // from, delete this batch's enrollments), just each done once
+    // across every enrollment in the batch instead of once per
+    // enrollment — undoing a batch that promoted a whole school used to
+    // mean 4 queries for every single student in it.
+    if (newEnrollmentIds.length > 0) {
+      await client.query(`DELETE FROM charges WHERE enrollment_id = ANY($1::uuid[])`, [newEnrollmentIds]);
 
-      const previous = await client.query(
-        `SELECT id FROM enrollments WHERE student_id = $1 AND academic_year_id = $2`,
-        [enrollment.student_id, batch.from_year_id],
+      const studentIds = newEnrollments.rows.map((r) => r.student_id);
+      const previousResult = await client.query(
+        `SELECT id FROM enrollments WHERE student_id = ANY($1::uuid[]) AND academic_year_id = $2`,
+        [studentIds, batch.from_year_id],
       );
-      if (previous.rows[0]) {
+      const previousIds = previousResult.rows.map((r) => r.id);
+      if (previousIds.length > 0) {
         await client.query(
-          `UPDATE enrollments SET outcome = 'pending', is_active = true WHERE id = $1`,
-          [previous.rows[0].id],
+          `UPDATE enrollments SET outcome = 'pending', is_active = true WHERE id = ANY($1::uuid[])`,
+          [previousIds],
         );
       }
-      await client.query(`DELETE FROM enrollments WHERE id = $1`, [enrollment.id]);
+
+      await client.query(`DELETE FROM enrollments WHERE id = ANY($1::uuid[])`, [newEnrollmentIds]);
     }
 
     const updated = await client.query(

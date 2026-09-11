@@ -1,7 +1,7 @@
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { pool } from "../db/index.js";
 import {
-  BillingError, carryForwardArrears, generateCharges, issueInvoice, outstandingSummary,
+  BillingError, carryForwardArrears, generateCharges, generateChargesBulk, issueInvoice, outstandingSummary,
 } from "./billing.js";
 import { createSchool, resetDb } from "../tests/helpers.js";
 import {
@@ -111,6 +111,159 @@ describe("generateCharges", () => {
     );
 
     await expect(generateCharges(enrollment.id)).rejects.toThrow(BillingError);
+  });
+});
+
+describe("generateChargesBulk", () => {
+  it("produces identical charges to generateCharges, for several enrollments at once", async () => {
+    const { enrollment: e1 } = await newStudentEnrollment("carry_over");
+    const { enrollment: e2 } = await newStudentEnrollment("carry_over");
+    const { enrollment: e3 } = await newStudentEnrollment("carry_over");
+
+    const client = await pool.connect();
+    try {
+      await generateChargesBulk(
+        [e1, e2, e3].map((e) => ({
+          enrollmentId: e.id, schoolId: school.id, academicYearId: year.id,
+          classLevelId: classLevel.id, streamId: null, admissionType: "carry_over",
+        })),
+        { client },
+      );
+    } finally {
+      client.release();
+    }
+
+    for (const e of [e1, e2, e3]) {
+      const charges = await pool.query(
+        `SELECT head_name, amount, term_no FROM charges WHERE enrollment_id = $1 ORDER BY head_name`,
+        [e.id],
+      );
+      // Tuition only — Admission fee is one-time (carry_over, not new,
+      // correctly excluded) and Transport is optional (not opted into),
+      // exactly matching what generateCharges itself would produce for
+      // the identical enrollment shape.
+      expect(charges.rows).toHaveLength(1);
+      expect(charges.rows[0].head_name).toBe("Tuition fee");
+      expect(charges.rows[0].amount).toBe(4000000);
+    }
+  });
+
+  it("still charges the one-time (admission) fee for a genuinely new admission_type", async () => {
+    const { enrollment } = await newStudentEnrollment("new");
+    const client = await pool.connect();
+    try {
+      await generateChargesBulk(
+        [{ enrollmentId: enrollment.id, schoolId: school.id, academicYearId: year.id,
+           classLevelId: classLevel.id, streamId: null, admissionType: "new" }],
+        { client },
+      );
+    } finally {
+      client.release();
+    }
+    const charges = await pool.query(
+      `SELECT head_name FROM charges WHERE enrollment_id = $1 ORDER BY head_name`, [enrollment.id],
+    );
+    expect(charges.rows.map((r) => r.head_name)).toEqual(["Admission fee", "Tuition fee"]);
+  });
+
+  it("applies stream-specific pricing correctly when different enrollments in the same call have different streams", async () => {
+    const streamClass = await createClassLevel(school.id, { name: "1st PU", ladder_order: 11, requires_stream: true });
+    const streamSection = await createSection(school.id, year.id, streamClass.id);
+    const science = await pool.query(
+      `INSERT INTO streams (school_id, name) VALUES ($1, 'Science') RETURNING *`, [school.id],
+    );
+    const commerce = await pool.query(
+      `INSERT INTO streams (school_id, name) VALUES ($1, 'Commerce') RETURNING *`, [school.id],
+    );
+    const labFee = await createFeeHead(school.id, { name: "Lab fee", display_order: 4 });
+    await createFeeStructureLine(school.id, year.id, streamClass.id, tuition.id, {
+      amount: 5000000, stream_id: null, // generic, applies to every stream
+    });
+    await createFeeStructureLine(school.id, year.id, streamClass.id, labFee.id, {
+      amount: 1000000, stream_id: science.rows[0].id, // Science-only
+    });
+
+    const scienceStudent = await createStudent(school.id);
+    const scienceEnrollment = await createEnrollment(
+      school.id, scienceStudent.id, year.id, streamClass.id, streamSection.id,
+      { admission_type: "carry_over", stream_id: science.rows[0].id },
+    );
+    const commerceStudent = await createStudent(school.id);
+    const commerceEnrollment = await createEnrollment(
+      school.id, commerceStudent.id, year.id, streamClass.id, streamSection.id,
+      { admission_type: "carry_over", stream_id: commerce.rows[0].id },
+    );
+
+    const client = await pool.connect();
+    try {
+      await generateChargesBulk(
+        [
+          { enrollmentId: scienceEnrollment.id, schoolId: school.id, academicYearId: year.id,
+            classLevelId: streamClass.id, streamId: science.rows[0].id, admissionType: "carry_over" },
+          { enrollmentId: commerceEnrollment.id, schoolId: school.id, academicYearId: year.id,
+            classLevelId: streamClass.id, streamId: commerce.rows[0].id, admissionType: "carry_over" },
+        ],
+        { client },
+      );
+    } finally {
+      client.release();
+    }
+
+    const scienceCharges = await pool.query(
+      `SELECT head_name FROM charges WHERE enrollment_id = $1 ORDER BY head_name`, [scienceEnrollment.id],
+    );
+    expect(scienceCharges.rows.map((r) => r.head_name)).toEqual(["Lab fee", "Tuition fee"]);
+
+    const commerceCharges = await pool.query(
+      `SELECT head_name FROM charges WHERE enrollment_id = $1`, [commerceEnrollment.id],
+    );
+    expect(commerceCharges.rows.map((r) => r.head_name)).toEqual(["Tuition fee"]); // no lab fee
+  });
+
+  it("handles enrollments across multiple different classes in one call", async () => {
+    const classB = await createClassLevel(school.id, { name: "IX", ladder_order: 9 });
+    const sectionB = await createSection(school.id, year.id, classB.id);
+    const feeB = await createFeeHead(school.id, { name: "IX-only fee" });
+    await createFeeStructureLine(school.id, year.id, classB.id, feeB.id, { amount: 300000 });
+
+    const { enrollment: enrollmentA } = await newStudentEnrollment("carry_over");
+    const studentB = await createStudent(school.id);
+    const enrollmentB = await createEnrollment(
+      school.id, studentB.id, year.id, classB.id, sectionB.id, { admission_type: "carry_over" },
+    );
+
+    const client = await pool.connect();
+    try {
+      await generateChargesBulk(
+        [
+          { enrollmentId: enrollmentA.id, schoolId: school.id, academicYearId: year.id,
+            classLevelId: classLevel.id, streamId: null, admissionType: "carry_over" },
+          { enrollmentId: enrollmentB.id, schoolId: school.id, academicYearId: year.id,
+            classLevelId: classB.id, streamId: null, admissionType: "carry_over" },
+        ],
+        { client },
+      );
+    } finally {
+      client.release();
+    }
+
+    const chargesA = await pool.query(`SELECT head_name FROM charges WHERE enrollment_id = $1`,
+      [enrollmentA.id]);
+    expect(chargesA.rows.map((r) => r.head_name)).toEqual(["Tuition fee"]);
+
+    const chargesB = await pool.query(`SELECT head_name FROM charges WHERE enrollment_id = $1`,
+      [enrollmentB.id]);
+    expect(chargesB.rows.map((r) => r.head_name)).toEqual(["IX-only fee"]);
+  });
+
+  it("does nothing for an empty list, rather than erroring", async () => {
+    const client = await pool.connect();
+    try {
+      const count = await generateChargesBulk([], { client });
+      expect(count).toBe(0);
+    } finally {
+      client.release();
+    }
   });
 });
 

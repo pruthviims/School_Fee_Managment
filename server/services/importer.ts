@@ -13,7 +13,7 @@
 
 import Papa from "papaparse";
 import { pool } from "../db/index.js";
-import { generateCharges } from "./billing.js";
+import { generateChargesBulk } from "./billing.js";
 import { recordPayment } from "./collection.js";
 
 export class ImportServiceError extends Error {}
@@ -456,6 +456,22 @@ export async function commitImport(
       throw new ImportServiceError("This batch has already been committed or cancelled.");
     }
 
+    // generateCharges (used per-row before this became a bulk operation)
+    // refused a closed academic year on its own, every time it was
+    // called. generateChargesBulk doesn't carry that check internally —
+    // it's meant to run once per operation, not once per enrollment —
+    // so it has to be checked once, explicitly, here instead. Checked
+    // before any row is processed, not only once charge generation is
+    // reached: the whole commit rolls back together either way, but
+    // failing before doing any work is strictly better than failing
+    // after creating students and enrollments that only get undone.
+    const yearResult = await client.query(
+      `SELECT status, name FROM academic_years WHERE id = $1`, [batch.academic_year_id],
+    );
+    if (yearResult.rows[0]?.status === "closed") {
+      throw new ImportServiceError(`${yearResult.rows[0].name} is closed; no new charges may be posted.`);
+    }
+
     const rowsResult = await client.query(
       `SELECT * FROM import_rows WHERE batch_id = $1 ORDER BY line_no`, [batchId],
     );
@@ -490,6 +506,20 @@ export async function commitImport(
 
     let created = 0;
     const unpricedClassNames = new Set<string>();
+    // Charges are generated in one bulk pass after every row's student
+    // and enrollment exist, rather than once per row inline — collected
+    // here as the loop goes. Payments (only for rows with an amount
+    // actually paid, typically a minority) still happen per-row after
+    // that bulk pass, once real charges exist to allocate against.
+    const enrollmentsForCharges: { enrollmentId: string; schoolId: string; academicYearId: string;
+      classLevelId: string; streamId: string | null; admissionType: string }[] = [];
+    const pendingPayments: { enrollmentId: string; amountPaidPaise: number }[] = [];
+    // Sections repeat far more than they vary — an entire class's worth
+    // of rows shares the same handful of section names — so each
+    // distinct (class, section name) pair is created at most once here,
+    // not re-attempted with the same ON CONFLICT UPDATE for every row
+    // that happens to land in a section a previous row already created.
+    const sectionIdByKey = new Map<string, string>();
 
     for (const row of rows) {
       if ((row.errors as unknown[]).length > 0) continue;
@@ -510,15 +540,20 @@ export async function commitImport(
       const primaryEmail = contactType === "guardian" ? (raw.guardian_email ?? "")
         : ((raw.father_email || raw.mother_email) ?? "");
 
-      const sectionResult = await client.query(
-        `INSERT INTO sections (school_id, academic_year_id, class_level_id, name, capacity)
-         VALUES ($1, $2, $3, $4, 40)
-         ON CONFLICT (school_id, academic_year_id, class_level_id, name) DO UPDATE
-           SET name = EXCLUDED.name
-         RETURNING id`,
-        [batch.school_id, batch.academic_year_id, klass.id, raw._section],
-      );
-      const sectionId = sectionResult.rows[0].id;
+      const sectionKey = `${klass.id}:${raw._section}`;
+      let sectionId = sectionIdByKey.get(sectionKey);
+      if (!sectionId) {
+        const sectionResult = await client.query(
+          `INSERT INTO sections (school_id, academic_year_id, class_level_id, name, capacity)
+           VALUES ($1, $2, $3, $4, 40)
+           ON CONFLICT (school_id, academic_year_id, class_level_id, name) DO UPDATE
+             SET name = EXCLUDED.name
+           RETURNING id`,
+          [batch.school_id, batch.academic_year_id, klass.id, raw._section],
+        );
+        sectionId = sectionResult.rows[0].id;
+        sectionIdByKey.set(sectionKey, sectionId!);
+      }
 
       const studentResult = await client.query(
         `INSERT INTO students
@@ -556,29 +591,35 @@ export async function commitImport(
          RETURNING id`,
         // Imported students were already at the school; they are not new
         // admissions and must not be charged an admission fee — the
-        // 'carry_over' admission_type is what generateCharges below uses
-        // to correctly skip any one-time (admission) fee line.
+        // 'carry_over' admission_type is what selectChargeableLines uses
+        // (via generateChargesBulk below) to correctly skip any
+        // one-time (admission) fee line.
         [batch.school_id, studentId, batch.academic_year_id, klass.id, sectionId, streamId,
          rollNo, committedBy],
       );
       const enrollmentId = enrollmentResult.rows[0].id;
 
       if (pricedClassIds.has(klass.id)) {
-        await generateCharges(enrollmentId, { createdBy: committedBy, client });
-
+        enrollmentsForCharges.push({
+          enrollmentId, schoolId: batch.school_id, academicYearId: batch.academic_year_id,
+          classLevelId: klass.id, streamId, admissionType: "carry_over",
+        });
         const amountPaidPaise = Number(raw._amount_paid_paise ?? "0");
-        if (amountPaidPaise > 0) {
-          await recordPayment({
-            enrollmentId, amount: amountPaidPaise, mode: "cash",
-            instrumentRef: "Opening balance from import", collectedBy: committedBy, client,
-          });
-        }
+        if (amountPaidPaise > 0) pendingPayments.push({ enrollmentId, amountPaidPaise });
       } else {
         unpricedClassNames.add(klass.name);
       }
 
       await client.query(`UPDATE import_rows SET student_id = $1 WHERE id = $2`, [studentId, row.id]);
       created++;
+    }
+
+    await generateChargesBulk(enrollmentsForCharges, { createdBy: committedBy, client });
+    for (const { enrollmentId, amountPaidPaise } of pendingPayments) {
+      await recordPayment({
+        enrollmentId, amount: amountPaidPaise, mode: "cash",
+        instrumentRef: "Opening balance from import", collectedBy: committedBy, client,
+      });
     }
 
     await client.query(

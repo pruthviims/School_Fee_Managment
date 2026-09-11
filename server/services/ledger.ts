@@ -75,3 +75,60 @@ export async function getEnrollmentLedger(
     arrearsCharged, arrearsBalance: arrearsCharged - arrearsPaid,
   };
 }
+
+/**
+ * The same totals as getEnrollmentLedger, for many enrollments in one
+ * query instead of one call per enrollment — extracted here as the
+ * shared implementation after the exact same correlated-subquery SQL
+ * had already been hand-duplicated once (Fee Collection's
+ * include_ledger=1). A caller that needs N enrollments' balances
+ * should call this once, not getEnrollmentLedger N times: that
+ * per-enrollment pattern is exactly what made Fee Collection
+ * unusable at 1,500+ students, and Class Promotion's preview (which
+ * computes a balance for every enrolled student, not just the ones
+ * moving) has the identical shape.
+ *
+ * Only viable now that concessions.enrollment_id and
+ * allocations.charge_id/payment_id are actually indexed (see the
+ * 1700000000016 migration) — the same dependency
+ * getEnrollmentLedger's own correlated subqueries have always had.
+ */
+export async function getBulkEnrollmentLedgers(
+  enrollmentIds: string[], client: PoolClient | typeof pool = pool,
+): Promise<Map<string, EnrollmentLedger>> {
+  if (enrollmentIds.length === 0) return new Map();
+
+  const result = await client.query(
+    `SELECT e.id,
+            COALESCE((SELECT SUM(c.amount) FROM charges c
+                      WHERE c.enrollment_id = e.id AND c.reversed_by IS NULL), 0) AS charged,
+            COALESCE((SELECT SUM(co.amount) FROM concessions co
+                      WHERE co.enrollment_id = e.id AND co.reversed_by IS NULL), 0) AS conceded,
+            COALESCE((SELECT SUM(a.amount) FROM allocations a
+                      JOIN payments p ON p.id = a.payment_id
+                      WHERE a.charge_id IN (SELECT id FROM charges WHERE enrollment_id = e.id)
+                        AND p.clearing_status = 'cleared' AND p.reversed_by IS NULL), 0) AS paid,
+            COALESCE((SELECT SUM(c.amount) FROM charges c
+                      WHERE c.enrollment_id = e.id AND c.reversed_by IS NULL
+                        AND c.is_arrear = true), 0) AS arrears_charged,
+            COALESCE((SELECT SUM(c.amount) FROM charges c
+                      WHERE c.enrollment_id = e.id AND c.reversed_by IS NULL
+                        AND c.is_arrear = true), 0)
+              - COALESCE((SELECT SUM(a.amount) FROM allocations a
+                          JOIN payments p ON p.id = a.payment_id
+                          JOIN charges c ON c.id = a.charge_id
+                          WHERE c.enrollment_id = e.id AND c.reversed_by IS NULL AND c.is_arrear = true
+                            AND p.clearing_status = 'cleared' AND p.reversed_by IS NULL), 0) AS arrears_balance
+     FROM enrollments e
+     WHERE e.id = ANY($1::uuid[])`,
+    [enrollmentIds],
+  );
+
+  const map = new Map<string, EnrollmentLedger>();
+  for (const r of result.rows) {
+    const charged = Number(r.charged), conceded = Number(r.conceded), paid = Number(r.paid);
+    const arrearsCharged = Number(r.arrears_charged), arrearsBalance = Number(r.arrears_balance);
+    map.set(r.id, { charged, conceded, paid, balance: charged - conceded - paid, arrearsCharged, arrearsBalance });
+  }
+  return map;
+}

@@ -51,6 +51,44 @@ async function loadEnrollment(client: PoolClient, enrollmentId: string): Promise
   return row;
 }
 
+interface FeeStructureLine {
+  fee_head_id: string; stream_id: string | null; amount: number; term_no: number;
+  due_on: string; head_name: string; is_optional: boolean; is_one_time: boolean;
+}
+
+/**
+ * Pure decision logic extracted from generateCharges so it can be
+ * reused by bulk callers (import, promotion) without duplicating it —
+ * the same de-duplication (stream-specific wins over generic, one head
+ * per term), optional-head, and one-time-fee rules either way,
+ * whether called once per enrollment or pre-computed once per class
+ * and reused across many enrollments that share it.
+ */
+function selectChargeableLines(
+  lines: FeeStructureLine[],
+  { optionalHeadIds = [], admissionType, alreadyChargedKeys = new Set<string>() }:
+    { optionalHeadIds?: string[]; admissionType: string; alreadyChargedKeys?: Set<string> },
+): FeeStructureLine[] {
+  const optionalSet = new Set(optionalHeadIds);
+  const seen = new Set<string>();
+  const toCharge: FeeStructureLine[] = [];
+
+  for (const line of lines) {
+    const key = `${line.fee_head_id}:${line.term_no}`;
+    if (seen.has(key)) continue; // stream-specific row already handled this head+term
+
+    if (line.is_optional && !optionalSet.has(line.fee_head_id)) continue;
+    // One-time heads (admission fee) apply only to genuinely new students.
+    if (line.is_one_time && admissionType !== "new") continue;
+
+    seen.add(key);
+    if (alreadyChargedKeys.has(key)) continue;
+
+    toCharge.push(line);
+  }
+  return toCharge;
+}
+
 /**
  * Snapshot the fee structure onto an enrollment. Idempotent per
  * (enrollment, fee_head, term_no) — re-running never duplicates charges,
@@ -78,8 +116,6 @@ export async function generateCharges(
       );
     }
 
-    const optionalSet = new Set(optionalHeadIds);
-
     // A stream-specific price wins over the generic one; take both and
     // de-duplicate below so Science students get lab fees and Arts don't.
     const linesResult = await client.query(
@@ -101,20 +137,12 @@ export async function generateCharges(
     );
     const already = new Set(alreadyResult.rows.map((r) => `${r.fee_head_id}:${r.term_no}`));
 
-    const seen = new Set<string>();
+    const toCharge = selectChargeableLines(linesResult.rows, {
+      optionalHeadIds, admissionType: enrollment.admission_type, alreadyChargedKeys: already,
+    });
+
     const created: unknown[] = [];
-
-    for (const line of linesResult.rows) {
-      const key = `${line.fee_head_id}:${line.term_no}`;
-      if (seen.has(key)) continue; // stream-specific row already handled this head+term
-
-      if (line.is_optional && !optionalSet.has(line.fee_head_id)) continue;
-      // One-time heads (admission fee) apply only to genuinely new students.
-      if (line.is_one_time && enrollment.admission_type !== "new") continue;
-
-      seen.add(key);
-      if (already.has(key)) continue;
-
+    for (const line of toCharge) {
       const inserted = await client.query(
         `INSERT INTO charges
            (school_id, enrollment_id, fee_head_id, head_name, amount, term_no,
@@ -135,6 +163,95 @@ export async function generateCharges(
   } finally {
     if (ownsConnection) client.release();
   }
+}
+
+/**
+ * The same charge-generation rules as generateCharges, computed for
+ * many brand-new enrollments in one pass instead of one call each —
+ * built for import and promotion, which both create dozens to
+ * thousands of enrollments in a single operation and used to call
+ * generateCharges once per enrollment, each paying for its own
+ * lookups of the enrollment, the fee structure, and (always empty,
+ * since the enrollment is brand new) any existing charges.
+ *
+ * Deliberately narrower than generateCharges, not a superset of it:
+ * only valid for enrollments that were just created in this same
+ * operation, never already having any charges — the "already charged"
+ * de-duplication generateCharges does per call is correctly omitted
+ * here, not merely skipped for speed, the same reasoning promotion's
+ * commit() already relies on for arrears. A single call mixing
+ * brand-new enrollments with pre-existing ones would be misusing this;
+ * generateCharges itself remains correct and unchanged for that case.
+ */
+export async function generateChargesBulk(
+  enrollments: { enrollmentId: string; schoolId: string; academicYearId: string;
+    classLevelId: string; streamId: string | null; admissionType: string }[],
+  { createdBy = null, client }: { createdBy?: string | null; client: PoolClient },
+): Promise<number> {
+  if (enrollments.length === 0) return 0;
+
+  // Grouped by (year, class): every enrollment sharing that pair reads
+  // the identical fee_structure rows, so it's fetched once per group
+  // rather than once per enrollment.
+  const groupKey = (e: typeof enrollments[number]) => `${e.academicYearId}:${e.classLevelId}`;
+  const groups = new Map<string, typeof enrollments>();
+  for (const e of enrollments) {
+    const key = groupKey(e);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push(e);
+  }
+
+  const rows: { school_id: string; enrollment_id: string; fee_head_id: string; head_name: string;
+    amount: number; term_no: number; due_on: string; created_by: string | null }[] = [];
+
+  for (const group of groups.values()) {
+    const first = group[0];
+    const linesResult = await client.query(
+      `SELECT fs.fee_head_id, fs.stream_id, fs.amount, fs.term_no, fs.due_on,
+              fh.name AS head_name, fh.is_optional, fh.is_one_time, fh.display_order
+       FROM fee_structures fs
+       JOIN fee_heads fh ON fh.id = fs.fee_head_id
+       WHERE fs.school_id = $1 AND fs.academic_year_id = $2 AND fs.class_level_id = $3
+       ORDER BY fh.display_order, fs.term_no, fs.stream_id NULLS LAST`,
+      [first.schoolId, first.academicYearId, first.classLevelId],
+    );
+
+    for (const enrollment of group) {
+      // Same stream filter generateCharges applies in SQL
+      // (stream_id IS NULL OR stream_id = enrollment's), applied here
+      // in memory instead since the lines are already fetched once for
+      // the whole group.
+      const linesForStream = linesResult.rows.filter(
+        (l) => l.stream_id === null || l.stream_id === enrollment.streamId,
+      );
+      const toCharge = selectChargeableLines(linesForStream, { admissionType: enrollment.admissionType });
+      for (const line of toCharge) {
+        rows.push({
+          school_id: enrollment.schoolId, enrollment_id: enrollment.enrollmentId,
+          fee_head_id: line.fee_head_id, head_name: line.head_name, amount: line.amount,
+          term_no: line.term_no, due_on: line.due_on, created_by: createdBy,
+        });
+      }
+    }
+  }
+
+  if (rows.length === 0) return 0;
+
+  await client.query(
+    `INSERT INTO charges
+       (school_id, enrollment_id, fee_head_id, head_name, amount, term_no, due_on, source, created_by)
+     SELECT school_id, enrollment_id, fee_head_id, head_name, amount, term_no, due_on, 'structure', created_by
+     FROM unnest(
+       $1::uuid[], $2::uuid[], $3::uuid[], $4::text[], $5::bigint[], $6::int[], $7::date[], $8::uuid[]
+     ) AS t(school_id, enrollment_id, fee_head_id, head_name, amount, term_no, due_on, created_by)`,
+    [
+      rows.map((r) => r.school_id), rows.map((r) => r.enrollment_id), rows.map((r) => r.fee_head_id),
+      rows.map((r) => r.head_name), rows.map((r) => r.amount), rows.map((r) => r.term_no),
+      rows.map((r) => r.due_on), rows.map((r) => r.created_by),
+    ],
+  );
+
+  return rows.length;
 }
 
 /**

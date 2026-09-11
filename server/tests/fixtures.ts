@@ -97,14 +97,14 @@ export async function createStudent(
 export async function createEnrollment(
   schoolId: string, studentId: string, academicYearId: string,
   classLevelId: string, sectionId: string,
-  overrides: Partial<{ admission_type: string }> = {},
+  overrides: Partial<{ admission_type: string; stream_id: string | null }> = {},
 ) {
   const result = await pool.query(
     `INSERT INTO enrollments
-       (school_id, student_id, academic_year_id, class_level_id, section_id, admission_type)
-     VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+       (school_id, student_id, academic_year_id, class_level_id, section_id, admission_type, stream_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
     [schoolId, studentId, academicYearId, classLevelId, sectionId,
-     overrides.admission_type ?? "new"],
+     overrides.admission_type ?? "new", overrides.stream_id ?? null],
   );
   return result.rows[0];
 }
