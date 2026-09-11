@@ -298,24 +298,38 @@ authRouter.post("/password-reset/confirm", async (req, res) => {
 export async function makeAndSendCredentialEmail(
   user: { id: string; password_hash: string | null; email: string },
   { subject, intro }: { subject: string; intro: string },
-): Promise<string> {
+): Promise<{ url: string; emailSent: boolean }> {
   const token = makeCredentialToken(user);
   const uid = user.id;
   const frontendUrl = (process.env.FRONTEND_URL || "http://localhost:5173").replace(/\/$/, "");
   const resetUrl = `${frontendUrl}/reset-password?uid=${uid}&token=${token}`;
 
-  await sendMail({
-    to: user.email,
-    subject,
-    text: `${intro}\n\n${resetUrl}\n\n` +
-      `This link works for ${CREDENTIAL_TOKEN_TTL_HOURS} hours. If you didn't expect this ` +
-      "email, you can ignore it — nothing changes until the link is used.",
-  });
+  let emailSent = true;
+  try {
+    await sendMail({
+      to: user.email,
+      subject,
+      text: `${intro}\n\n${resetUrl}\n\n` +
+        `This link works for ${CREDENTIAL_TOKEN_TTL_HOURS} hours. If you didn't expect this ` +
+        "email, you can ignore it — nothing changes until the link is used.",
+    });
+  } catch (err) {
+    // Never let a delivery failure (wrong API key, sender not verified,
+    // provider outage) take down the whole request — the URL below is
+    // still returned either way, so the admin can still copy/paste it
+    // by hand. Logged so a real, persistent misconfiguration is still
+    // visible in Vercel's function logs, and reported back to the
+    // caller (emailSent: false) so the person who clicked "invite" can
+    // actually be told delivery failed, rather than the UI implying
+    // success just because the request itself didn't error.
+    console.error("[mail] sendMail failed:", err instanceof Error ? err.message : err);
+    emailSent = false;
+  }
 
   // Returned (not just sent) so the caller can offer it as a fallback —
   // sendMail() silently just logs to the server console instead of
   // actually delivering anything whenever EMAIL_HOST isn't configured
   // (see emailService.ts), which is invisible to whoever clicked
   // "invite" and easy to mistake for the invite itself having failed.
-  return resetUrl;
+  return { url: resetUrl, emailSent };
 }

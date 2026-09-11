@@ -103,7 +103,7 @@ staffRouter.post("/", async (req, res) => {
       metadata: { role },
     });
 
-    const inviteUrl = await makeAndSendCredentialEmail(user, {
+    const invite = await makeAndSendCredentialEmail(user, {
       subject: `You've been added to ${req.school!.name}'s Fee Portal`,
       intro: `${req.user!.full_name || req.user!.email} has given you ` +
         `${ROLE_LABEL[role as Role]} access to ${req.school!.name} on the Fee Portal. ` +
@@ -114,7 +114,8 @@ staffRouter.post("/", async (req, res) => {
       ...serializeMembership({
         ...membership.rows[0], user_id: user.id, email: user.email, full_name: user.full_name,
       }),
-      invite_url: inviteUrl,
+      invite_url: invite.url,
+      email_sent: invite.emailSent,
     });
   } catch (err) {
     await client.query("ROLLBACK");
@@ -150,7 +151,7 @@ staffRouter.post("/:membershipId/resend-invite", async (req, res) => {
   // their first password, or lets an existing staff member set a new
   // one, without needing a separate "reset a colleague's password"
   // mechanism duplicating this one.
-  const inviteUrl = await makeAndSendCredentialEmail(
+  const invite = await makeAndSendCredentialEmail(
     { id: membership.user_id, password_hash: null, email: membership.email },
     {
       subject: `Your ${req.school!.name} Fee Portal access`,
@@ -166,7 +167,7 @@ staffRouter.post("/:membershipId/resend-invite", async (req, res) => {
     description: `Resent access setup link to ${membership.email}`,
   });
 
-  res.json({ invite_url: inviteUrl });
+  res.json({ invite_url: invite.url, email_sent: invite.emailSent });
 });
 
 staffRouter.patch("/:membershipId", async (req, res) => {

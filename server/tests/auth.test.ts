@@ -140,11 +140,31 @@ describe("staff management", () => {
     // get this link even when email delivery isn't working.
     expect(res.body.invite_url).toContain("uid=");
     expect(res.body.invite_url).toContain("token=");
+    expect(res.body.email_sent).toBe(true);
     expect(res.body.has_password).toBe(false);
 
     const userRow = await pool.query(`SELECT password_hash FROM users WHERE email = $1`,
       ["new-accountant@school.test"]);
     expect(userRow.rows[0].password_hash).toBeNull();
+  });
+
+  it("still returns a usable invite_url when email delivery genuinely fails, flagged as email_sent: false", async () => {
+    // The real scenario this covers: a misconfigured or temporarily
+    // down mail provider must never block the invite itself — the
+    // Owner can still copy/paste the link by hand. This is exactly
+    // what a 504/FUNCTION_INVOCATION_TIMEOUT from a hanging SMTP
+    // connection used to prevent (no response at all, so no invite_url
+    // ever reached the browser); simulated here as any thrown error,
+    // since a failed HTTP call to Brevo throws the same shape of error.
+    sendMailSpy.mockRejectedValueOnce(new Error("Brevo API refused the email (400): Sender not verified"));
+    const { cookie } = await loginAs("owner@school.test", "x".repeat(14));
+    const res = await request(app).post("/api/staff").set("Cookie", cookie).send({
+      email: "delivery-fails@school.test", full_name: "Delivery Fails", role: "accountant",
+    });
+    expect(res.status).toBe(201); // the invite itself still succeeds
+    expect(res.body.invite_url).toContain("uid=");
+    expect(res.body.invite_url).toContain("token=");
+    expect(res.body.email_sent).toBe(false);
   });
 
   it("resending an invite works for a pending staff member and returns a fresh link", async () => {
@@ -158,6 +178,7 @@ describe("staff management", () => {
       .set("Cookie", cookie);
     expect(resend.status).toBe(200);
     expect(resend.body.invite_url).toContain("uid=");
+    expect(resend.body.email_sent).toBe(true);
     expect(sendMailSpy).toHaveBeenCalledTimes(1);
     expect(sendMailSpy.mock.calls[0][0].to).toBe("never-got-the-email@school.test");
   });
