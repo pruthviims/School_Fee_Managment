@@ -3441,7 +3441,25 @@ const AUDIT_ENTITY_LABEL = {
   student: "Student", enrollment: "Enrollment", membership: "Staff",
   promotion_batch: "Promotion", concession: "Concession", payment: "Payment",
   refund: "Refund", fee_structure: "Fee Structure", transport: "Transport",
+  tc_request: "Transfer Certificate",
 };
+
+// Grouped to match the app's own sidebar sections, not a new taxonomy
+// someone would have to learn — every entity_type maps to exactly one
+// category, so filtering is a plain lookup against data the log already
+// carries on every row, not a second query or a new backend concept.
+const AUDIT_CATEGORIES = [
+  { id: "admissions", label: "Admissions & Students", entityTypes: ["student", "enrollment"] },
+  { id: "collection", label: "Fee Collection & Payments",
+    entityTypes: ["payment", "refund", "concession"] },
+  { id: "fees_setup", label: "Fees Setup", entityTypes: ["fee_structure", "transport"] },
+  { id: "promotion", label: "Class Promotion", entityTypes: ["promotion_batch"] },
+  { id: "tc", label: "Transfer Certificates", entityTypes: ["tc_request"] },
+  { id: "staff", label: "Staff Access", entityTypes: ["membership"] },
+];
+const CATEGORY_BY_ENTITY_TYPE = Object.fromEntries(
+  AUDIT_CATEGORIES.flatMap((c) => c.entityTypes.map((t) => [t, c.id])),
+);
 
 /**
  * Owner and Accountant only (view_audit_log) — a read-only trail of who
@@ -3456,6 +3474,7 @@ export function ActivityLogScreen() {
   const [query, setQuery] = useState("");
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
+  const [activeCategory, setActiveCategory] = useState(""); // "" = All
   const debounceRef = useRef(null);
 
   async function refetch(q, from, to) {
@@ -3482,10 +3501,35 @@ export function ActivityLogScreen() {
     return () => clearTimeout(debounceRef.current);
   }, [query]); // eslint-disable-line
 
+  // Filtered client-side, not re-fetched — the category is a grouping
+  // over entity_type, which every entry already carries, so narrowing
+  // to one category is just picking a subset of what's already loaded,
+  // not a reason to ask the server again.
+  const visibleEntries = activeCategory
+    ? entries.filter((e) => CATEGORY_BY_ENTITY_TYPE[e.entity_type] === activeCategory)
+    : entries;
+
   return (
     <div>
       <PageHead title="Activity Log"
         subtitle="Who did what, across the school's account — admissions, promotions, staff changes, and more." />
+
+      <div className="mb-5 inline-flex flex-wrap bg-white rounded-xl border border-slate-100 p-1 shadow-[0_1px_3px_rgba(15,23,41,0.04)]">
+        <button onClick={() => setActiveCategory("")}
+          className={`px-4 py-2 rounded-lg text-sm font-bold transition ${
+            activeCategory === "" ? "bg-brand-600 text-white shadow-[0_6px_14px_-8px_rgba(91,61,245,0.9)]"
+                                   : "text-slate-500 hover:text-slate-700"}`}>
+          All
+        </button>
+        {AUDIT_CATEGORIES.map((c) => (
+          <button key={c.id} onClick={() => setActiveCategory(c.id)}
+            className={`px-4 py-2 rounded-lg text-sm font-bold whitespace-nowrap transition ${
+              activeCategory === c.id ? "bg-brand-600 text-white shadow-[0_6px_14px_-8px_rgba(91,61,245,0.9)]"
+                                       : "text-slate-500 hover:text-slate-700"}`}>
+            {c.label}
+          </button>
+        ))}
+      </div>
 
       <div className={`${panel} p-5 mb-5 flex flex-wrap items-end gap-4`}>
         <div className="flex-1 min-w-[220px]">
@@ -3506,8 +3550,8 @@ export function ActivityLogScreen() {
           <input type="date" className={`${field} mt-2`} value={toDate}
             onChange={(e) => setToDate(e.target.value)} />
         </div>
-        {(query || fromDate || toDate) && (
-          <button onClick={() => { setQuery(""); setFromDate(""); setToDate(""); }}
+        {(query || fromDate || toDate || activeCategory) && (
+          <button onClick={() => { setQuery(""); setFromDate(""); setToDate(""); setActiveCategory(""); }}
             className={`${ghost} mb-0.5`}>
             <X size={14} /> Clear filters
           </button>
@@ -3517,9 +3561,9 @@ export function ActivityLogScreen() {
       <div className={`${panel} overflow-hidden`}>
         {loading ? (
           <div className="p-12 text-center text-slate-400 font-semibold">Loading…</div>
-        ) : entries.length === 0 ? (
+        ) : visibleEntries.length === 0 ? (
           <div className="p-12 text-center text-slate-400 font-semibold text-sm">
-            {query || fromDate || toDate ? "Nothing matches these filters." : "Nothing logged yet."}
+            {query || fromDate || toDate || activeCategory ? "Nothing matches these filters." : "Nothing logged yet."}
           </div>
         ) : (
           <div className="overflow-x-auto">
@@ -3533,7 +3577,7 @@ export function ActivityLogScreen() {
                 </tr>
               </thead>
               <tbody>
-                {entries.map((e) => (
+                {visibleEntries.map((e) => (
                   <tr key={e.id} className="border-b border-slate-50 text-sm">
                     <td className="px-5 py-3 text-slate-500 whitespace-nowrap tabular-nums">
                       {new Date(e.created_at).toLocaleString("en-IN", {
