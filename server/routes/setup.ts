@@ -12,7 +12,7 @@ import { z } from "zod";
 import { pool } from "../db/index.js";
 import { requireCapability, requireMember } from "../middleware/permissions.js";
 import { logActivity } from "../services/auditLog.js";
-import { generateCharges } from "../services/billing.js";
+import { generateChargesBulk } from "../services/billing.js";
 import { recordPayment } from "../services/collection.js";
 
 export const setupRouter = Router();
@@ -510,23 +510,36 @@ setupRouter.post("/fee-structure/generate-missing-charges", writeGuard, async (r
     await client.query("BEGIN");
 
     const enrollmentsResult = await client.query(
-      `SELECT id, student_id FROM enrollments
+      `SELECT id, student_id, stream_id, admission_type FROM enrollments
        WHERE school_id = $1 AND academic_year_id = $2 AND class_level_id = $3 AND is_active = true`,
       [req.school!.id, d.academic_year_id, d.class_level_id],
+    );
+
+    // checkExisting: true — unlike import and promotion, these
+    // enrollments already existed before this action ran and may
+    // already be partially billed, so the "already charged"
+    // de-duplication can't be safely skipped the way it correctly is
+    // for a batch of brand-new enrollments.
+    const createdByEnrollment = await generateChargesBulk(
+      enrollmentsResult.rows.map((e) => ({
+        enrollmentId: e.id, schoolId: req.school!.id, academicYearId: d.academic_year_id,
+        classLevelId: d.class_level_id, streamId: e.stream_id, admissionType: e.admission_type,
+      })),
+      { createdBy: req.user!.id, client, checkExisting: true },
     );
 
     let studentsBilled = 0, chargesCreated = 0, paymentsRecorded = 0;
 
     for (const enrollment of enrollmentsResult.rows) {
-      const created = await generateCharges(enrollment.id, { createdBy: req.user!.id, client });
-      if (created.length === 0) continue;
+      const created = createdByEnrollment.get(enrollment.id) ?? 0;
+      if (created === 0) continue;
       studentsBilled++;
-      chargesCreated += created.length;
+      chargesCreated += created;
 
       // Only ever applies once per enrollment — recorded payments are
       // checked for the same marker import itself uses, so re-running
-      // this action (safe and expected, matching generateCharges' own
-      // idempotency) never records the opening balance twice.
+      // this action (safe and expected, matching generateChargesBulk's
+      // own idempotency here) never records the opening balance twice.
       const alreadyPaid = await client.query(
         `SELECT 1 FROM payments
          WHERE enrollment_id = $1 AND instrument_ref = 'Opening balance from import' LIMIT 1`,

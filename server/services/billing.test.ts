@@ -256,11 +256,49 @@ describe("generateChargesBulk", () => {
     expect(chargesB.rows.map((r) => r.head_name)).toEqual(["IX-only fee"]);
   });
 
+  it("checkExisting=true correctly skips charges an enrollment already has, and reports per-enrollment counts", async () => {
+    const { enrollment: alreadyCharged } = await newStudentEnrollment("carry_over");
+    const { enrollment: freshEnrollment } = await newStudentEnrollment("carry_over");
+
+    // Simulate the real scenario checkExisting exists for: an
+    // enrollment that already has some charges from an earlier partial
+    // run — generateCharges itself, not the bulk version, since this
+    // is exactly the single-enrollment case it's already correct for.
+    await generateCharges(alreadyCharged.id);
+    const before = await pool.query(
+      `SELECT count(*) FROM charges WHERE enrollment_id = $1`, [alreadyCharged.id],
+    );
+    expect(Number(before.rows[0].count)).toBe(1); // Tuition only, carry_over
+
+    const client = await pool.connect();
+    try {
+      const result = await generateChargesBulk(
+        [alreadyCharged, freshEnrollment].map((e) => ({
+          enrollmentId: e.id, schoolId: school.id, academicYearId: year.id,
+          classLevelId: classLevel.id, streamId: null, admissionType: "carry_over",
+        })),
+        { client, checkExisting: true },
+      );
+      // Nothing new for the already-charged enrollment — its one
+      // charge already existed — so it correctly has no entry at all,
+      // only the enrollment that genuinely got something new does.
+      expect(result.has(alreadyCharged.id)).toBe(false);
+      expect(result.get(freshEnrollment.id)).toBe(1);
+    } finally {
+      client.release();
+    }
+
+    const after = await pool.query(
+      `SELECT count(*) FROM charges WHERE enrollment_id = $1`, [alreadyCharged.id],
+    );
+    expect(Number(after.rows[0].count)).toBe(1); // still just 1 — not duplicated
+  });
+
   it("does nothing for an empty list, rather than erroring", async () => {
     const client = await pool.connect();
     try {
-      const count = await generateChargesBulk([], { client });
-      expect(count).toBe(0);
+      const result = await generateChargesBulk([], { client });
+      expect(result.size).toBe(0);
     } finally {
       client.release();
     }

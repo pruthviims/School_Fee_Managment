@@ -167,28 +167,45 @@ export async function generateCharges(
 
 /**
  * The same charge-generation rules as generateCharges, computed for
- * many brand-new enrollments in one pass instead of one call each —
- * built for import and promotion, which both create dozens to
- * thousands of enrollments in a single operation and used to call
+ * many enrollments in one pass instead of one call each — built for
+ * import and promotion, which both create dozens to thousands of
+ * brand-new enrollments in a single operation and used to call
  * generateCharges once per enrollment, each paying for its own
- * lookups of the enrollment, the fee structure, and (always empty,
- * since the enrollment is brand new) any existing charges.
+ * lookups of the enrollment, the fee structure, and (always empty for
+ * a brand-new enrollment) any existing charges.
  *
- * Deliberately narrower than generateCharges, not a superset of it:
- * only valid for enrollments that were just created in this same
- * operation, never already having any charges — the "already charged"
- * de-duplication generateCharges does per call is correctly omitted
- * here, not merely skipped for speed, the same reasoning promotion's
- * commit() already relies on for arrears. A single call mixing
- * brand-new enrollments with pre-existing ones would be misusing this;
- * generateCharges itself remains correct and unchanged for that case.
+ * checkExisting defaults to false — correct for import and promotion,
+ * where every enrollment passed in was just created a few lines above
+ * this same call and provably can't already have charges, so the
+ * "already charged" check generateCharges does per call would always
+ * find nothing and is skipped entirely rather than skipped only for
+ * speed. Set it to true for a caller (generate-missing-charges, a
+ * genuine "catch up" action against enrollments that already existed
+ * and may already be partially billed) where that assumption doesn't
+ * hold — still one bulk query instead of one per enrollment, just not
+ * omitted outright.
  */
 export async function generateChargesBulk(
   enrollments: { enrollmentId: string; schoolId: string; academicYearId: string;
     classLevelId: string; streamId: string | null; admissionType: string }[],
-  { createdBy = null, client }: { createdBy?: string | null; client: PoolClient },
-): Promise<number> {
-  if (enrollments.length === 0) return 0;
+  { createdBy = null, client, checkExisting = false }:
+    { createdBy?: string | null; client: PoolClient; checkExisting?: boolean },
+): Promise<Map<string, number>> {
+  const createdCountByEnrollment = new Map<string, number>();
+  if (enrollments.length === 0) return createdCountByEnrollment;
+
+  const alreadyByEnrollment = new Map<string, Set<string>>();
+  if (checkExisting) {
+    const existingResult = await client.query(
+      `SELECT enrollment_id, fee_head_id, term_no FROM charges
+       WHERE enrollment_id = ANY($1::uuid[]) AND source = 'structure'`,
+      [enrollments.map((e) => e.enrollmentId)],
+    );
+    for (const r of existingResult.rows) {
+      if (!alreadyByEnrollment.has(r.enrollment_id)) alreadyByEnrollment.set(r.enrollment_id, new Set());
+      alreadyByEnrollment.get(r.enrollment_id)!.add(`${r.fee_head_id}:${r.term_no}`);
+    }
+  }
 
   // Grouped by (year, class): every enrollment sharing that pair reads
   // the identical fee_structure rows, so it's fetched once per group
@@ -224,7 +241,13 @@ export async function generateChargesBulk(
       const linesForStream = linesResult.rows.filter(
         (l) => l.stream_id === null || l.stream_id === enrollment.streamId,
       );
-      const toCharge = selectChargeableLines(linesForStream, { admissionType: enrollment.admissionType });
+      const toCharge = selectChargeableLines(linesForStream, {
+        admissionType: enrollment.admissionType,
+        alreadyChargedKeys: alreadyByEnrollment.get(enrollment.enrollmentId),
+      });
+      if (toCharge.length > 0) {
+        createdCountByEnrollment.set(enrollment.enrollmentId, toCharge.length);
+      }
       for (const line of toCharge) {
         rows.push({
           school_id: enrollment.schoolId, enrollment_id: enrollment.enrollmentId,
@@ -235,7 +258,7 @@ export async function generateChargesBulk(
     }
   }
 
-  if (rows.length === 0) return 0;
+  if (rows.length === 0) return createdCountByEnrollment;
 
   await client.query(
     `INSERT INTO charges
@@ -251,7 +274,7 @@ export async function generateChargesBulk(
     ],
   );
 
-  return rows.length;
+  return createdCountByEnrollment;
 }
 
 /**
