@@ -1540,7 +1540,7 @@ function isActionable(move) {
  * promotable move in it, so processing a graduation with nobody else to
  * promote alongside it needs its own follow-up.
  */
-export function PromoteTab({ academicYears, classLevels, ensureUnassignedSection, refreshAcademicYears }) {
+export function PromoteTab({ academicYears, classLevels, ensureUnassignedSection, ensureSectionByName, refreshAcademicYears }) {
   // Every real year is a valid "From" candidate — "To" is no longer an
   // independent choice, so there's nothing left to filter priorYears
   // against. Most recent first, since that's the year promotion is
@@ -1616,10 +1616,14 @@ export function PromoteTab({ academicYears, classLevels, ensureUnassignedSection
     try {
       // The target class may never have had a section created in the
       // target year at all yet (no admission has landed there either) —
-      // the same "Unassigned" placeholder New Admission uses covers this,
-      // rather than assign-sections failing outright with nowhere to put
-      // the very first student promoted into a class.
-      await ensureUnassignedSection(move.toClassId, toYear.id);
+      // ensuring one actually named after the student's own current
+      // section exists first (reusing ensureSectionByName, already
+      // built for exactly this — see its own comment in App.jsx) is
+      // what lets assignSections' "keep the same section name" logic
+      // have something real to match against, rather than finding
+      // nothing there and falling back to whatever section happens to
+      // exist.
+      await ensureSectionByName(move.toClassId, toYear.id, move.fromSectionName);
       const toConfirm = confirmOptIn ? { ...move, needsOptin: false } : move;
       const assigned = await api.post("/promotion/assign-sections", {
         to_year_id: toYear.id, moves: [toConfirm],

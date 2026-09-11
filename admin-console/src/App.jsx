@@ -254,6 +254,30 @@ export default function App() {
     return created.id;
   }
 
+  // Promotion's own equivalent, kept entirely separate from
+  // ensureUnassignedSection above rather than generalizing it: sections
+  // are scoped per (year, class), so the very first student promoted
+  // into a class for a new year finds nothing there yet — assignSections'
+  // own "keep the same section name" logic then has nothing to match
+  // against and falls back to whatever section does exist, which used to
+  // always be the "Unassigned" one this same screen created moments
+  // earlier as its own separate fallback. Ensuring a section actually
+  // named after the student's current one exists first is what lets
+  // "keep" work the way it's meant to — a real capacity (matching the
+  // backend's own default, the same one import and manual section
+  // creation already use), not the 9999-seat placeholder meant for
+  // students admitted with no section decided yet.
+  async function ensureSectionByName(classLevelId, academicYearId, name) {
+    const sections = await api.get(
+      `/setup/sections?academic_year_id=${academicYearId}`);
+    const existing = sections.find((s) => s.class_level_id === classLevelId && s.name === name);
+    if (existing) return existing.id;
+    const created = await api.post("/setup/sections", {
+      academic_year_id: academicYearId, class_level_id: classLevelId, name,
+    });
+    return created.id;
+  }
+
   // Fetches the school's real academic years, creating a sensible first
   // one automatically if none exist yet — the same zero-friction default
   // freshWorkspace() used to hardcode, now actually persisted.
@@ -623,6 +647,7 @@ export default function App() {
           <PromoteTab
             academicYears={academicYears} classLevels={classLevels}
             ensureUnassignedSection={ensureUnassignedSection}
+            ensureSectionByName={ensureSectionByName}
             refreshAcademicYears={ensureAcademicYears} />
         )}
 
