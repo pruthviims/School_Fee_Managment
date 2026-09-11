@@ -14,7 +14,7 @@
 import Papa from "papaparse";
 import { pool } from "../db/index.js";
 import { generateChargesBulk } from "./billing.js";
-import { recordPayment } from "./collection.js";
+import { recordPaymentsBulk } from "./collection.js";
 
 export class ImportServiceError extends Error {}
 
@@ -615,12 +615,13 @@ export async function commitImport(
     }
 
     await generateChargesBulk(enrollmentsForCharges, { createdBy: committedBy, client });
-    for (const { enrollmentId, amountPaidPaise } of pendingPayments) {
-      await recordPayment({
-        enrollmentId, amount: amountPaidPaise, mode: "cash",
-        instrumentRef: "Opening balance from import", collectedBy: committedBy, client,
-      });
-    }
+    await recordPaymentsBulk(
+      pendingPayments.map((p) => ({
+        enrollmentId: p.enrollmentId, schoolId: batch.school_id, amount: p.amountPaidPaise,
+        mode: "cash", instrumentRef: "Opening balance from import", collectedBy: committedBy,
+      })),
+      { client },
+    );
 
     await client.query(
       `UPDATE import_batches SET status = 'committed', committed_at = now() WHERE id = $1`,

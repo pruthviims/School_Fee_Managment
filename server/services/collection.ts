@@ -17,7 +17,7 @@
 import crypto from "node:crypto";
 import type { PoolClient } from "pg";
 import { pool } from "../db/index.js";
-import { fiscalYearFor, issueDocumentNumber } from "./documentCounter.js";
+import { fiscalYearFor, issueDocumentNumber, reserveDocumentNumberBlock } from "./documentCounter.js";
 
 export class CollectionError extends Error {}
 
@@ -26,6 +26,34 @@ const INSTANT_MODES = new Set(["cash", "upi", "card", "netbanking", "neft"]);
 interface ChargeAmount {
   chargeId: string;
   amount: number;
+}
+
+/**
+ * Pure greedy-allocation decision, extracted from allocate() so
+ * recordPaymentsBulk (below) can reuse the exact same oldest-due-first,
+ * arrears-ahead-of-current policy without re-deriving it — the same
+ * reasoning billing.ts's selectChargeableLines extraction already
+ * established for charge generation. `charges` must already be ordered
+ * is_arrear DESC, due_on ASC, id ASC — the caller's responsibility,
+ * since a bulk caller orders many enrollments' charges in one query
+ * rather than one ORDER BY per call.
+ */
+function greedyAllocate(
+  charges: { id: string; outstanding: number }[], paymentAmount: number,
+): ChargeAmount[] {
+  let remaining = paymentAmount;
+  const pairs: ChargeAmount[] = [];
+  for (const charge of charges) {
+    if (remaining <= 0) break;
+    const take = Math.min(remaining, charge.outstanding);
+    if (take > 0) {
+      pairs.push({ chargeId: charge.id, amount: take });
+      remaining -= take;
+    }
+  }
+  // Any remainder is an advance payment — recorded but unallocated, and
+  // settles against the next term's charges once they're posted.
+  return pairs;
 }
 
 async function nextReceiptNo(client: PoolClient, schoolId: string, receivedOn: string) {
@@ -64,18 +92,7 @@ async function allocate(
       [payment.enrollment_id],
     );
 
-    let remaining = payment.amount;
-    pairs = [];
-    for (const charge of chargesResult.rows) {
-      if (remaining <= 0) break;
-      const take = Math.min(remaining, charge.outstanding);
-      if (take > 0) {
-        pairs.push({ chargeId: charge.id, amount: take });
-        remaining -= take;
-      }
-    }
-    // Any remainder is an advance payment — recorded but unallocated, and
-    // settles against the next term's charges once they're posted.
+    pairs = greedyAllocate(chargesResult.rows, payment.amount);
   }
 
   for (const { chargeId, amount } of pairs) {
@@ -164,6 +181,133 @@ export async function recordPayment(input: RecordPaymentInput): Promise<unknown>
   } finally {
     if (ownsConnection) client.release();
   }
+}
+
+export interface BulkPaymentInput {
+  enrollmentId: string;
+  schoolId: string;
+  amount: number;
+  mode: "cash" | "upi" | "card" | "netbanking" | "neft" | "cheque" | "dd";
+  instrumentRef?: string;
+  collectedBy?: string | null;
+}
+
+/**
+ * The bulk sibling of recordPayment, for many payments against
+ * brand-new enrollments in one operation rather than one call each —
+ * built for import, which was still calling recordPayment (roughly
+ * 6-7 sequential queries: an enrollment lookup, three for the receipt
+ * number, the payment insert, an allocation query plus insert) once
+ * per row with an opening balance. For a real roster where every
+ * student carries one — not a rare case, the exact scenario reported —
+ * that easily outweighed the rest of import's bulk rewrite combined,
+ * and was the actual cause of a 300-row import taking the full 300s
+ * Vercel allows rather than the few seconds every other part of it
+ * takes.
+ *
+ * Deliberately narrower than recordPayment, the same way
+ * generateChargesBulk is narrower than generateCharges: only valid for
+ * enrollments that were just created in this same operation, with no
+ * charges paid down yet and no explicit chargeAmounts override — so
+ * each charge's outstanding balance is simply its own amount, no
+ * correlated subquery needed to net out prior allocations, and the
+ * default oldest-due-first policy always applies. recordPayment itself
+ * remains correct and unchanged for every other case (a parent walking
+ * up to the counter, a single opening balance entered by hand, a
+ * cheque needing its own clearing lifecycle).
+ */
+export async function recordPaymentsBulk(
+  payments: BulkPaymentInput[],
+  { client, receivedOn = new Date() }: { client: PoolClient; receivedOn?: Date },
+): Promise<number> {
+  if (payments.length === 0) return 0;
+
+  const receivedOnStr = receivedOn.toISOString().slice(0, 10);
+
+  // One query for every involved enrollment's charges, ordered exactly
+  // as allocate()'s own query orders them — grouped in memory below
+  // rather than queried once per enrollment.
+  const chargesResult = await client.query(
+    `SELECT enrollment_id, id, amount FROM charges
+     WHERE enrollment_id = ANY($1::uuid[]) AND reversed_by IS NULL
+     ORDER BY enrollment_id, is_arrear DESC, due_on ASC, id ASC`,
+    [payments.map((p) => p.enrollmentId)],
+  );
+  const chargesByEnrollment = new Map<string, { id: string; outstanding: number }[]>();
+  for (const row of chargesResult.rows) {
+    if (!chargesByEnrollment.has(row.enrollment_id)) chargesByEnrollment.set(row.enrollment_id, []);
+    // Brand-new enrollments only (the same assumption generateChargesBulk
+    // makes) — outstanding is always the full charge amount, since no
+    // allocation could possibly already exist against it.
+    chargesByEnrollment.get(row.enrollment_id)!.push({ id: row.id, outstanding: row.amount });
+  }
+
+  const receiptNumbers = await reserveDocumentNumberBlock(
+    client, { schoolId: payments[0].schoolId, docType: "receipt",
+      fiscalYear: fiscalYearFor(receivedOn), prefix: "RCP/" },
+    payments.length,
+  );
+
+  const paymentRows = payments.map((p) => {
+    const instant = INSTANT_MODES.has(p.mode);
+    return {
+      school_id: p.schoolId, enrollment_id: p.enrollmentId, amount: p.amount, mode: p.mode,
+      clearing_status: instant ? "cleared" : "pending", received_on: receivedOnStr,
+      cleared_on: instant ? receivedOnStr : null, instrument_ref: p.instrumentRef ?? "",
+      collected_by: p.collectedBy ?? null,
+    };
+  });
+
+  const insertedPayments = await client.query(
+    `INSERT INTO payments
+       (school_id, receipt_no, enrollment_id, amount, mode, clearing_status,
+        received_on, cleared_on, instrument_ref, collected_by, created_by)
+     SELECT school_id, receipt_no, enrollment_id, amount, mode, clearing_status,
+            received_on, cleared_on, instrument_ref, collected_by, collected_by
+     FROM unnest(
+       $1::uuid[], $2::text[], $3::uuid[], $4::bigint[], $5::text[], $6::text[],
+       $7::date[], $8::date[], $9::text[], $10::uuid[]
+     ) AS t(school_id, receipt_no, enrollment_id, amount, mode, clearing_status,
+            received_on, cleared_on, instrument_ref, collected_by)
+     RETURNING id, enrollment_id, amount`,
+    [
+      paymentRows.map((r) => r.school_id), receiptNumbers, paymentRows.map((r) => r.enrollment_id),
+      paymentRows.map((r) => r.amount), paymentRows.map((r) => r.mode),
+      paymentRows.map((r) => r.clearing_status), paymentRows.map((r) => r.received_on),
+      paymentRows.map((r) => r.cleared_on), paymentRows.map((r) => r.instrument_ref),
+      paymentRows.map((r) => r.collected_by),
+    ],
+  );
+
+  // Postgres preserves input order for a single unnest-driven INSERT ...
+  // RETURNING, so insertedPayments.rows[i] corresponds to payments[i] —
+  // relied on here to match each new payment.id back to its own
+  // enrollment's charges for allocation, without a second round trip
+  // per row to look either up again.
+  const allocationRows: { school_id: string; payment_id: string; charge_id: string; amount: number }[] = [];
+  for (let i = 0; i < insertedPayments.rows.length; i++) {
+    const payment = insertedPayments.rows[i];
+    const charges = chargesByEnrollment.get(payment.enrollment_id) ?? [];
+    const pairs = greedyAllocate(charges, Number(payment.amount));
+    for (const { chargeId, amount } of pairs) {
+      allocationRows.push({
+        school_id: paymentRows[i].school_id, payment_id: payment.id, charge_id: chargeId, amount,
+      });
+    }
+  }
+
+  if (allocationRows.length > 0) {
+    await client.query(
+      `INSERT INTO allocations (school_id, payment_id, charge_id, amount)
+       SELECT * FROM unnest($1::uuid[], $2::uuid[], $3::uuid[], $4::bigint[])`,
+      [
+        allocationRows.map((r) => r.school_id), allocationRows.map((r) => r.payment_id),
+        allocationRows.map((r) => r.charge_id), allocationRows.map((r) => r.amount),
+      ],
+    );
+  }
+
+  return insertedPayments.rows.length;
 }
 
 /**

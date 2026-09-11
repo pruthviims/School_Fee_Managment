@@ -4,7 +4,7 @@ import { pool } from "../db/index.js";
 import { generateCharges } from "./billing.js";
 import {
   CollectionError, dailyCollection, handleGatewayWebhook, markBounced, markCleared,
-  recordPayment, verifyWebhookSignature,
+  recordPayment, recordPaymentsBulk, verifyWebhookSignature,
 } from "./collection.js";
 import { createSchool, resetDb } from "../tests/helpers.js";
 import {
@@ -45,6 +45,34 @@ async function studentWithCharges(dueOnByTerm: Record<number, string> = {}) {
   const enrollment = await createEnrollment(school.id, student.id, year.id, classLevel.id, section.id);
   await generateCharges(enrollment.id);
   return enrollment;
+}
+
+/**
+ * Prices the class once (matching studentWithCharges' own two-term
+ * Tuition T1/T2 amounts), then creates as many enrollments against
+ * that single shared structure as asked for — the shape a real class
+ * actually has (one fee structure, many students), and avoids
+ * studentWithCharges' own per-call fee-head creation colliding on
+ * fee_heads' per-school name uniqueness when called more than once.
+ */
+async function classWithSeveralCharged(count: number) {
+  const tuitionT1 = await createFeeHead(school.id, { name: "Tuition T1" });
+  const tuitionT2 = await createFeeHead(school.id, { name: "Tuition T2" });
+  await createFeeStructureLine(school.id, year.id, classLevel.id, tuitionT1.id, {
+    amount: 2000000, term_no: 1, due_on: "2026-06-01",
+  });
+  await createFeeStructureLine(school.id, year.id, classLevel.id, tuitionT2.id, {
+    amount: 2000000, term_no: 2, due_on: "2026-10-01",
+  });
+
+  const enrollments = [];
+  for (let i = 0; i < count; i++) {
+    const student = await createStudent(school.id);
+    const enrollment = await createEnrollment(school.id, student.id, year.id, classLevel.id, section.id);
+    await generateCharges(enrollment.id);
+    enrollments.push(enrollment);
+  }
+  return enrollments;
 }
 
 describe("recordPayment", () => {
@@ -165,6 +193,112 @@ describe("recordPayment", () => {
     const seq1 = Number(p1.receipt_no.split("/").pop());
     const seq2 = Number(p2.receipt_no.split("/").pop());
     expect(seq2).toBe(seq1 + 1);
+  });
+});
+
+describe("recordPaymentsBulk", () => {
+  it("produces identical results to recordPayment, for several enrollments at once", async () => {
+    const [e1, e2, e3] = await classWithSeveralCharged(3);
+
+    const client = await pool.connect();
+    try {
+      const count = await recordPaymentsBulk(
+        [e1, e2, e3].map((e) => ({
+          enrollmentId: e.id, schoolId: school.id, amount: 2000000, mode: "cash",
+          instrumentRef: "Opening balance from import",
+        })),
+        { client },
+      );
+      expect(count).toBe(3);
+    } finally {
+      client.release();
+    }
+
+    for (const e of [e1, e2, e3]) {
+      const payments = await pool.query(
+        `SELECT amount, mode, clearing_status, instrument_ref, receipt_no
+         FROM payments WHERE enrollment_id = $1`, [e.id],
+      );
+      expect(payments.rows).toHaveLength(1);
+      expect(Number(payments.rows[0].amount)).toBe(2000000);
+      expect(payments.rows[0].clearing_status).toBe("cleared"); // cash is instant
+      expect(payments.rows[0].instrument_ref).toBe("Opening balance from import");
+      expect(payments.rows[0].receipt_no).toMatch(/^RCP\//);
+
+      // Allocated against the earlier-due term first, same policy
+      // allocate() itself applies — proven here against the real
+      // resulting allocation, not just that a payment row exists.
+      const allocations = await pool.query(
+        `SELECT c.head_name, a.amount FROM allocations a
+         JOIN charges c ON c.id = a.charge_id
+         WHERE a.payment_id = (SELECT id FROM payments WHERE enrollment_id = $1)`,
+        [e.id],
+      );
+      expect(allocations.rows).toHaveLength(1);
+      expect(allocations.rows[0].head_name).toBe("Tuition T1"); // earlier due_on
+      expect(Number(allocations.rows[0].amount)).toBe(2000000);
+    }
+  });
+
+  it("issues sequential, gapless receipt numbers across the whole batch, not just within one payment", async () => {
+    const enrollments = await classWithSeveralCharged(4);
+    const client = await pool.connect();
+    try {
+      await recordPaymentsBulk(
+        enrollments.map((e) => ({ enrollmentId: e.id, schoolId: school.id, amount: 500000, mode: "cash" })),
+        { client },
+      );
+    } finally {
+      client.release();
+    }
+
+    const receipts = await pool.query(
+      `SELECT receipt_no FROM payments WHERE enrollment_id = ANY($1::uuid[]) ORDER BY receipt_no`,
+      [enrollments.map((e) => e.id)],
+    );
+    const sequences = receipts.rows.map((r) => Number(r.receipt_no.split("/").pop()));
+    for (let i = 1; i < sequences.length; i++) {
+      expect(sequences[i]).toBe(sequences[i - 1] + 1); // no gaps
+    }
+  });
+
+  it("splits a payment across multiple charges, oldest-due-first, same as a single recordPayment call would", async () => {
+    const enrollment = await studentWithCharges();
+    const client = await pool.connect();
+    try {
+      // Covers both term charges (40000 total) plus an advance remainder.
+      await recordPaymentsBulk(
+        [{ enrollmentId: enrollment.id, schoolId: school.id, amount: 4500000, mode: "cash" }],
+        { client },
+      );
+    } finally {
+      client.release();
+    }
+
+    const allocations = await pool.query(
+      `SELECT c.head_name, a.amount FROM allocations a
+       JOIN charges c ON c.id = a.charge_id
+       WHERE a.payment_id = (SELECT id FROM payments WHERE enrollment_id = $1)
+       ORDER BY c.head_name`,
+      [enrollment.id],
+    );
+    expect(allocations.rows).toHaveLength(2);
+    expect(Number(allocations.rows[0].amount)).toBe(2000000); // Tuition T1, fully covered
+    expect(Number(allocations.rows[1].amount)).toBe(2000000); // Tuition T2, fully covered
+    // The extra 500000 is left unallocated — a real advance, matching
+    // exactly what allocate() itself does with a remainder.
+    const total = allocations.rows.reduce((sum, r) => sum + Number(r.amount), 0);
+    expect(total).toBe(4000000);
+  });
+
+  it("does nothing for an empty list, rather than erroring", async () => {
+    const client = await pool.connect();
+    try {
+      const count = await recordPaymentsBulk([], { client });
+      expect(count).toBe(0);
+    } finally {
+      client.release();
+    }
   });
 });
 
