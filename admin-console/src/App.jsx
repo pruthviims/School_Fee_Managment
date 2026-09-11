@@ -1,9 +1,10 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   Bus,
   ChevronDown,
   FileSpreadsheet,
   History,
+  KeyRound,
   LogOut,
   Percent,
   ReceiptIndianRupee,
@@ -173,6 +174,26 @@ export default function App() {
   const [checkingSession, setCheckingSession] = useState(true);
   const [showSetup, setShowSetup] = useState(false);
   const [step, setStep] = useState("transport");
+  // The user menu's own open/closed state — deliberately separate from
+  // `step`, since opening it isn't navigation and shouldn't affect
+  // whatever screen is currently showing.
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const userMenuRef = useRef(null);
+  useEffect(() => {
+    if (!userMenuOpen) return;
+    function handlePointerDown(e) {
+      if (userMenuRef.current && !userMenuRef.current.contains(e.target)) setUserMenuOpen(false);
+    }
+    function handleKeyDown(e) {
+      if (e.key === "Escape") setUserMenuOpen(false);
+    }
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [userMenuOpen]);
   // Sidebar accordion for Admissions & Fees — separate from `step` itself
   // so collapsing it doesn't navigate away from whatever sub-screen is
   // currently open.
@@ -487,10 +508,6 @@ export default function App() {
           <p className="eyebrow text-slate-400 mt-0.5">
             {ROLE_LABEL[state.school.role] || "Administrator"}
           </p>
-          <button onClick={handleLogout}
-            className="mt-3 text-xs font-semibold text-slate-400 hover:text-slate-700 flex items-center gap-1.5">
-            <LogOut size={13} /> Sign out
-          </button>
           <button onClick={reset} className="mt-2 text-xs font-semibold text-slate-300 hover:text-red-500 block">
             Clear everything
           </button>
@@ -521,11 +538,41 @@ export default function App() {
             <button className="eyebrow text-slate-400 hover:text-slate-600 flex items-center gap-1.5">
               <RefreshCw size={13} /> Sync Now
             </button>
-            <div className="bg-white rounded-full pl-1.5 pr-5 py-1.5 border border-slate-100 shadow-[0_1px_3px_rgba(15,23,41,0.04)] flex items-center gap-2.5">
-              <span className="w-8 h-8 rounded-full bg-brand-600 text-white grid place-items-center font-bold text-sm">
-                {initial}
-              </span>
-              <span className="eyebrow text-slate-500">{state.school.adminEmail}</span>
+            <div className="relative" ref={userMenuRef}>
+              <button
+                type="button"
+                aria-haspopup="menu"
+                aria-expanded={userMenuOpen}
+                onClick={() => setUserMenuOpen((open) => !open)}
+                className="bg-white rounded-full pl-1.5 pr-3.5 py-1.5 border border-slate-100 shadow-[0_1px_3px_rgba(15,23,41,0.04)] flex items-center gap-2.5 hover:border-slate-200">
+                <span className="w-8 h-8 rounded-full bg-brand-600 text-white grid place-items-center font-bold text-sm shrink-0">
+                  {initial}
+                </span>
+                <span className="eyebrow text-slate-500">{state.school.adminEmail}</span>
+                <ChevronDown size={14} className={`text-slate-400 transition-transform shrink-0 ${userMenuOpen ? "rotate-180" : ""}`} />
+              </button>
+
+              {userMenuOpen && (
+                <div role="menu"
+                  className="absolute right-0 mt-2 w-64 bg-white rounded-2xl border border-slate-100 shadow-[0_20px_40px_-12px_rgba(15,23,41,0.18)] overflow-hidden z-20">
+                  <div className="px-4 py-3 border-b border-slate-50">
+                    <p className="text-sm font-bold truncate">{state.school.adminEmail}</p>
+                    <p className="eyebrow text-slate-400 mt-0.5">
+                      Role: {ROLE_LABEL[state.school.role] || "Administrator"}
+                    </p>
+                  </div>
+                  <button role="menuitem"
+                    onClick={() => { setUserMenuOpen(false); goToStep("school"); }}
+                    className="w-full flex items-center gap-2.5 px-4 py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-50 text-left">
+                    <KeyRound size={15} className="text-slate-400" /> Change Password
+                  </button>
+                  <button role="menuitem"
+                    onClick={() => { setUserMenuOpen(false); handleLogout(); }}
+                    className="w-full flex items-center gap-2.5 px-4 py-2.5 text-sm font-semibold text-slate-600 hover:bg-slate-50 text-left">
+                    <LogOut size={15} className="text-slate-400" /> Sign Out
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </div>
