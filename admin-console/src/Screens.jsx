@@ -19,6 +19,7 @@ import {
   MapPin,
   Percent,
   Plus,
+  Save,
   Search,
   ShieldCheck,
   Sparkles,
@@ -1102,6 +1103,18 @@ export function FeeScreen({ state, save, classLevels, feeHeads, academicYears, r
   const [copyOpen, setCopyOpen] = useState(false);
   const [unchargedCount, setUnchargedCount] = useState(0);
   const [generatingCharges, setGeneratingCharges] = useState(false);
+  // Edits type into here, not straight to the server — nothing is
+  // saved until "Save changes" is clicked. Keyed by field so a fee
+  // head's name and each of its three term amounts can be edited
+  // independently before saving; "amount:{headId}:{termIdx}" or
+  // "name:{headId}".
+  const [draft, setDraft] = useState({});
+  const [saving, setSaving] = useState(false);
+  const [justSaved, setJustSaved] = useState(false);
+  // A class/year switch means every row on screen is about to be
+  // replaced — any draft edits would otherwise silently apply to
+  // whatever loads next, which is worse than just discarding them.
+  useEffect(() => { setDraft({}); setJustSaved(false); }, [active, state.year]);
 
   const activeClass = classLevels.find((c) => c.name === active);
   const year = academicYears.find((y) => y.name === state.year);
@@ -1173,26 +1186,57 @@ export function FeeScreen({ state, save, classLevels, feeHeads, academicYears, r
     }),
   }));
 
-  async function setTermAmount(headId, termIdx, rupees) {
-    const amount = Math.max(0, Math.round(rupees || 0));
-    const row = rows.find((r) => r.id === headId);
-    const cell = row.terms[termIdx];
-    try {
-      if (cell.lineId && amount === 0) {
-        await api.delete(`/setup/fee-structure/${cell.lineId}`);
-      } else if (cell.lineId) {
-        await api.patch(`/setup/fee-structure/${cell.lineId}`, { amount: amount * 100 });
-      } else if (amount > 0) {
-        await api.post("/setup/fee-structure", {
-          academic_year_id: year.id, class_level_id: activeClass.id, fee_head_id: headId,
-          amount: amount * 100, term_no: termIdx + 1, due_on: dueOnForTerm(termIdx + 1, year),
-        });
-      } else {
-        return; // nothing to do — was 0, still 0
+  async function saveAll() {
+    setSaving(true);
+    setJustSaved(false);
+    const failures = [];
+
+    // Parallelized — several small writes at once instead of one
+    // request per field, the same reasoning behind every other batch
+    // fix this app has had: a handful of edited cells shouldn't cost
+    // more round trips than necessary just because they used to save
+    // individually, one on every blur.
+    await Promise.all(Object.entries(draft).map(async ([key, rawValue]) => {
+      try {
+        if (key.startsWith("name:")) {
+          const headId = key.slice("name:".length);
+          const name = String(rawValue).trim();
+          if (!name) return; // blank name — nothing sensible to save, leave the original
+          await api.patch(`/setup/fee-heads/${headId}`, { name });
+        } else {
+          const [, headId, termIdxStr] = key.split(":");
+          const termIdx = Number(termIdxStr);
+          const row = rows.find((r) => r.id === headId);
+          const cell = row.terms[termIdx];
+          const amount = Math.max(0, Math.round(Number(rawValue) || 0));
+          if (cell.lineId && amount === 0) {
+            await api.delete(`/setup/fee-structure/${cell.lineId}`);
+          } else if (cell.lineId) {
+            await api.patch(`/setup/fee-structure/${cell.lineId}`, { amount: amount * 100 });
+          } else if (amount > 0) {
+            await api.post("/setup/fee-structure", {
+              academic_year_id: year.id, class_level_id: activeClass.id, fee_head_id: headId,
+              amount: amount * 100, term_no: termIdx + 1, due_on: dueOnForTerm(termIdx + 1, year),
+            });
+          }
+        }
+      } catch (err) {
+        failures.push(err instanceof Error ? err.message : "Could not save that change.");
       }
-      await refetch();
-    } catch (err) {
-      alert(err instanceof Error ? err.message : "Could not save that amount.");
+    }));
+
+    await Promise.all([refetch(), refreshFeeHeads()]);
+    setSaving(false);
+    if (failures.length > 0) {
+      alert(`${failures.length} change${failures.length === 1 ? "" : "s"} could not be saved:\n\n` +
+        failures.join("\n"));
+      // Only the failed entries are worth keeping staged — anything
+      // that saved successfully shouldn't still show as unsaved.
+      setDraft({});
+    } else {
+      setDraft({});
+      setJustSaved(true);
+      setTimeout(() => setJustSaved(false), 3000);
     }
   }
 
@@ -1205,15 +1249,9 @@ export function FeeScreen({ state, save, classLevels, feeHeads, academicYears, r
     }
   }
 
-  async function renameHead(headId, name) {
-    if (!name.trim()) return;
-    try {
-      await api.patch(`/setup/fee-heads/${headId}`, { name: name.trim() });
-      await refreshFeeHeads();
-    } catch (err) {
-      alert(err instanceof Error ? err.message : "Could not rename that fee.");
-    }
-  }
+  // Renaming a fee head now goes through the same staged-draft flow as
+  // amounts (see saveAll above) rather than saving on blur — no longer
+  // needs its own dedicated save function.
 
   async function addComponent() {
     const name = window.prompt("Name this fee component (e.g. \"Computer lab fee\"):");
@@ -1292,7 +1330,20 @@ export function FeeScreen({ state, save, classLevels, feeHeads, academicYears, r
     <div>
       <PageHead title="Fee Structure"
         subtitle={`What each class is charged for ${state.year}, split across three terms. These amounts are copied onto a student when they enrol.`}>
-        <button className={ghost} onClick={() => setCopyOpen(!copyOpen)}>Copy to other classes</button>
+        <div className="flex items-center gap-3">
+          {justSaved && (
+            <span className="text-sm font-bold text-emerald-600 flex items-center gap-1.5">
+              <Check size={15} /> Saved
+            </span>
+          )}
+          {Object.keys(draft).length > 0 && (
+            <button className={primary} disabled={saving} onClick={saveAll}>
+              <Save size={15} />
+              {saving ? "Saving…" : `Save ${Object.keys(draft).length} change${Object.keys(draft).length === 1 ? "" : "s"}`}
+            </button>
+          )}
+          <button className={ghost} onClick={() => setCopyOpen(!copyOpen)}>Copy to other classes</button>
+        </div>
       </PageHead>
 
       {copyOpen && (
@@ -1375,21 +1426,26 @@ export function FeeScreen({ state, save, classLevels, feeHeads, academicYears, r
                 )}
                 {rows.map((r) => {
                   const total = r.terms.reduce((a, t) => a + t.amount, 0);
+                  const nameKey = `name:${r.id}`;
+                  const nameValue = draft[nameKey] !== undefined ? draft[nameKey] : r.name;
                   return (
                     <tr key={r.id} className="border-b border-slate-50">
                       <td className="px-5 py-1.5">
-                        <input className={cellInput} defaultValue={r.name} placeholder="Name this component"
-                          key={`${r.id}-name-${r.name}`}
-                          onBlur={(e) => renameHead(r.id, e.target.value)} />
+                        <input className={cellInput} value={nameValue} placeholder="Name this component"
+                          onChange={(e) => setDraft({ ...draft, [nameKey]: e.target.value })} />
                       </td>
-                      {TERMS.map((t, i) => (
-                        <td key={t} className="px-5 py-1.5">
-                          <input className={`${cellInput} text-right tabular-nums`} inputMode="numeric"
-                            defaultValue={r.terms[i].amount || ""} placeholder="0"
-                            key={`${r.id}-${i}-${r.terms[i].amount}`}
-                            onBlur={(e) => setTermAmount(r.id, i, +e.target.value)} />
-                        </td>
-                      ))}
+                      {TERMS.map((t, i) => {
+                        const amountKey = `amount:${r.id}:${i}`;
+                        const amountValue = draft[amountKey] !== undefined
+                          ? draft[amountKey] : (r.terms[i].amount || "");
+                        return (
+                          <td key={t} className="px-5 py-1.5">
+                            <input className={`${cellInput} text-right tabular-nums`} inputMode="numeric"
+                              value={amountValue} placeholder="0"
+                              onChange={(e) => setDraft({ ...draft, [amountKey]: e.target.value })} />
+                          </td>
+                        );
+                      })}
                       <td className="px-5 py-1.5 text-right text-sm font-bold tabular-nums">{inr(total)}</td>
                       <td className="px-5 py-1.5">
                         <button onClick={() => toggleOneTime(r.id, r.oneTime)}
