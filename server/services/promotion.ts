@@ -97,7 +97,7 @@ export async function preview(
 
   const enrollmentsResult = await pool.query(
     `SELECT e.id, e.student_id, e.stream_id, e.outcome,
-            s.admission_no, s.full_name AS student_name,
+            s.admission_no, s.full_name AS student_name, s.guardian_name, s.guardian_phone,
             cl.id AS class_id, cl.name AS class_name, cl.ladder_order,
             cl.is_terminal, sec.name AS section_name
      FROM enrollments e
@@ -138,6 +138,11 @@ export async function preview(
       enrollmentId: row.id, studentId: row.student_id, admissionNo: row.admission_no,
       studentName: row.student_name, fromClassName: row.class_name,
       fromSectionName: row.section_name, balance,
+      // Already selected on the same query above (no extra round trip) —
+      // added specifically so the promotion screen can show enough to
+      // tell apart two students who share a name, the same way Fee
+      // Collection already lets someone do.
+      guardianName: row.guardian_name, guardianPhone: row.guardian_phone,
     };
 
     if (row.outcome === "detained") {

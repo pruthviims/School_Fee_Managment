@@ -83,13 +83,15 @@ export async function createFeeStructureLine(
 
 export async function createStudent(
   schoolId: string,
-  overrides: Partial<{ admission_no: string; full_name: string }> = {},
+  overrides: Partial<{ admission_no: string; full_name: string;
+    guardian_name: string; guardian_phone: string }> = {},
 ) {
   const result = await pool.query(
-    `INSERT INTO students (school_id, admission_no, full_name)
-     VALUES ($1, $2, $3) RETURNING *`,
+    `INSERT INTO students (school_id, admission_no, full_name, guardian_name, guardian_phone)
+     VALUES ($1, $2, $3, $4, $5) RETURNING *`,
     [schoolId, overrides.admission_no ?? `ADM-${Date.now()}-${Math.random()}`,
-     overrides.full_name ?? "Test Student"],
+     overrides.full_name ?? "Test Student",
+     overrides.guardian_name ?? "", overrides.guardian_phone ?? ""],
   );
   return result.rows[0];
 }

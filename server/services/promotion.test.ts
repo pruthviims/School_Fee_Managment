@@ -46,8 +46,8 @@ afterAll(async () => {
   await pool.end();
 });
 
-async function studentInVIII() {
-  const student = await createStudent(school.id);
+async function studentInVIII(overrides = {}) {
+  const student = await createStudent(school.id, overrides);
   const enrollment = await createEnrollment(
     school.id, student.id, fromYear.id, classVIII.id, sectionVIII_A.id,
   );
@@ -63,6 +63,20 @@ describe("preview", () => {
     expect(result.moves[0].enrollmentId).toBe(enrollment.id);
     expect(result.moves[0].toClassName).toBe("IX");
     expect(isActionable(result.moves[0])).toBe(true);
+  });
+
+  it("includes guardian name and phone, so two students sharing a name can be told apart", async () => {
+    await studentInVIII({ full_name: "Divya Mishra", guardian_name: "Simran Mishra",
+      guardian_phone: "9465341213" });
+    await studentInVIII({ full_name: "Divya Mishra", guardian_name: "Rohan Mishra",
+      guardian_phone: "9812345670" });
+    const result = await preview({ fromYearId: fromYear.id, toYearId: toYear.id });
+
+    expect(result.moves).toHaveLength(2);
+    const guardianNames = result.moves.map((m: any) => m.guardianName).sort();
+    expect(guardianNames).toEqual(["Rohan Mishra", "Simran Mishra"]);
+    const guardianPhones = result.moves.map((m: any) => m.guardianPhone).sort();
+    expect(guardianPhones).toEqual(["9465341213", "9812345670"]);
   });
 
   it("blocks a detained student instead of proposing a move", async () => {
