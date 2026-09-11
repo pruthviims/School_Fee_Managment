@@ -15,8 +15,147 @@ import Papa from "papaparse";
 import { pool } from "../db/index.js";
 import { generateChargesBulk } from "./billing.js";
 import { recordPaymentsBulk } from "./collection.js";
+import type { PoolClient } from "pg";
 
 export class ImportServiceError extends Error {}
+
+/**
+ * [IMPORT] batch=<id> phase=<phase> rows=<n> durationMs=<ms>
+ *
+ * Deliberately excludes anything from a row's own data — names, phone
+ * numbers, emails, addresses, payment amounts — logging only the batch
+ * id (an opaque UUID, not identifying on its own), the phase name, a
+ * row count, and how long that phase took. Enough to see where time is
+ * actually going in Vercel's logs without putting student PII in a log
+ * stream that outlives this request.
+ */
+function logPhase(batchId: string, phase: string, rows: number, startedAt: number) {
+  console.log(`[IMPORT] batch=${batchId} phase=${phase} rows=${rows} durationMs=${Date.now() - startedAt}`);
+}
+
+interface StudentBulkRow {
+  admissionNo: string; fullName: string; dateOfBirth: string | null; gender: string;
+  bloodGroup: string; contactType: string; fatherName: string; fatherPhone: string;
+  fatherEmail: string; motherName: string; motherPhone: string; motherEmail: string;
+  guardianRelationship: string; guardianName: string; guardianPhone: string;
+  guardianEmail: string; address: string;
+}
+
+/**
+ * All of a batch's new students in a single INSERT instead of one per
+ * row — the same shape as generateChargesBulk and recordPaymentsBulk
+ * before it. Returns admission number -> student id rather than
+ * relying on RETURNING preserving input order: Postgres doesn't
+ * guarantee row order for a set-based unnest()-driven INSERT the way
+ * it would for a single-row one, so admission_no (already proven
+ * unique within this batch by stageImport's own validation, both
+ * against duplicates in the file and against existing students) is
+ * used as the actual join key instead — correct regardless of what
+ * order the rows come back in.
+ */
+async function createStudentsBulk(
+  schoolId: string, rows: StudentBulkRow[], createdBy: string | null, client: PoolClient,
+): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  if (rows.length === 0) return map;
+
+  const result = await client.query(
+    `INSERT INTO students
+       (school_id, admission_no, full_name, date_of_birth, gender, blood_group,
+        contact_type, father_name, father_phone, father_email,
+        mother_name, mother_phone, mother_email, guardian_relationship,
+        guardian_name, guardian_phone, guardian_email, address, created_by)
+     SELECT $1, admission_no, full_name, date_of_birth, gender, blood_group, contact_type,
+            father_name, father_phone, father_email, mother_name, mother_phone, mother_email,
+            guardian_relationship, guardian_name, guardian_phone, guardian_email, address, $2
+     FROM unnest(
+       $3::text[], $4::text[], $5::date[], $6::text[], $7::text[], $8::text[], $9::text[],
+       $10::text[], $11::text[], $12::text[], $13::text[], $14::text[], $15::text[],
+       $16::text[], $17::text[], $18::text[], $19::text[]
+     ) AS t(admission_no, full_name, date_of_birth, gender, blood_group, contact_type,
+            father_name, father_phone, father_email, mother_name, mother_phone, mother_email,
+            guardian_relationship, guardian_name, guardian_phone, guardian_email, address)
+     RETURNING id, admission_no`,
+    [
+      schoolId, createdBy,
+      rows.map((r) => r.admissionNo), rows.map((r) => r.fullName), rows.map((r) => r.dateOfBirth),
+      rows.map((r) => r.gender), rows.map((r) => r.bloodGroup), rows.map((r) => r.contactType),
+      rows.map((r) => r.fatherName), rows.map((r) => r.fatherPhone), rows.map((r) => r.fatherEmail),
+      rows.map((r) => r.motherName), rows.map((r) => r.motherPhone), rows.map((r) => r.motherEmail),
+      rows.map((r) => r.guardianRelationship), rows.map((r) => r.guardianName),
+      rows.map((r) => r.guardianPhone), rows.map((r) => r.guardianEmail), rows.map((r) => r.address),
+    ],
+  );
+  for (const row of result.rows) map.set(row.admission_no, row.id);
+  return map;
+}
+
+interface EnrollmentBulkRow {
+  admissionNo: string; // join key back to the student created above
+  classLevelId: string; sectionId: string; streamId: string | null; rollNo: number | null;
+}
+
+/**
+ * The enrollment sibling of createStudentsBulk, same reasoning: one
+ * INSERT for every enrollment in the batch, mapped back by student id
+ * rather than assumed RETURNING order. Safe here specifically because
+ * every enrollment in this list belongs to a student createStudentsBulk
+ * just created fresh in this same transaction — each student id is
+ * guaranteed to appear exactly once, so student id -> enrollment id is
+ * a true 1:1 mapping, not an approximation.
+ */
+async function createEnrollmentsBulk(
+  schoolId: string, academicYearId: string, rows: EnrollmentBulkRow[],
+  studentIdByAdmissionNo: Map<string, string>, createdBy: string | null, client: PoolClient,
+): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  if (rows.length === 0) return map;
+
+  const studentIds = rows.map((r) => studentIdByAdmissionNo.get(r.admissionNo)!);
+
+  const result = await client.query(
+    `INSERT INTO enrollments
+       (school_id, student_id, academic_year_id, class_level_id, section_id, stream_id,
+        roll_no, admission_type, created_by)
+     SELECT $1, student_id, $2, class_level_id, section_id, stream_id, roll_no, 'carry_over', $3
+     FROM unnest(
+       $4::uuid[], $5::uuid[], $6::uuid[], $7::uuid[], $8::int[]
+     ) AS t(student_id, class_level_id, section_id, stream_id, roll_no)
+     -- Imported students were already at the school; they are not new
+     -- admissions and must not be charged an admission fee — the
+     -- 'carry_over' admission_type is what selectChargeableLines uses
+     -- (via generateChargesBulk below) to correctly skip any one-time
+     -- (admission) fee line. Same rule as the row-by-row version this
+     -- replaces, just no longer a per-row literal.
+     RETURNING id, student_id`,
+    [
+      schoolId, academicYearId, createdBy,
+      studentIds, rows.map((r) => r.classLevelId), rows.map((r) => r.sectionId),
+      rows.map((r) => r.streamId), rows.map((r) => r.rollNo),
+    ],
+  );
+  for (const row of result.rows) map.set(row.student_id, row.id);
+  return map;
+}
+
+/**
+ * Links every import_row back to the student it produced, in one
+ * UPDATE ... FROM instead of one per row — the same purpose the
+ * original per-row UPDATE served (a row that's already been committed
+ * shows which student it became, e.g. if the batch needs auditing
+ * later), just no longer paying for it once per row.
+ */
+async function updateImportRowsBulk(
+  pairs: { rowId: string; studentId: string }[], client: PoolClient,
+): Promise<void> {
+  if (pairs.length === 0) return;
+  await client.query(
+    `UPDATE import_rows SET student_id = v.student_id
+     FROM unnest($1::uuid[], $2::uuid[]) AS v(row_id, student_id)
+     WHERE import_rows.id = v.row_id`,
+    [pairs.map((p) => p.rowId), pairs.map((p) => p.studentId)],
+  );
+}
 
 // What we need, and the header spellings seen in the wild.
 const FIELDS: Record<string, string[]> = {
@@ -444,10 +583,12 @@ export async function commitImport(
   batchId: string, { skipInvalid = true, committedBy = null }:
     { skipInvalid?: boolean; committedBy?: string | null } = {},
 ): Promise<{ created: number; skipped: number; unpriced: string[] }> {
+  const totalStart = Date.now();
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
 
+    let t = Date.now();
     const batchResult = await client.query(`SELECT * FROM import_batches WHERE id = $1 FOR UPDATE`,
       [batchId]);
     const batch = batchResult.rows[0];
@@ -455,6 +596,7 @@ export async function commitImport(
     if (batch.status !== "validated") {
       throw new ImportServiceError("This batch has already been committed or cancelled.");
     }
+    logPhase(batchId, "load_batch", 1, t);
 
     // generateCharges (used per-row before this became a bulk operation)
     // refused a closed academic year on its own, every time it was
@@ -472,6 +614,7 @@ export async function commitImport(
       throw new ImportServiceError(`${yearResult.rows[0].name} is closed; no new charges may be posted.`);
     }
 
+    t = Date.now();
     const rowsResult = await client.query(
       `SELECT * FROM import_rows WHERE batch_id = $1 ORDER BY line_no`, [batchId],
     );
@@ -482,7 +625,9 @@ export async function commitImport(
         `${bad.length} rows still have errors. Fix them or choose to skip.`,
       );
     }
+    logPhase(batchId, "load_rows", rows.length, t);
 
+    t = Date.now();
     const classesResult = await client.query(
       `SELECT id, name, requires_stream FROM class_levels WHERE school_id = $1`, [batch.school_id],
     );
@@ -503,17 +648,24 @@ export async function commitImport(
       [batch.school_id, batch.academic_year_id],
     );
     const pricedClassIds = new Set(pricedResult.rows.map((r) => r.class_level_id));
+    logPhase(batchId, "load_reference_data", classesResult.rows.length + streamsResult.rows.length, t);
 
-    let created = 0;
+    // ---- Pass 1: pure in-memory derivation, plus section resolution ----
+    // (the only DB work here — a dedicated, tiny cache keyed by class +
+    // section name, not one query per row; see the comment below).
+    // Nothing here creates a student, an enrollment, or touches
+    // import_rows yet — everything needed for those is collected into
+    // plain arrays first, so each of those becomes exactly one bulk
+    // operation afterward instead of many small ones interleaved with
+    // this derivation logic.
+    t = Date.now();
+    const studentRows: StudentBulkRow[] = [];
+    const enrollmentRows: EnrollmentBulkRow[] = [];
+    const rowIdByAdmissionNo = new Map<string, string>();
+    const classByAdmissionNo = new Map<string, { id: string; name: string }>();
+    const enrollmentRowByAdmissionNo = new Map<string, EnrollmentBulkRow>();
+    const pendingAmountByAdmissionNo = new Map<string, number>();
     const unpricedClassNames = new Set<string>();
-    // Charges are generated in one bulk pass after every row's student
-    // and enrollment exist, rather than once per row inline — collected
-    // here as the loop goes. Payments (only for rows with an amount
-    // actually paid, typically a minority) still happen per-row after
-    // that bulk pass, once real charges exist to allocate against.
-    const enrollmentsForCharges: { enrollmentId: string; schoolId: string; academicYearId: string;
-      classLevelId: string; streamId: string | null; admissionType: string }[] = [];
-    const pendingPayments: { enrollmentId: string; amountPaidPaise: number }[] = [];
     // Sections repeat far more than they vary — an entire class's worth
     // of rows shares the same handful of section names — so each
     // distinct (class, section name) pair is created at most once here,
@@ -555,23 +707,6 @@ export async function commitImport(
         sectionIdByKey.set(sectionKey, sectionId!);
       }
 
-      const studentResult = await client.query(
-        `INSERT INTO students
-           (school_id, admission_no, full_name, date_of_birth, gender, blood_group,
-            contact_type, father_name, father_phone, father_email,
-            mother_name, mother_phone, mother_email, guardian_relationship,
-            guardian_name, guardian_phone, guardian_email, address, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
-         RETURNING id`,
-        [batch.school_id, raw.admission_no ?? "", raw.full_name ?? "", raw._dob || null,
-         raw._gender ?? "", raw._blood_group ?? "",
-         contactType, raw.father_name ?? "", raw._father_phone ?? "", raw.father_email ?? "",
-         raw.mother_name ?? "", raw._mother_phone ?? "", raw.mother_email ?? "",
-         raw.guardian_relationship ?? "",
-         primaryName, primaryPhone, primaryEmail, raw.address ?? "", committedBy],
-      );
-      const studentId = studentResult.rows[0].id;
-
       let streamId: string | null = null;
       if (klass.requires_stream) {
         const key = (raw.stream ?? "").trim().toLowerCase();
@@ -580,41 +715,73 @@ export async function commitImport(
             [...streamsByLowerName.entries()].find(([k]) => k.includes(key))?.[1]?.id ?? null;
         }
       }
-
       const rollNo = /^\d+$/.test(raw.roll_no ?? "") ? parseInt(raw.roll_no, 10) : null;
+      const admissionNo = raw.admission_no ?? "";
 
-      const enrollmentResult = await client.query(
-        `INSERT INTO enrollments
-           (school_id, student_id, academic_year_id, class_level_id, section_id, stream_id,
-            roll_no, admission_type, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'carry_over', $8)
-         RETURNING id`,
-        // Imported students were already at the school; they are not new
-        // admissions and must not be charged an admission fee — the
-        // 'carry_over' admission_type is what selectChargeableLines uses
-        // (via generateChargesBulk below) to correctly skip any
-        // one-time (admission) fee line.
-        [batch.school_id, studentId, batch.academic_year_id, klass.id, sectionId, streamId,
-         rollNo, committedBy],
-      );
-      const enrollmentId = enrollmentResult.rows[0].id;
-
+      studentRows.push({
+        admissionNo, fullName: raw.full_name ?? "", dateOfBirth: raw._dob || null,
+        gender: raw._gender ?? "", bloodGroup: raw._blood_group ?? "", contactType,
+        fatherName: raw.father_name ?? "", fatherPhone: raw._father_phone ?? "",
+        fatherEmail: raw.father_email ?? "", motherName: raw.mother_name ?? "",
+        motherPhone: raw._mother_phone ?? "", motherEmail: raw.mother_email ?? "",
+        guardianRelationship: raw.guardian_relationship ?? "", guardianName: primaryName,
+        guardianPhone: primaryPhone, guardianEmail: primaryEmail, address: raw.address ?? "",
+      });
+      enrollmentRows.push({ admissionNo, classLevelId: klass.id, sectionId: sectionId!, streamId, rollNo });
+      enrollmentRowByAdmissionNo.set(admissionNo, enrollmentRows[enrollmentRows.length - 1]);
+      rowIdByAdmissionNo.set(admissionNo, row.id);
+      classByAdmissionNo.set(admissionNo, klass);
       if (pricedClassIds.has(klass.id)) {
-        enrollmentsForCharges.push({
-          enrollmentId, schoolId: batch.school_id, academicYearId: batch.academic_year_id,
-          classLevelId: klass.id, streamId, admissionType: "carry_over",
-        });
         const amountPaidPaise = Number(raw._amount_paid_paise ?? "0");
-        if (amountPaidPaise > 0) pendingPayments.push({ enrollmentId, amountPaidPaise });
+        if (amountPaidPaise > 0) pendingAmountByAdmissionNo.set(admissionNo, amountPaidPaise);
       } else {
         unpricedClassNames.add(klass.name);
       }
+    }
+    logPhase(batchId, "sections", sectionIdByKey.size, t);
 
-      await client.query(`UPDATE import_rows SET student_id = $1 WHERE id = $2`, [studentId, row.id]);
-      created++;
+    t = Date.now();
+    const studentIdByAdmissionNo = await createStudentsBulk(
+      batch.school_id, studentRows, committedBy, client,
+    );
+    logPhase(batchId, "students", studentRows.length, t);
+
+    t = Date.now();
+    const enrollmentIdByStudentId = await createEnrollmentsBulk(
+      batch.school_id, batch.academic_year_id, enrollmentRows, studentIdByAdmissionNo, committedBy, client,
+    );
+    logPhase(batchId, "enrollments", enrollmentRows.length, t);
+
+    t = Date.now();
+    const importRowPairs = [...studentIdByAdmissionNo.entries()].map(([admissionNo, studentId]) => ({
+      rowId: rowIdByAdmissionNo.get(admissionNo)!, studentId,
+    }));
+    await updateImportRowsBulk(importRowPairs, client);
+    logPhase(batchId, "update_import_rows", importRowPairs.length, t);
+
+    // ---- Charges and payments: pure in-memory assembly, then the two
+    // bulk operations that already existed before this pass. ----
+    const enrollmentsForCharges: { enrollmentId: string; schoolId: string; academicYearId: string;
+      classLevelId: string; streamId: string | null; admissionType: string }[] = [];
+    const pendingPayments: { enrollmentId: string; amountPaidPaise: number }[] = [];
+    for (const [admissionNo, studentId] of studentIdByAdmissionNo) {
+      const klass = classByAdmissionNo.get(admissionNo)!;
+      if (!pricedClassIds.has(klass.id)) continue;
+      const enrollmentId = enrollmentIdByStudentId.get(studentId)!;
+      const enrollmentRow = enrollmentRowByAdmissionNo.get(admissionNo)!;
+      enrollmentsForCharges.push({
+        enrollmentId, schoolId: batch.school_id, academicYearId: batch.academic_year_id,
+        classLevelId: klass.id, streamId: enrollmentRow.streamId, admissionType: "carry_over",
+      });
+      const amountPaidPaise = pendingAmountByAdmissionNo.get(admissionNo);
+      if (amountPaidPaise) pendingPayments.push({ enrollmentId, amountPaidPaise });
     }
 
+    t = Date.now();
     await generateChargesBulk(enrollmentsForCharges, { createdBy: committedBy, client });
+    logPhase(batchId, "charges", enrollmentsForCharges.length, t);
+
+    t = Date.now();
     await recordPaymentsBulk(
       pendingPayments.map((p) => ({
         enrollmentId: p.enrollmentId, schoolId: batch.school_id, amount: p.amountPaidPaise,
@@ -622,14 +789,21 @@ export async function commitImport(
       })),
       { client },
     );
+    logPhase(batchId, "payments", pendingPayments.length, t);
 
+    t = Date.now();
     await client.query(
       `UPDATE import_batches SET status = 'committed', committed_at = now() WHERE id = $1`,
       [batchId],
     );
+    logPhase(batchId, "finalize_batch", 1, t);
 
+    t = Date.now();
     await client.query("COMMIT");
-    return { created, skipped: bad.length, unpriced: [...unpricedClassNames] };
+    logPhase(batchId, "commit", 1, t);
+
+    logPhase(batchId, "total", rows.length, totalStart);
+    return { created: studentIdByAdmissionNo.size, skipped: bad.length, unpriced: [...unpricedClassNames] };
   } catch (err) {
     await client.query("ROLLBACK");
     throw err;
@@ -637,6 +811,7 @@ export async function commitImport(
     client.release();
   }
 }
+
 
 /** The blank sheet to hand a school that has nothing usable. */
 export function templateCsv(): string {
