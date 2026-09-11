@@ -1576,17 +1576,30 @@ export function PromoteTab({ academicYears, classLevels, ensureUnassignedSection
     }
   }
 
-  const classNamesInPreview = preview
+  // Memoized for the same reason Fee Collection's equivalent
+  // computations are: these recomputed over the full moves list (up
+  // to the whole school) on every render, including re-renders
+  // triggered by state that has nothing to do with the list itself.
+  // The ladder-order lookup is precomputed once per classLevels
+  // change rather than re-scanning classLevels twice per sort
+  // comparison, the same fix applied to the (much larger,
+  // enrollment-scanning) equivalent in Fee Collection.
+  const ladderOrderByClassName = useMemo(
+    () => new Map(classLevels.map((c) => [c.name, c.ladder_order])),
+    [classLevels],
+  );
+  const classNamesInPreview = useMemo(() => preview
     ? [...new Set(preview.moves.concat(preview.blocked).map((m) => m.fromClassName))]
-        .sort((a, b) => (classLevels.find((c) => c.name === a)?.ladder_order ?? 0)
-                       - (classLevels.find((c) => c.name === b)?.ladder_order ?? 0))
-    : [];
+        .sort((a, b) => (ladderOrderByClassName.get(a) ?? 0) - (ladderOrderByClassName.get(b) ?? 0))
+    : [], [preview, ladderOrderByClassName]);
 
   const q = query.trim().toLowerCase();
   const matches = (m) => !q || m.studentName.toLowerCase().includes(q) || m.admissionNo.toLowerCase().includes(q);
   const byClass = (list) => classFilter ? list.filter((m) => m.fromClassName === classFilter) : list;
-  const visibleMoves = preview ? byClass(preview.moves).filter(matches) : [];
-  const graduating = preview ? byClass(preview.graduating).filter(matches) : [];
+  const visibleMoves = useMemo(() => preview ? byClass(preview.moves).filter(matches) : [],
+    [preview, classFilter, q]); // eslint-disable-line
+  const graduating = useMemo(() => preview ? byClass(preview.graduating).filter(matches) : [],
+    [preview, classFilter, q]); // eslint-disable-line
 
   if (!priorYears.length) {
     return (
@@ -2444,6 +2457,83 @@ function ClassImport({ state, academicYears, classLevels, classLevelId, setClass
  * columns) — that's follow-up work; this exists to close the loop from
  * New Admission through to an actual payment against real data.
  */
+/**
+ * Extracted and memoized specifically so opening the payment or
+ * profile modal — a state change on the parent screen, but not a
+ * change to any row's own data — doesn't force React to re-execute
+ * every visible row's render function. At 1,500+ students shown at
+ * once (no class/section filter applied), that was real, repeated
+ * work for rows whose actual content never changed. React.memo's
+ * default shallow-prop comparison is enough here specifically because
+ * `e` is the same object reference across renders as long as the
+ * underlying enrollments list hasn't changed — filtered is memoized
+ * in the parent for exactly this reason — and onViewProfile /
+ * onCollectPayment are both stable callbacks, never recreated.
+ */
+const FeeCollectionRow = React.memo(function FeeCollectionRow({ e, onViewProfile, onCollectPayment }) {
+  const balance = e.ledger.balance / 100;
+  return (
+    <tr className="border-b border-slate-50 text-sm font-medium">
+      <td className="px-5 py-3">
+        <div className="flex items-center gap-3">
+          <span className="w-9 h-9 rounded-full bg-brand-50 text-brand-600 grid place-items-center font-bold text-xs shrink-0">
+            {e.full_name.charAt(0).toUpperCase()}
+          </span>
+          <span>
+            <button onClick={() => onViewProfile(e.id)}
+              className="block font-bold hover:text-brand-600 hover:underline text-left">
+              {e.full_name}
+            </button>
+            <span className="block eyebrow text-slate-400">ID: {e.admission_no}</span>
+          </span>
+        </div>
+      </td>
+      <td className="px-5 py-3 whitespace-nowrap font-semibold">{e.class_name}</td>
+      <td className="px-5 py-3 whitespace-nowrap">
+        {e.section_name === "Unassigned"
+          ? <span className="text-amber-600 font-bold text-xs">Unassigned</span>
+          : e.section_name}
+      </td>
+      <td className="px-5 py-3">
+        {e.guardian_name || <span className="text-slate-300">—</span>}
+      </td>
+      <td className="px-5 py-3 tabular-nums">
+        {e.guardian_phone || <span className="text-slate-300">—</span>}
+      </td>
+      <td className="px-5 py-3 text-slate-500 max-w-[220px] truncate" title={e.address || ""}>
+        {e.address || <span className="text-slate-300">—</span>}
+      </td>
+      <td className="px-5 py-3 text-right tabular-nums font-semibold">
+        {inr(e.ledger.charged / 100)}
+      </td>
+      <td className="px-5 py-3 text-right tabular-nums text-slate-500">
+        {e.ledger.paid ? inr(e.ledger.paid / 100) : <span className="text-slate-300">—</span>}
+      </td>
+      <td className="px-5 py-3 text-right tabular-nums font-semibold">
+        {balance > 0
+          ? <span className="text-red-500">{inr(balance)}</span>
+          : balance < 0
+            ? <span className="text-amber-600">Credit {inr(-balance)}</span>
+            : <span className="text-emerald-600">Paid up</span>}
+        {e.ledger.arrearsBalance > 0 && (
+          <span className="block text-[11px] font-bold text-amber-600 mt-0.5">
+            incl. {inr(e.ledger.arrearsBalance / 100)} carried forward
+          </span>
+        )}
+      </td>
+      <td className="px-5 py-3 text-right">
+        <button
+          onClick={() => onCollectPayment(e)}
+          className={balance > 0
+            ? "text-xs font-bold rounded-lg px-3 py-2 bg-brand-600 text-white hover:bg-brand-700 whitespace-nowrap flex items-center gap-1.5 ml-auto"
+            : "text-xs font-bold rounded-lg px-3 py-2 border border-slate-200 text-slate-500 hover:border-slate-300 whitespace-nowrap flex items-center gap-1.5 ml-auto"}>
+          <Wallet size={13} /> {balance > 0 ? "Collect" : "View"}
+        </button>
+      </td>
+    </tr>
+  );
+});
+
 export function ConcessionScreen({ academicYears, state, feeHeads, refreshFeeHeads }) {
   const [enrollments, setEnrollments] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -2452,6 +2542,18 @@ export function ConcessionScreen({ academicYears, state, feeHeads, refreshFeeHea
   const [classFilter, setClassFilter] = useState("");
   const [sectionFilter, setSectionFilter] = useState("");
   const [query, setQuery] = useState("");
+
+  // useCallback specifically so this stays the same function reference
+  // across renders — passed to a React.memo'd row, so a new reference
+  // every render (the normal behavior of an inline arrow function)
+  // would silently defeat that memoization entirely.
+  const handleCollectPayment = React.useCallback((e) => {
+    setPayingFor({
+      enrollmentId: e.id,
+      student: { name: e.full_name, admissionNo: e.admission_no,
+                 classLabel: `${e.class_name}-${e.section_name}` },
+    });
+  }, []);
 
   const year = academicYears.find((y) => y.name === state.year);
 
@@ -2471,6 +2573,43 @@ export function ConcessionScreen({ academicYears, state, feeHeads, refreshFeeHea
   // Switching class invalidates whatever section was picked for the
   // previous class — sections aren't shared across classes.
   useEffect(() => { setSectionFilter(""); }, [classFilter]);
+
+  // Hooks can't follow the early returns below — React requires the
+  // same hooks in the same order on every render, and "loading" or
+  // "no enrollments yet" returning early on some renders but not
+  // others would violate that. Computed here, before either return,
+  // even though their result is only used once we're past both.
+  //
+  // Options are derived from who's actually enrolled this year, not a
+  // separate classLevels fetch — the same approach Class Promotion's own
+  // filters already use, and it means a class with nobody in it yet
+  // doesn't clutter the filter with an empty option. Memoized: without
+  // this, opening the payment modal or the profile modal (unrelated
+  // state, but a re-render of this whole component either way) redid
+  // this and the filter below over the full roster every time — for a
+  // school with 1,500+ students, that's real, repeated work for
+  // nothing that actually changed.
+  //
+  // No explicit sort by ladder order needed here — enrollments already
+  // arrives ordered that way from the backend's own ORDER BY, and a
+  // Set built from an already-ordered array preserves that order.
+  const classNames = useMemo(
+    () => [...new Set(enrollments.map((e) => e.class_name))],
+    [enrollments],
+  );
+  const sectionNames = useMemo(
+    () => [...new Set(
+      enrollments.filter((e) => !classFilter || e.class_name === classFilter).map((e) => e.section_name),
+    )].sort(),
+    [enrollments, classFilter],
+  );
+
+  const q = query.trim().toLowerCase();
+  const filtered = useMemo(() => enrollments.filter((e) =>
+    (!classFilter || e.class_name === classFilter) &&
+    (!sectionFilter || e.section_name === sectionFilter) &&
+    (!q || e.full_name.toLowerCase().includes(q) || e.admission_no.toLowerCase().includes(q))),
+    [enrollments, classFilter, sectionFilter, q]);
 
   if (loading) {
     return (
@@ -2494,22 +2633,6 @@ export function ConcessionScreen({ academicYears, state, feeHeads, refreshFeeHea
     );
   }
 
-  // Options are derived from who's actually enrolled this year, not a
-  // separate classLevels fetch — the same approach Class Promotion's own
-  // filters already use, and it means a class with nobody in it yet
-  // doesn't clutter the filter with an empty option.
-  const classNames = [...new Set(enrollments.map((e) => e.class_name))]
-    .sort((a, b) => (enrollments.find((e) => e.class_name === a)?.ladder_order ?? 0)
-                   - (enrollments.find((e) => e.class_name === b)?.ladder_order ?? 0));
-  const sectionNames = [...new Set(
-    enrollments.filter((e) => !classFilter || e.class_name === classFilter).map((e) => e.section_name),
-  )].sort();
-
-  const q = query.trim().toLowerCase();
-  const filtered = enrollments.filter((e) =>
-    (!classFilter || e.class_name === classFilter) &&
-    (!sectionFilter || e.section_name === sectionFilter) &&
-    (!q || e.full_name.toLowerCase().includes(q) || e.admission_no.toLowerCase().includes(q)));
 
   return (
     <div>
@@ -2581,73 +2704,10 @@ export function ConcessionScreen({ academicYears, state, feeHeads, refreshFeeHea
               </tr>
             </thead>
             <tbody>
-              {filtered.map((e) => {
-                const balance = e.ledger.balance / 100;
-                return (
-                  <tr key={e.id} className="border-b border-slate-50 text-sm font-medium">
-                    <td className="px-5 py-3">
-                      <div className="flex items-center gap-3">
-                        <span className="w-9 h-9 rounded-full bg-brand-50 text-brand-600 grid place-items-center font-bold text-xs shrink-0">
-                          {e.full_name.charAt(0).toUpperCase()}
-                        </span>
-                        <span>
-                          <button onClick={() => setViewingProfileFor(e.id)}
-                            className="block font-bold hover:text-brand-600 hover:underline text-left">
-                            {e.full_name}
-                          </button>
-                          <span className="block eyebrow text-slate-400">ID: {e.admission_no}</span>
-                        </span>
-                      </div>
-                    </td>
-                    <td className="px-5 py-3 whitespace-nowrap font-semibold">{e.class_name}</td>
-                    <td className="px-5 py-3 whitespace-nowrap">
-                      {e.section_name === "Unassigned"
-                        ? <span className="text-amber-600 font-bold text-xs">Unassigned</span>
-                        : e.section_name}
-                    </td>
-                    <td className="px-5 py-3">
-                      {e.guardian_name || <span className="text-slate-300">—</span>}
-                    </td>
-                    <td className="px-5 py-3 tabular-nums">
-                      {e.guardian_phone || <span className="text-slate-300">—</span>}
-                    </td>
-                    <td className="px-5 py-3 text-slate-500 max-w-[220px] truncate" title={e.address || ""}>
-                      {e.address || <span className="text-slate-300">—</span>}
-                    </td>
-                    <td className="px-5 py-3 text-right tabular-nums font-semibold">
-                      {inr(e.ledger.charged / 100)}
-                    </td>
-                    <td className="px-5 py-3 text-right tabular-nums text-slate-500">
-                      {e.ledger.paid ? inr(e.ledger.paid / 100) : <span className="text-slate-300">—</span>}
-                    </td>
-                    <td className="px-5 py-3 text-right tabular-nums font-semibold">
-                      {balance > 0
-                        ? <span className="text-red-500">{inr(balance)}</span>
-                        : balance < 0
-                          ? <span className="text-amber-600">Credit {inr(-balance)}</span>
-                          : <span className="text-emerald-600">Paid up</span>}
-                      {e.ledger.arrearsBalance > 0 && (
-                        <span className="block text-[11px] font-bold text-amber-600 mt-0.5">
-                          incl. {inr(e.ledger.arrearsBalance / 100)} carried forward
-                        </span>
-                      )}
-                    </td>
-                    <td className="px-5 py-3 text-right">
-                      <button
-                        onClick={() => setPayingFor({
-                          enrollmentId: e.id,
-                          student: { name: e.full_name, admissionNo: e.admission_no,
-                                     classLabel: `${e.class_name}-${e.section_name}` },
-                        })}
-                        className={balance > 0
-                          ? "text-xs font-bold rounded-lg px-3 py-2 bg-brand-600 text-white hover:bg-brand-700 whitespace-nowrap flex items-center gap-1.5 ml-auto"
-                          : "text-xs font-bold rounded-lg px-3 py-2 border border-slate-200 text-slate-500 hover:border-slate-300 whitespace-nowrap flex items-center gap-1.5 ml-auto"}>
-                        <Wallet size={13} /> {balance > 0 ? "Collect" : "View"}
-                      </button>
-                    </td>
-                  </tr>
-                );
-              })}
+              {filtered.map((e) => (
+                <FeeCollectionRow key={e.id} e={e}
+                  onViewProfile={setViewingProfileFor} onCollectPayment={handleCollectPayment} />
+              ))}
             </tbody>
           </table>
         </div>
