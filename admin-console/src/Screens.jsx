@@ -2195,6 +2195,16 @@ function ClassImport({ state, academicYears, classLevels, classLevelId, setClass
             : "Every row came through cleanly."}
         </div>
       )}
+      {done && done.unpriced && done.unpriced.length > 0 && (
+        <div className="mb-6 bg-amber-50 border border-amber-200 text-amber-800 rounded-2xl px-5 py-4 text-sm">
+          <span className="font-bold">
+            {done.unpriced.length === 1 ? "This class hasn't" : "These classes haven't"} been priced yet
+          </span>{" "}
+          — students were still added, but no fees were charged for {done.unpriced.join(", ")}.
+          Set up Fee Structure for {done.unpriced.length === 1 ? "it" : "them"} before collecting
+          anything from these students.
+        </div>
+      )}
 
       {!batch && (
         <>
@@ -2298,14 +2308,23 @@ function ClassImport({ state, academicYears, classLevels, classLevelId, setClass
           </div>
 
           <div className={`${panel} overflow-x-auto`}>
-            <table className="w-full min-w-[900px]">
+            <table className="w-full min-w-[1000px]">
               <thead className="bg-slate-50/70">
-                <tr>{["Line", "Admission no.", "Name", "Class", "Sec", "Date of birth",
-                      "Guardian", "Phone", "What we found"].map((h) =>
+                <tr>{["Line", "Admission no.", "Name", "Class", "Sec", "Gender",
+                      "Parent / Guardian", "Amount Paid", "What we found"].map((h) =>
                   <th key={h} className={th}>{h}</th>)}</tr>
               </thead>
               <tbody>
-                {shown.map((r) => (
+                {shown.map((r) => {
+                  // Whichever contact actually applies to this row —
+                  // Parents or Guardian — shown as one readable name,
+                  // same as the primary-contact derivation the backend
+                  // itself uses, rather than a fixed "Guardian" column
+                  // that would show blank for a Parents-only row.
+                  const contactName = r.raw._contact_type === "parents"
+                    ? [r.raw.father_name, r.raw.mother_name].filter(Boolean).join(" / ")
+                    : r.raw.guardian_name;
+                  return (
                   <tr key={r.id} className={`border-b border-slate-50 text-sm font-medium ${
                     r.errors.length ? "bg-red-50/60" : r.warnings.length ? "bg-amber-50/50" : ""}`}>
                     <td className="px-5 py-2.5 text-slate-300 tabular-nums">{r.line_no}</td>
@@ -2318,9 +2337,12 @@ function ClassImport({ state, academicYears, classLevels, classLevelId, setClass
                       )}
                     </td>
                     <td className="px-5 py-2.5">{r.raw._section}</td>
-                    <td className="px-5 py-2.5">{displayDate(r.raw._dob) || <span className="text-slate-300">—</span>}</td>
-                    <td className="px-5 py-2.5">{r.raw.guardian_name || <span className="text-slate-300">—</span>}</td>
-                    <td className="px-5 py-2.5 tabular-nums">{r.raw._phone || <span className="text-slate-300">—</span>}</td>
+                    <td className="px-5 py-2.5 capitalize">{r.raw._gender || <span className="text-slate-300">—</span>}</td>
+                    <td className="px-5 py-2.5">{contactName || <span className="text-slate-300">—</span>}</td>
+                    <td className="px-5 py-2.5 text-right tabular-nums">
+                      {Number(r.raw._amount_paid_paise) > 0
+                        ? inr(Number(r.raw._amount_paid_paise) / 100) : <span className="text-slate-300">—</span>}
+                    </td>
                     <td className="px-5 py-2.5 max-w-xs">
                       {r.errors.map((m, i) => <div key={i} className="text-xs font-semibold text-red-600">{m}</div>)}
                       {r.warnings.map((m, i) => <div key={i} className="text-xs font-semibold text-amber-600">{m}</div>)}
@@ -2328,7 +2350,8 @@ function ClassImport({ state, academicYears, classLevels, classLevelId, setClass
                         <span className="text-xs text-slate-300">Looks fine</span>}
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -2341,7 +2364,9 @@ function ClassImport({ state, academicYears, classLevels, classLevelId, setClass
               </p>
               <p className="text-xs text-slate-500 mt-1 max-w-xl">
                 Imported students are recorded as continuing, not new admissions, so none
-                is charged an admission fee.
+                is charged an admission fee — their regular fees are still charged normally
+                for any class that's already priced, with anything paid so far applied
+                against them.
               </p>
             </div>
             <div className="flex gap-2.5">
