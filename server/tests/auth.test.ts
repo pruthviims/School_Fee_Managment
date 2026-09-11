@@ -132,6 +132,14 @@ describe("staff management", () => {
     expect(call.to).toBe("new-accountant@school.test");
     expect(call.text).toContain("uid=");
     expect(call.text).toContain("token=");
+    // The login screen asks for School ID as its own required field
+    // (the school's short_code, not derivable from the email address),
+    // and for the role to actually mean anything to whoever's reading
+    // it — without these, a newly invited person could set their
+    // password and then have no idea what to type to actually log in.
+    expect(call.text).toContain("Hi Priya Rao,");
+    expect(call.text).toContain("School ID: acc-test");
+    expect(call.text).toContain("Role: Accountant");
 
     // Returned directly, not just emailed — sendMail() silently just
     // logs to the server console instead of actually delivering
@@ -181,6 +189,11 @@ describe("staff management", () => {
     expect(resend.body.email_sent).toBe(true);
     expect(sendMailSpy).toHaveBeenCalledTimes(1);
     expect(sendMailSpy.mock.calls[0][0].to).toBe("never-got-the-email@school.test");
+    // No full_name was given at invite time — falls back to a generic
+    // greeting rather than "Hi ," with a blank left in it.
+    expect(sendMailSpy.mock.calls[0][0].text).toContain("Hi there,");
+    expect(sendMailSpy.mock.calls[0][0].text).toContain("School ID: acc-test");
+    expect(sendMailSpy.mock.calls[0][0].text).toContain("Role: Accountant");
   });
 
   it("resending an invite also works for an already-active staff member", async () => {
@@ -332,6 +345,13 @@ describe("password reset", () => {
   it("sends a working reset link for a real user, nothing for an unknown one", async () => {
     await request(app).post("/api/auth/password-reset").send({ email: "owner@school.test" });
     expect(sendMailSpy).toHaveBeenCalledTimes(1);
+    // A "forgot password" request isn't scoped to any one school — the
+    // same email could belong to memberships at several — so there's
+    // no single School ID or role to correctly show here, unlike the
+    // invite/resend-invite emails, which are always about one specific
+    // school. Confirmed absent, not just unchecked.
+    expect(sendMailSpy.mock.calls[0][0].text).not.toContain("School ID:");
+    expect(sendMailSpy.mock.calls[0][0].text).not.toContain("Role:");
 
     sendMailSpy.mockClear();
     await request(app).post("/api/auth/password-reset").send({ email: "nobody-at-all@school.test" });

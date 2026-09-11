@@ -296,20 +296,36 @@ authRouter.post("/password-reset/confirm", async (req, res) => {
 });
 
 export async function makeAndSendCredentialEmail(
-  user: { id: string; password_hash: string | null; email: string },
-  { subject, intro }: { subject: string; intro: string },
+  user: { id: string; password_hash: string | null; email: string; full_name?: string },
+  { subject, intro, schoolShortCode, roleLabel }:
+    { subject: string; intro: string; schoolShortCode?: string; roleLabel?: string },
 ): Promise<{ url: string; emailSent: boolean }> {
   const token = makeCredentialToken(user);
   const uid = user.id;
   const frontendUrl = (process.env.FRONTEND_URL || "http://localhost:5173").replace(/\/$/, "");
   const resetUrl = `${frontendUrl}/reset-password?uid=${uid}&token=${token}`;
 
+  // School ID and role are shown as their own labelled lines, not
+  // folded into the intro sentence — the login screen asks for School
+  // ID as a separate required field alongside email and password (it's
+  // the school's short_code, not something guessable from the email
+  // address), so it needs to actually be legible on its own, not
+  // buried in prose. Both are optional here: the "forgot password"
+  // flow that also calls this has no single school to name (a user's
+  // email isn't scoped to one), so it correctly gets neither.
+  const details = [
+    schoolShortCode ? `School ID: ${schoolShortCode}` : null,
+    roleLabel ? `Role: ${roleLabel}` : null,
+  ].filter(Boolean).join("\n");
+
   let emailSent = true;
   try {
     await sendMail({
       to: user.email,
       subject,
-      text: `${intro}\n\n${resetUrl}\n\n` +
+      text: `Hi ${user.full_name || "there"},\n\n${intro}\n\n` +
+        (details ? `${details}\n\n` : "") +
+        `${resetUrl}\n\n` +
         `This link works for ${CREDENTIAL_TOKEN_TTL_HOURS} hours. If you didn't expect this ` +
         "email, you can ignore it — nothing changes until the link is used.",
     });

@@ -108,6 +108,8 @@ staffRouter.post("/", async (req, res) => {
       intro: `${req.user!.full_name || req.user!.email} has given you ` +
         `${ROLE_LABEL[role as Role]} access to ${req.school!.name} on the Fee Portal. ` +
         "Set your password to get started:",
+      schoolShortCode: req.school!.short_code,
+      roleLabel: ROLE_LABEL[role as Role],
     });
 
     res.status(201).json({
@@ -152,11 +154,13 @@ staffRouter.post("/:membershipId/resend-invite", async (req, res) => {
   // one, without needing a separate "reset a colleague's password"
   // mechanism duplicating this one.
   const invite = await makeAndSendCredentialEmail(
-    { id: membership.user_id, password_hash: null, email: membership.email },
+    { id: membership.user_id, password_hash: null, email: membership.email, full_name: membership.full_name },
     {
       subject: `Your ${req.school!.name} Fee Portal access`,
       intro: `${req.user!.full_name || req.user!.email} sent you a link to set your ` +
         `password for ${req.school!.name} on the Fee Portal:`,
+      schoolShortCode: req.school!.short_code,
+      roleLabel: ROLE_LABEL[membership.role as Role],
     },
   );
 
