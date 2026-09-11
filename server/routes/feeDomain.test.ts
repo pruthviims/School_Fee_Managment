@@ -13,7 +13,7 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { app } from "../app.js";
 import { pool } from "../db/index.js";
 import { createMembership, createSchool, createUser, resetDb } from "../tests/helpers.js";
-import { resetFeeDomain } from "../tests/fixtures.js";
+import { createEnrollment, createStudent, resetFeeDomain } from "../tests/fixtures.js";
 
 let school: any;
 let owner: any;
@@ -326,20 +326,28 @@ describe("setup routes", () => {
   });
 
   describe("generating missing charges for a class priced after students were already enrolled", () => {
-    async function importOneUnpriced(cookie: string, extraCsv = "") {
+    // Import itself now refuses a row targeting an unpriced class (same
+    // rule as everywhere else a student gets enrolled), so that path
+    // can no longer produce an enrollment with no charges — this
+    // endpoint remains a real safety net regardless: legacy data from
+    // before that rule existed, or any other future way an enrollment
+    // ends up missing its charges. Simulated directly here (bypassing
+    // both admission and import, which now both correctly refuse this)
+    // rather than through a path the app no longer allows.
+    async function enrollWithoutCharges(cookie: string) {
       const year = await request(app).post("/api/setup/academic-years").set("Cookie", cookie)
         .send({ name: "2026-27", starts_on: "2026-06-01", ends_on: "2027-03-31", status: "active" });
       const classLevel = await request(app).post("/api/setup/class-levels").set("Cookie", cookie)
-        .send({ name: "IX", ladder_order: 9, stage: "middle" }); // deliberately never priced yet
-
-      const csv = "Admission No,Name,Class,Gender,Amount Paid So Far\n" +
-        `2026/500,Late Priced Student,IX,Male,12000\n${extraCsv}`;
-      const stage = await request(app).post("/api/import/stage").set("Cookie", cookie).send({
-        academic_year_id: year.body.id, filename: "roll.csv", content: csv,
+        .send({ name: "IX", ladder_order: 9, stage: "middle" });
+      const section = await request(app).post("/api/setup/sections").set("Cookie", cookie).send({
+        academic_year_id: year.body.id, class_level_id: classLevel.body.id, name: "A",
       });
-      await request(app).post(`/api/import/batches/${stage.body.id}/commit`)
-        .set("Cookie", cookie).send({});
-      return { year: year.body, classLevel: classLevel.body };
+      const student = await createStudent(school.id, { admission_no: "2026/500", full_name: "Late Priced Student" });
+      const enrollment = await createEnrollment(
+        school.id, student.id, year.body.id, classLevel.body.id, section.body.id,
+        { admission_type: "carry_over" },
+      );
+      return { year: year.body, classLevel: classLevel.body, student, enrollment };
     }
 
     async function priceIt(cookie: string, yearId: string, classId: string) {
@@ -351,9 +359,27 @@ describe("setup routes", () => {
       });
     }
 
+    // Simulates the exact real gap this recovers from: a row imported
+    // before its class was priced, back when that was still possible —
+    // the amount_paid figure sitting unused in import_rows.raw, never
+    // lost, just waiting for something real to apply it to.
+    async function leaveOpeningBalanceRecord(studentId: string, amountPaise: number) {
+      const batch = await pool.query(
+        `INSERT INTO import_batches (school_id, academic_year_id, filename, column_map, status, total_rows)
+         VALUES ($1, (SELECT academic_year_id FROM enrollments WHERE student_id = $2 LIMIT 1),
+                 'legacy.csv', '{}', 'committed', 1) RETURNING id`,
+        [school.id, studentId],
+      );
+      await pool.query(
+        `INSERT INTO import_rows (school_id, batch_id, line_no, raw, student_id)
+         VALUES ($1, $2, 1, $3, $4)`,
+        [school.id, batch.rows[0].id, JSON.stringify({ _amount_paid_paise: String(amountPaise) }), studentId],
+      );
+    }
+
     it("reports how many enrolled students have no charges yet", async () => {
       const cookie = await loginAs("owner@http.test");
-      const { year, classLevel } = await importOneUnpriced(cookie);
+      const { year, classLevel } = await enrollWithoutCharges(cookie);
 
       const before = await request(app)
         .get(`/api/setup/fee-structure/uncharged-count?academic_year_id=${year.id}&class_level_id=${classLevel.id}`)
@@ -361,9 +387,10 @@ describe("setup routes", () => {
       expect(before.body.uncharged).toBe(1);
     });
 
-    it("generates the missing charges once the class is priced, and recovers the opening-balance payment from import", async () => {
+    it("generates the missing charges once the class is priced, and recovers an opening-balance payment left over from before this rule existed", async () => {
       const cookie = await loginAs("owner@http.test");
-      const { year, classLevel } = await importOneUnpriced(cookie);
+      const { year, classLevel, student } = await enrollWithoutCharges(cookie);
+      await leaveOpeningBalanceRecord(student.id, 1200000); // ₹12,000
       await priceIt(cookie, year.id, classLevel.id);
 
       const res = await request(app).post("/api/setup/fee-structure/generate-missing-charges")
@@ -371,7 +398,7 @@ describe("setup routes", () => {
       expect(res.status).toBe(200);
       expect(res.body.studentsBilled).toBe(1);
       expect(res.body.chargesCreated).toBe(1);
-      expect(res.body.paymentsRecorded).toBe(1); // the ₹12,000 from the import sheet, recovered
+      expect(res.body.paymentsRecorded).toBe(1); // the ₹12,000 left over, recovered
 
       const enrollment = await pool.query(
         `SELECT e.id FROM enrollments e JOIN students s ON s.id = e.student_id
@@ -391,7 +418,8 @@ describe("setup routes", () => {
 
     it("running it twice never duplicates the charge or the recovered payment", async () => {
       const cookie = await loginAs("owner@http.test");
-      const { year, classLevel } = await importOneUnpriced(cookie);
+      const { year, classLevel, student } = await enrollWithoutCharges(cookie);
+      await leaveOpeningBalanceRecord(student.id, 1200000);
       await priceIt(cookie, year.id, classLevel.id);
 
       await request(app).post("/api/setup/fee-structure/generate-missing-charges")
@@ -413,7 +441,7 @@ describe("setup routes", () => {
 
     it("refuses if the class still isn't priced", async () => {
       const cookie = await loginAs("owner@http.test");
-      const { year, classLevel } = await importOneUnpriced(cookie);
+      const { year, classLevel } = await enrollWithoutCharges(cookie);
       // Deliberately never priced.
       const res = await request(app).post("/api/setup/fee-structure/generate-missing-charges")
         .set("Cookie", cookie).send({ academic_year_id: year.id, class_level_id: classLevel.id });
@@ -422,7 +450,7 @@ describe("setup routes", () => {
 
     it("front desk cannot generate missing charges (manage_fee_structure required)", async () => {
       const ownerCookie = await loginAs("owner@http.test");
-      const { year, classLevel } = await importOneUnpriced(ownerCookie);
+      const { year, classLevel } = await enrollWithoutCharges(ownerCookie);
       await priceIt(ownerCookie, year.id, classLevel.id);
       const deskCookie = await loginAs("desk@http.test");
       const res = await request(app).post("/api/setup/fee-structure/generate-missing-charges")

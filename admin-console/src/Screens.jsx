@@ -1100,6 +1100,8 @@ export function FeeScreen({ state, save, classLevels, feeHeads, academicYears, r
   const [rawLines, setRawLines] = useState([]);
   const [loading, setLoading] = useState(true);
   const [copyOpen, setCopyOpen] = useState(false);
+  const [unchargedCount, setUnchargedCount] = useState(0);
+  const [generatingCharges, setGeneratingCharges] = useState(false);
 
   const activeClass = classLevels.find((c) => c.name === active);
   const year = academicYears.find((y) => y.name === state.year);
@@ -1117,6 +1119,17 @@ export function FeeScreen({ state, save, classLevels, feeHeads, academicYears, r
       const lines = await api.get(
         `/setup/fee-structure?academic_year_id=${year.id}&class_level_id=${activeClass.id}`);
       setRawLines(lines);
+      // Worth checking any time this class's pricing might have just
+      // changed — most often relevant right after a class that had
+      // students enrolled before it was priced (typically via import)
+      // finally gets its first fee line.
+      if (lines.some((l) => l.amount > 0)) {
+        const uncharged = await api.get(
+          `/setup/fee-structure/uncharged-count?academic_year_id=${year.id}&class_level_id=${activeClass.id}`);
+        setUnchargedCount(uncharged.uncharged);
+      } else {
+        setUnchargedCount(0);
+      }
     } catch (err) {
       alert(err instanceof Error ? err.message : "Could not load the fee structure.");
     } finally {
@@ -1124,6 +1137,27 @@ export function FeeScreen({ state, save, classLevels, feeHeads, academicYears, r
     }
   }
   useEffect(() => { refetch(); }, [active, state.year, classLevels, academicYears]); // eslint-disable-line
+
+  async function generateMissingCharges() {
+    setGeneratingCharges(true);
+    try {
+      const result = await api.post("/setup/fee-structure/generate-missing-charges", {
+        academic_year_id: year.id, class_level_id: activeClass.id,
+      });
+      setUnchargedCount(0);
+      alert(
+        `Generated charges for ${result.studentsBilled} student${result.studentsBilled === 1 ? "" : "s"}.` +
+        (result.paymentsRecorded > 0
+          ? ` ${result.paymentsRecorded} opening-balance payment${result.paymentsRecorded === 1 ? "" : "s"} ` +
+            "from import also applied."
+          : ""),
+      );
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Could not generate those charges.");
+    } finally {
+      setGeneratingCharges(false);
+    }
+  }
 
   // The same {id, name, terms, oneTime} shape this screen has always
   // rendered — id is the fee_head's id (shared across classes), each
@@ -1263,6 +1297,22 @@ export function FeeScreen({ state, save, classLevels, feeHeads, academicYears, r
 
       {copyOpen && (
         <CopyPanel active={active} classLevels={classLevels} onCopy={copyTo} onCancel={() => setCopyOpen(false)} />
+      )}
+
+      {unchargedCount > 0 && (
+        <div className="bg-amber-50 border border-amber-200 text-amber-800 rounded-2xl px-5 py-4 mb-5 text-sm flex flex-wrap items-center justify-between gap-3">
+          <span>
+            <span className="font-bold">
+              {unchargedCount} student{unchargedCount === 1 ? "" : "s"} in {active}
+            </span>{" "}
+            {unchargedCount === 1 ? "has" : "have"} no charges yet — most often because they
+            were enrolled (typically via import) before this class was priced.
+          </span>
+          <button onClick={generateMissingCharges} disabled={generatingCharges}
+            className="shrink-0 text-xs font-bold rounded-lg px-4 py-2 bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50">
+            {generatingCharges ? "Generating…" : "Generate their charges now"}
+          </button>
+        </div>
       )}
 
       <div className="grid lg:grid-cols-[200px_1fr] gap-5 items-start">

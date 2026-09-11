@@ -259,6 +259,19 @@ export async function stageImport(input: StageImportInput): Promise<unknown> {
     );
     const knownClasses = new Set(classesResult.rows.map((r) => r.name));
 
+    // Same rule enforced everywhere else a student gets enrolled
+    // (New Admission, Class Promotion, transport assignment): a class
+    // with no priced fee_structure line at all refuses the row outright,
+    // rather than admitting for free. Checked once per academic year
+    // here, not per row.
+    const pricedResult = await client.query(
+      `SELECT DISTINCT cl.name FROM fee_structures fs
+       JOIN class_levels cl ON cl.id = fs.class_level_id
+       WHERE fs.school_id = $1 AND fs.academic_year_id = $2 AND fs.amount > 0`,
+      [input.schoolId, input.academicYearId],
+    );
+    const pricedClasses = new Set(pricedResult.rows.map((r) => r.name));
+
     const existingResult = await client.query(
       `SELECT admission_no FROM students WHERE school_id = $1`, [input.schoolId],
     );
@@ -314,6 +327,8 @@ export async function stageImport(input: StageImportInput): Promise<unknown> {
         );
       } else if (!knownClasses.has(klass)) {
         errors.push(`${klass} is not set up for this school yet.`);
+      } else if (!pricedClasses.has(klass)) {
+        errors.push(`${klass} has no fees set up yet for this year. Set up Fee Structure for it first.`);
       }
 
       const section = (cell("section") || "A").toUpperCase().slice(0, 10);

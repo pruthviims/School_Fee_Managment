@@ -34,8 +34,17 @@ describe("import routes", () => {
     const cookie = await loginAs("owner@import.test");
     const year = await request(app).post("/api/setup/academic-years").set("Cookie", cookie)
       .send({ name: "2026-27", starts_on: "2026-06-01", ends_on: "2027-03-31", status: "active" });
-    await request(app).post("/api/setup/class-levels").set("Cookie", cookie)
+    const classLevel = await request(app).post("/api/setup/class-levels").set("Cookie", cookie)
       .send({ name: "VIII", ladder_order: 8, stage: "middle" });
+    // Same rule enforced everywhere else a student gets enrolled: import
+    // now refuses a row targeting an unpriced class, so this baseline
+    // test needs VIII actually priced first.
+    const feeHead = await request(app).post("/api/setup/fee-heads").set("Cookie", cookie)
+      .send({ name: "Tuition fee" });
+    await request(app).post("/api/setup/fee-structure").set("Cookie", cookie).send({
+      academic_year_id: year.body.id, class_level_id: classLevel.body.id,
+      fee_head_id: feeHead.body.id, amount: 4000000, due_on: "2026-06-15",
+    });
 
     const csv = "Adm No,Name,Class\n2026/1,Good Row,VIII\n,Bad Row,VIII\n";
     const stage = await request(app).post("/api/import/stage").set("Cookie", cookie).send({
@@ -199,7 +208,7 @@ describe("import routes", () => {
       expect(ledger.body.balance).toBe(4000000 - 1500000); // the real remaining balance
     });
 
-    it("still creates the student when their class isn't priced, but generates no charges and reports it", async () => {
+    it("refuses a row targeting a class that isn't priced yet, same rule as everywhere else a student gets enrolled", async () => {
       const cookie = await loginAs("owner@import.test");
       const year = await request(app).post("/api/setup/academic-years").set("Cookie", cookie)
         .send({ name: "2026-27", starts_on: "2026-06-01", ends_on: "2027-03-31", status: "active" });
@@ -210,19 +219,16 @@ describe("import routes", () => {
       const stage = await request(app).post("/api/import/stage").set("Cookie", cookie).send({
         academic_year_id: year.body.id, filename: "roll.csv", content: csv,
       });
+      expect(stage.body.valid_rows).toBe(0); // refused at staging, not silently let through
+      const rows = await request(app).get(`/api/import/batches/${stage.body.id}/rows`).set("Cookie", cookie);
+      expect(rows.body.rows[0].errors[0]).toContain("no fees set up yet");
+
       const commit = await request(app).post(`/api/import/batches/${stage.body.id}/commit`)
         .set("Cookie", cookie).send({});
-      expect(commit.status).toBe(200);
-      expect(commit.body.created).toBe(1); // student still created
-      expect(commit.body.unpriced).toEqual(["IX"]); // but flagged as unbilled
+      expect(commit.body.created).toBe(0); // nothing created at all — no student, no orphaned record
 
-      const charges = await pool.query(
-        `SELECT c.id FROM charges c
-         JOIN enrollments e ON e.id = c.enrollment_id
-         JOIN students s ON s.id = e.student_id
-         WHERE s.admission_no = '2026/4'`,
-      );
-      expect(charges.rows).toHaveLength(0); // no charges generated
+      const student = await pool.query(`SELECT id FROM students WHERE admission_no = '2026/4'`);
+      expect(student.rows).toHaveLength(0);
     });
   });
 });

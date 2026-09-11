@@ -5,7 +5,7 @@ import {
   readRows, stageImport, suggestColumnMap, templateCsv,
 } from "./importer.js";
 import { createSchool, resetDb } from "../tests/helpers.js";
-import { createAcademicYear, createClassLevel, resetFeeDomain } from "../tests/fixtures.js";
+import { createAcademicYear, createClassLevel, createFeeHead, createFeeStructureLine, resetFeeDomain } from "../tests/fixtures.js";
 
 let school: any;
 let year: any;
@@ -15,8 +15,15 @@ beforeEach(async () => {
   await resetDb();
   school = await createSchool({ short_code: "import-test" });
   year = await createAcademicYear(school.id);
-  await createClassLevel(school.id, { name: "VIII", ladder_order: 8 });
-  await createClassLevel(school.id, { name: "1st PU", ladder_order: 11, stage: "puc", requires_stream: true });
+  const viii = await createClassLevel(school.id, { name: "VIII", ladder_order: 8 });
+  const pu1 = await createClassLevel(school.id, { name: "1st PU", ladder_order: 11, stage: "puc", requires_stream: true });
+  // Same rule enforced everywhere else a student gets enrolled: a class
+  // needs to actually be priced before anyone (including import) can be
+  // put into it — these tests exercise commitImport, which now assumes
+  // stageImport already refused any row targeting an unpriced class.
+  const feeHead = await createFeeHead(school.id);
+  await createFeeStructureLine(school.id, year.id, viii.id, feeHead.id);
+  await createFeeStructureLine(school.id, year.id, pu1.id, feeHead.id);
 });
 
 afterAll(async () => {
