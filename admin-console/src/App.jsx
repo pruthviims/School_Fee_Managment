@@ -181,6 +181,11 @@ export default function App() {
   // `step`, since opening it isn't navigation and shouldn't affect
   // whatever screen is currently showing.
   const [userMenuOpen, setUserMenuOpen] = useState(false);
+  // Set when Quick Balance Check's search picks a result — read once by
+  // Fee Collection to land directly on that student's own class/section
+  // and search, then cleared, rather than a second student-detail view
+  // built just for this sidebar search.
+  const [jumpToStudent, setJumpToStudent] = useState(null);
   const userMenuRef = useRef(null);
   useEffect(() => {
     if (!userMenuOpen) return;
@@ -451,11 +456,8 @@ export default function App() {
           <p className="eyebrow text-brand-600 mt-1.5">Fee Portal</p>
         </div>
 
-        {/* Searches state.students, which stays empty for anyone admitted
-            through the real backend now — a known gap until Quick Balance
-            Check itself is wired to real enrollments. Selecting a result
-            just goes to Fee Collection, where a real search still works. */}
-        <QuickBalanceSearch state={state} onSelect={() => setStep("roll")} />
+        <QuickBalanceSearch academicYears={academicYears} yearName={state.year}
+          onJump={(target) => { setJumpToStudent(target); setStep("roll"); }} />
 
         <nav className="flex lg:flex-col overflow-x-auto px-3 pb-3 gap-1.5">
           {NAV.filter((n) =>
@@ -637,7 +639,8 @@ export default function App() {
 
         {step === "roll" && (
           <ConcessionScreen academicYears={academicYears} state={state} feeHeads={feeHeads}
-            refreshFeeHeads={refreshFeeHeads} />
+            refreshFeeHeads={refreshFeeHeads}
+            jumpToStudent={jumpToStudent} onJumpHandled={() => setJumpToStudent(null)} />
         )}
         {step === "newadm" && (
           <NewAdmissionTab state={state} save={setState}

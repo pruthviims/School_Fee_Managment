@@ -465,17 +465,32 @@ function TransportAssignmentPanel({ enrollmentId, academicYearId, onChanged, onA
 /**
  * Always-available "how much does this one student owe" lookup, meant to
  * live in the sidebar so it works from any screen without navigating to
- * Fee Collection and searching there first. Selecting a result opens the
- * same PaymentModal every other entry point uses, rather than building a
- * second, view-only balance display that would need to be kept in sync.
+ * Fee Collection and searching there first. Selecting a result jumps to
+ * Fee Collection pre-filtered to that student's own class/section and
+ * search, landing directly on their row rather than a second, view-only
+ * balance display that would need to be kept in sync with the real one.
+ *
+ * Fetches the current year's roster (with ledger totals already
+ * computed server-side, via include_ledger=1 — the same call Fee
+ * Collection itself makes) once per year, then filters client-side as
+ * the office types — same pattern Fee Collection's own search already
+ * uses, not a new one invented for this.
  */
-export function QuickBalanceSearch({ state, onSelect }) {
+export function QuickBalanceSearch({ academicYears, yearName, onJump }) {
   const [query, setQuery] = useState("");
+  const [roster, setRoster] = useState([]);
+  const year = academicYears.find((y) => y.name === yearName);
+
+  useEffect(() => {
+    if (!year) { setRoster([]); return; }
+    api.get(`/students/enrollments?academic_year_id=${year.id}&include_ledger=1`)
+      .then(setRoster).catch(() => setRoster([]));
+  }, [year?.id]); // eslint-disable-line
+
   const q = query.trim().toLowerCase();
   const matches = q.length >= 2
-    ? state.students
-        .filter((s) => inYear(s, state.year))
-        .filter((s) => s.name.toLowerCase().includes(q) || s.admissionNo.toLowerCase().includes(q))
+    ? roster
+        .filter((s) => s.full_name.toLowerCase().includes(q) || s.admission_no.toLowerCase().includes(q))
         .slice(0, 6)
     : [];
 
@@ -501,16 +516,18 @@ export function QuickBalanceSearch({ state, onSelect }) {
               No students match "{query}".
             </p>
           ) : matches.map((s) => {
-            const fee = computeFee(s, state);
-            const balance = fee.net - paidByStudent(state, s);
+            const balance = (s.ledger?.balance ?? 0) / 100;
             return (
               <button key={s.id}
-                onClick={() => { onSelect(s); setQuery(""); }}
+                onClick={() => {
+                  onJump({ classLevelName: s.class_name, sectionName: s.section_name, query: s.admission_no });
+                  setQuery("");
+                }}
                 className="w-full flex items-center justify-between gap-3 px-3 py-2.5 hover:bg-slate-50 text-left border-b border-slate-50 last:border-0">
                 <span className="min-w-0">
-                  <span className="block text-sm font-bold truncate">{s.name}</span>
+                  <span className="block text-sm font-bold truncate">{s.full_name}</span>
                   <span className="block eyebrow text-slate-400 truncate">
-                    {s.className}{s.section ? `-${s.section}` : ""} · {s.admissionNo}
+                    {s.class_name}-{s.section_name} · {s.admission_no}
                   </span>
                 </span>
                 <span className={`text-sm font-extrabold tabular-nums shrink-0 ${
@@ -2687,7 +2704,8 @@ const FeeCollectionRow = React.memo(function FeeCollectionRow({ e, onViewProfile
   );
 });
 
-export function ConcessionScreen({ academicYears, state, feeHeads, refreshFeeHeads }) {
+export function ConcessionScreen({ academicYears, state, feeHeads, refreshFeeHeads,
+    jumpToStudent, onJumpHandled }) {
   const [enrollments, setEnrollments] = useState([]);
   const [loading, setLoading] = useState(true);
   const [payingFor, setPayingFor] = useState(null); // {enrollmentId, student}
@@ -2699,6 +2717,18 @@ export function ConcessionScreen({ academicYears, state, feeHeads, refreshFeeHea
   const [classFilter, setClassFilter] = useState("Pre-LKG");
   const [sectionFilter, setSectionFilter] = useState("A");
   const [query, setQuery] = useState("");
+
+  // Arriving here from Quick Balance Check's search — jump straight to
+  // that student's own class/section and search, rather than landing
+  // on the screen's own defaults and making the office search again
+  // for a student they already found once.
+  useEffect(() => {
+    if (!jumpToStudent) return;
+    setClassFilter(jumpToStudent.classLevelName);
+    setSectionFilter(jumpToStudent.sectionName);
+    setQuery(jumpToStudent.query);
+    onJumpHandled();
+  }, [jumpToStudent]); // eslint-disable-line
 
   // useCallback specifically so this stays the same function reference
   // across renders — passed to a React.memo'd row, so a new reference
