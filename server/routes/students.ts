@@ -253,7 +253,7 @@ studentsRouter.get("/former", requireMember, async (req, res) => {
   // rather than a second query just to know how many pages exist.
   const result = await pool.query(
     `SELECT e.id AS enrollment_id, s.admission_no, s.full_name, cl.name AS class_name,
-            sec.name AS section_name, e.outcome, e.withdrawn_on,
+            sec.name AS section_name, e.outcome, e.withdrawn_on, e.withdrawal_reason,
             count(*) OVER() AS total_count
      FROM enrollments e
      JOIN students s ON s.id = e.student_id
@@ -481,6 +481,7 @@ const refundSchema = z.object({
   instrument_ref: z.string().max(100).optional().default(""),
   reason: z.string().max(500).optional().default(""),
   approver_name: z.string().max(150).optional().default(""),
+  received_by: z.string().max(150).optional().default(""),
 });
 
 // Accountant/Owner only (void_payments) — a refund is money leaving the
@@ -493,30 +494,55 @@ studentsRouter.post(
     if (!parsed.success) return res.status(400).json({ detail: parsed.error.issues[0]?.message });
     const d = parsed.data;
 
-    const enrollment = await pool.query(
-      `SELECT e.id, s.full_name FROM enrollments e JOIN students s ON s.id = e.student_id
-       WHERE e.id = $1 AND e.school_id = $2`,
-      [req.params.id, req.school!.id],
-    );
-    if (!enrollment.rows[0]) return res.status(404).end();
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
 
-    const result = await pool.query(
-      `INSERT INTO refunds
-         (school_id, enrollment_id, amount, mode, instrument_ref, reason, approver_name, refunded_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-      [req.school!.id, req.params.id, d.amount, d.mode, d.instrument_ref, d.reason,
-       d.approver_name, req.user!.id],
-    );
+      const enrollment = await client.query(
+        `SELECT e.id, s.full_name FROM enrollments e JOIN students s ON s.id = e.student_id
+         WHERE e.id = $1 AND e.school_id = $2`,
+        [req.params.id, req.school!.id],
+      );
+      if (!enrollment.rows[0]) { await client.query("ROLLBACK"); return res.status(404).end(); }
 
-    await logActivity(pool, req, {
-      action: "refund.create",
-      entityType: "refund",
-      entityId: result.rows[0].id,
-      description: `Refunded ${enrollment.rows[0].full_name} — ₹${(d.amount / 100).toFixed(2)} via ${d.mode}`,
-      metadata: { amount: d.amount, mode: d.mode, reason: d.reason },
-    });
+      // Its own document identity, via the same counter mechanism every
+      // other numbered document in this app already uses — a refund
+      // receipt must never be mistaken for a fee receipt or an NOC, so
+      // it gets its own doc_type ('refund') and prefix rather than
+      // reusing either of theirs. issueDocumentNumber's row lock is
+      // only meaningful inside a real transaction, which is why this
+      // whole handler is one rather than plain pool.query calls.
+      const fiscalYear = fiscalYearFor(new Date());
+      const receiptNo = await issueDocumentNumber(client, {
+        schoolId: req.school!.id, docType: "refund", fiscalYear, prefix: "RF/",
+      });
 
-    res.status(201).json(result.rows[0]);
+      const result = await client.query(
+        `INSERT INTO refunds
+           (school_id, enrollment_id, amount, mode, instrument_ref, reason, approver_name,
+            received_by, refunded_by, receipt_no)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+        [req.school!.id, req.params.id, d.amount, d.mode, d.instrument_ref, d.reason,
+         d.approver_name, d.received_by, req.user!.id, receiptNo],
+      );
+
+      await client.query("COMMIT");
+
+      await logActivity(pool, req, {
+        action: "refund.create",
+        entityType: "refund",
+        entityId: result.rows[0].id,
+        description: `Refunded ${enrollment.rows[0].full_name} — ₹${(d.amount / 100).toFixed(2)} via ${d.mode} (${receiptNo})`,
+        metadata: { amount: d.amount, mode: d.mode, reason: d.reason, receipt_no: receiptNo },
+      });
+
+      res.status(201).json(result.rows[0]);
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
   },
 );
 
@@ -529,6 +555,32 @@ studentsRouter.get("/enrollments/:id/refunds", async (req, res) => {
     [req.params.id, req.school!.id],
   );
   res.json(result.rows);
+});
+
+// Everything the refund receipt PDF needs in one call, matching
+// collection.ts's own /payments/:id/receipt-data — school, student,
+// class/section/year, and the refund itself (including who approved,
+// who processed, and who received it) — rather than the frontend
+// piecing this together from several separate fetches.
+studentsRouter.get("/refunds/:id/receipt-data", async (req, res) => {
+  const result = await pool.query(
+    `SELECT r.*, u.full_name AS refunded_by_name,
+            s.full_name AS student_name, s.admission_no,
+            sch.name AS school_name, sch.address AS school_address,
+            ay.name AS year_name, cl.name AS class_name, sec.name AS section_name
+     FROM refunds r
+     JOIN enrollments e ON e.id = r.enrollment_id
+     JOIN students s ON s.id = e.student_id
+     JOIN schools sch ON sch.id = r.school_id
+     JOIN academic_years ay ON ay.id = e.academic_year_id
+     JOIN class_levels cl ON cl.id = e.class_level_id
+     JOIN sections sec ON sec.id = e.section_id
+     LEFT JOIN users u ON u.id = r.refunded_by
+     WHERE r.id = $1 AND r.school_id = $2`,
+    [req.params.id, req.school!.id],
+  );
+  if (!result.rows[0]) return res.status(404).end();
+  res.json(result.rows[0]);
 });
 
 // ---------------------------------------------------------------------
@@ -599,39 +651,112 @@ studentsRouter.get("/enrollments/:id/tc-requests", async (req, res) => {
   res.json(result.rows);
 });
 
-const tcClearSchema = z.object({ clearance_note: z.string().max(500).optional().default("") });
+const EXIT_REASON_LABEL: Record<string, string> = {
+  tc: "TC", admission_cancelled: "Admission Cancelled", dropout: "Dropout",
+  transferred: "Transferred to Another School", other: "Other",
+};
 
+const tcClearSchema = z.object({
+  clearance_note: z.string().max(500).optional().default(""),
+  exit_reason: z.enum(["tc", "admission_cancelled", "dropout", "transferred", "other"]),
+});
+
+// This is the application's actual NOC/management-clearance step — the
+// existing "cleared" status already meant exactly this (management has
+// reviewed and approved the exit) before the NOC requirement existed,
+// so nothing new was needed there. What changes here is what clearing
+// now does: it's the actual exit point. It moves the enrollment out of
+// the active roster itself (is_active = false), same shape
+// withdraw() already uses (outcome = 'left', withdrawn_on,
+// withdrawal_reason) — never 'tc_issued', since no TC has been issued
+// by this application. exit_reason is a controlled category distinct
+// from the tc_requests row's own free-text `reason` (the student's own
+// stated reason for asking, captured at request time) — it's what
+// actually displays in the Left/TC screen, mirrored onto
+// enrollments.withdrawal_reason so a plain withdrawal and an
+// NOC-approved exit render identically there. A financial snapshot is
+// captured at this exact moment for audit, since a refund recorded
+// afterward could otherwise make history look different than it
+// actually was at the time management approved the exit. The official
+// TC itself is untouched by any of this — still only reachable through
+// the existing, separate /issue endpoint, which this handler never
+// calls.
 studentsRouter.post(
   "/tc-requests/:id/clear", requireCapability("manage_tc"),
   async (req, res) => {
     const parsed = tcClearSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ detail: parsed.error.issues[0]?.message });
+    const d = parsed.data;
 
-    const current = await pool.query(
-      `SELECT status FROM tc_requests WHERE id = $1 AND school_id = $2`,
-      [req.params.id, req.school!.id],
-    );
-    if (!current.rows[0]) return res.status(404).end();
-    if (current.rows[0].status !== "pending_clearance") {
-      return res.status(400).json({ detail: "This request has already been cleared or issued." });
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+
+      const current = await client.query(
+        `SELECT status, enrollment_id, last_day FROM tc_requests
+         WHERE id = $1 AND school_id = $2 FOR UPDATE`,
+        [req.params.id, req.school!.id],
+      );
+      if (!current.rows[0]) { await client.query("ROLLBACK"); return res.status(404).end(); }
+      if (current.rows[0].status !== "pending_clearance") {
+        await client.query("ROLLBACK");
+        return res.status(400).json({ detail: "This request has already been cleared or issued." });
+      }
+      const request = current.rows[0];
+
+      const ledger = await getEnrollmentLedger(request.enrollment_id, client);
+      const financialSnapshot = {
+        charged: ledger.charged, grossPaid: ledger.grossPaid, refunded: ledger.refunded,
+        netPaid: ledger.paid, outstanding: ledger.balance,
+      };
+
+      const fiscalYear = fiscalYearFor(new Date());
+      const nocNumber = await issueDocumentNumber(client, {
+        schoolId: req.school!.id, docType: "noc", fiscalYear, prefix: "NOC/",
+      });
+
+      const exitReasonLabel = EXIT_REASON_LABEL[d.exit_reason];
+
+      const result = await client.query(
+        `UPDATE tc_requests
+         SET status = 'cleared', clearance_note = $1, cleared_by = $2, cleared_on = now(),
+             exit_reason = $3, financial_snapshot = $4, noc_number = $5
+         WHERE id = $6 RETURNING *`,
+        [d.clearance_note, req.user!.id, d.exit_reason, JSON.stringify(financialSnapshot),
+         nocNumber, req.params.id],
+      );
+
+      // Same fields withdraw() itself sets, for the same reason: this
+      // is genuinely an exit, and the Left/TC screen already reads
+      // these two columns regardless of which path produced them.
+      await client.query(
+        `UPDATE enrollments
+         SET outcome = 'left', is_active = false, withdrawn_on = $1, withdrawal_reason = $2
+         WHERE id = $3`,
+        [request.last_day, exitReasonLabel, request.enrollment_id],
+      );
+
+      await client.query("COMMIT");
+
+      const student = await pool.query(
+        `SELECT s.full_name FROM enrollments e JOIN students s ON s.id = e.student_id WHERE e.id = $1`,
+        [request.enrollment_id],
+      );
+      await logActivity(pool, req, {
+        action: "tc.clear",
+        entityType: "tc_request",
+        entityId: String(req.params.id),
+        description: `NOC ${nocNumber} approved for ${student.rows[0]?.full_name || "a student"} — ${exitReasonLabel}`,
+        metadata: { clearance_note: d.clearance_note, exit_reason: d.exit_reason, noc_number: nocNumber },
+      });
+
+      res.json(result.rows[0]);
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
     }
-
-    const result = await pool.query(
-      `UPDATE tc_requests
-       SET status = 'cleared', clearance_note = $1, cleared_by = $2, cleared_on = now()
-       WHERE id = $3 RETURNING *`,
-      [parsed.data.clearance_note, req.user!.id, req.params.id],
-    );
-
-    await logActivity(pool, req, {
-      action: "tc.clear",
-      entityType: "tc_request",
-      entityId: String(req.params.id),
-      description: `Gave finance clearance for a TC — ${parsed.data.clearance_note || "no dues outstanding"}`,
-      metadata: { clearance_note: parsed.data.clearance_note },
-    });
-
-    res.json(result.rows[0]);
   },
 );
 
@@ -680,7 +805,13 @@ studentsRouter.post(
         `UPDATE enrollments
          SET outcome = 'tc_issued', is_active = false, withdrawn_on = $1, withdrawal_reason = $2
          WHERE id = $3`,
-        [request.last_day, request.reason, request.enrollment_id],
+        // Prefers the controlled exit_reason label (set at NOC/clearance
+        // time) over the request's own free-text reason if one was
+        // recorded — a small compatibility tweak so a TC issued after
+        // an NOC doesn't regress the nicer label back to free text.
+        // Requests that predate the NOC workflow simply have no
+        // exit_reason and fall back to exactly what this always did.
+        [request.last_day, EXIT_REASON_LABEL[request.exit_reason] || request.reason, request.enrollment_id],
       );
 
       await client.query("COMMIT");
@@ -727,6 +858,52 @@ studentsRouter.get("/tc-requests/:id/document-data", async (req, res) => {
     return res.status(400).json({ detail: "This TC hasn't been issued yet." });
   }
   res.json(result.rows[0]);
+});
+
+// Its own document-data endpoint for the NOC PDF, deliberately
+// separate from the TC one above rather than loosening that one's own
+// status === 'issued' gate — the existing TC PDF and its data source
+// stay exactly as they were. Available once status reaches 'cleared'
+// (the NOC itself), and stays available even after a TC is later
+// issued through the existing, separate /issue step — the NOC was a
+// real event that happened and should still be reprintable regardless
+// of what happens afterward. Includes whichever refund(s) exist for
+// the enrollment, section/year (the TC endpoint above only ever needed
+// class, not section, since it predates this) and both actors —
+// requested_by (who initiated the exit) and cleared_by (who approved
+// the NOC) — by name.
+studentsRouter.get("/tc-requests/:id/noc-document-data", async (req, res) => {
+  const result = await pool.query(
+    `SELECT tr.*, s.full_name, s.admission_no, s.date_of_birth,
+            e.academic_year_id, cl.name AS class_name, sec.name AS section_name,
+            sc.name AS school_name, sc.address AS school_address, sc.logo_data_url,
+            ay.name AS academic_year_name,
+            req.full_name AS requested_by_name, clr.full_name AS cleared_by_name
+     FROM tc_requests tr
+     JOIN enrollments e ON e.id = tr.enrollment_id
+     JOIN students s ON s.id = e.student_id
+     JOIN class_levels cl ON cl.id = e.class_level_id
+     JOIN sections sec ON sec.id = e.section_id
+     JOIN academic_years ay ON ay.id = e.academic_year_id
+     JOIN schools sc ON sc.id = tr.school_id
+     LEFT JOIN users req ON req.id = tr.requested_by
+     LEFT JOIN users clr ON clr.id = tr.cleared_by
+     WHERE tr.id = $1 AND tr.school_id = $2`,
+    [req.params.id, req.school!.id],
+  );
+  const row = result.rows[0];
+  if (!row) return res.status(404).end();
+  if (row.status === "pending_clearance") {
+    return res.status(400).json({ detail: "This request hasn't been cleared yet — no NOC exists." });
+  }
+
+  const refunds = await pool.query(
+    `SELECT amount, reason, receipt_no, created_at FROM refunds
+     WHERE enrollment_id = $1 ORDER BY created_at DESC`,
+    [row.enrollment_id],
+  );
+
+  res.json({ ...row, refunds: refunds.rows });
 });
 
 // ---------------------------------------------------------------------
@@ -907,7 +1084,8 @@ studentsRouter.get("/enrollments", async (req, res) => {
             COALESCE((SELECT SUM(a.amount) FROM allocations a
                       JOIN payments p ON p.id = a.payment_id
                       WHERE a.charge_id IN (SELECT id FROM charges WHERE enrollment_id = e.id)
-                        AND p.clearing_status = 'cleared' AND p.reversed_by IS NULL), 0) AS paid,
+                        AND p.clearing_status = 'cleared' AND p.reversed_by IS NULL), 0) AS gross_paid,
+            COALESCE((SELECT SUM(r.amount) FROM refunds r WHERE r.enrollment_id = e.id), 0) AS refunded,
             COALESCE((SELECT SUM(c.amount) FROM charges c
                       WHERE c.enrollment_id = e.id AND c.reversed_by IS NULL
                         AND c.is_arrear = true), 0) AS arrears_charged,
@@ -927,12 +1105,16 @@ studentsRouter.get("/enrollments", async (req, res) => {
      ORDER BY cl.ladder_order, sec.name, s.full_name`,
     params,
   );
-  res.json(result.rows.map((r) => ({
-    ...r,
-    ledger: {
-      charged: Number(r.charged), conceded: Number(r.conceded), paid: Number(r.paid),
-      balance: Number(r.charged) - Number(r.conceded) - Number(r.paid),
-      arrearsCharged: Number(r.arrears_charged), arrearsBalance: Number(r.arrears_balance),
-    },
-  })));
+  res.json(result.rows.map((r) => {
+    const grossPaid = Number(r.gross_paid), refunded = Number(r.refunded);
+    const paid = grossPaid - refunded;
+    return {
+      ...r,
+      ledger: {
+        charged: Number(r.charged), conceded: Number(r.conceded), grossPaid, refunded, paid,
+        balance: Number(r.charged) - Number(r.conceded) - paid,
+        arrearsCharged: Number(r.arrears_charged), arrearsBalance: Number(r.arrears_balance),
+      },
+    };
+  }));
 });

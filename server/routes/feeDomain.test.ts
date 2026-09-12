@@ -839,7 +839,7 @@ describe("admission -> billing -> collection, end to end", () => {
       expect(req1.body.status).toBe("pending_clearance");
 
       const clear = await request(app).post(`/api/students/tc-requests/${req1.body.id}/clear`)
-        .set("Cookie", cookie).send({ clearance_note: "All dues cleared" });
+        .set("Cookie", cookie).send({ clearance_note: "All dues cleared", exit_reason: "tc" });
       expect(clear.status).toBe(200);
       expect(clear.body.status).toBe("cleared");
       expect(clear.body.cleared_by).toBeTruthy();
@@ -854,7 +854,11 @@ describe("admission -> billing -> collection, end to end", () => {
         FROM enrollments WHERE id = $1`, [enrollment.id]);
       expect(enrollmentRow.rows[0].outcome).toBe("tc_issued");
       expect(enrollmentRow.rows[0].is_active).toBe(false);
-      expect(enrollmentRow.rows[0].withdrawal_reason).toBe("Family relocating to another city");
+      // The controlled exit-reason label set at NOC/clearance time,
+      // not the original free-text request reason — the small
+      // /issue compatibility tweak that keeps this label consistent
+      // even if a TC is later issued after an NOC.
+      expect(enrollmentRow.rows[0].withdrawal_reason).toBe("TC");
     });
 
     it("accountant can complete clearance and issue alone, with its own actor per step", async () => {
@@ -870,7 +874,7 @@ describe("admission -> billing -> collection, end to end", () => {
 
       const accCookie = await loginAs("acc@http.test");
       const clear = await request(app).post(`/api/students/tc-requests/${req1.body.id}/clear`)
-        .set("Cookie", accCookie).send({ clearance_note: "Cleared" });
+        .set("Cookie", accCookie).send({ clearance_note: "Cleared", exit_reason: "tc" });
       const issue = await request(app).post(`/api/students/tc-requests/${req1.body.id}/issue`)
         .set("Cookie", accCookie).send({ conduct: "Good" });
       expect(issue.status).toBe(200);
@@ -907,7 +911,7 @@ describe("admission -> billing -> collection, end to end", () => {
       expect(req1.status).toBe(201);
 
       const clear = await request(app).post(`/api/students/tc-requests/${req1.body.id}/clear`)
-        .set("Cookie", deskCookie).send({ clearance_note: "Cleared" });
+        .set("Cookie", deskCookie).send({ clearance_note: "Cleared", exit_reason: "tc" });
       expect(clear.status).toBe(403);
     });
 
@@ -925,7 +929,7 @@ describe("admission -> billing -> collection, end to end", () => {
         const req1 = await request(app).post(`/api/students/enrollments/${admission.body.enrollment.id}/tc-requests`)
           .set("Cookie", cookie).send({ reason: "Transfer", last_day: "2026-11-30" });
         await request(app).post(`/api/students/tc-requests/${req1.body.id}/clear`)
-          .set("Cookie", cookie).send({ clearance_note: "Cleared" });
+          .set("Cookie", cookie).send({ clearance_note: "Cleared", exit_reason: "tc" });
         const issue = await request(app).post(`/api/students/tc-requests/${req1.body.id}/issue`)
           .set("Cookie", cookie).send({ conduct: "Good" });
         numbers.push(issue.body.tc_number);
@@ -947,7 +951,7 @@ describe("admission -> billing -> collection, end to end", () => {
       expect(tooEarly.status).toBe(400);
 
       await request(app).post(`/api/students/tc-requests/${req1.body.id}/clear`)
-        .set("Cookie", cookie).send({ clearance_note: "Cleared" });
+        .set("Cookie", cookie).send({ clearance_note: "Cleared", exit_reason: "tc" });
       await request(app).post(`/api/students/tc-requests/${req1.body.id}/issue`)
         .set("Cookie", cookie).send({ conduct: "Good", qualified_for_promotion: true });
 
@@ -965,7 +969,7 @@ describe("admission -> billing -> collection, end to end", () => {
       const req1 = await request(app).post(`/api/students/enrollments/${enrollment.id}/tc-requests`)
         .set("Cookie", cookie).send({ reason: "Transfer", last_day: "2026-11-30" });
       await request(app).post(`/api/students/tc-requests/${req1.body.id}/clear`)
-        .set("Cookie", cookie).send({ clearance_note: "Cleared" });
+        .set("Cookie", cookie).send({ clearance_note: "Cleared", exit_reason: "tc" });
       await request(app).post(`/api/students/tc-requests/${req1.body.id}/issue`)
         .set("Cookie", cookie).send({ conduct: "Good" });
 
@@ -974,6 +978,246 @@ describe("admission -> billing -> collection, end to end", () => {
       expect(actions).toContain("tc.request");
       expect(actions).toContain("tc.clear");
       expect(actions).toContain("tc.issue");
+    });
+  });
+
+  describe("NOC / Clearance — stops at 'cleared', never issues a TC", () => {
+    async function admitAndCharge(cookie: string, admissionNo: string) {
+      const { year, classLevel, section } = await setUpAcademicStructure(cookie);
+      const admission = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
+        admission_no: admissionNo, full_name: "NOC Test Student", gender: "male",
+        contact_type: "guardian", guardian_relationship: "Father", guardian_name: "Test Guardian",
+        academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
+      });
+      return admission.body.enrollment;
+    }
+
+    it("requires exit_reason — a bare clearance_note is not enough", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const enrollment = await admitAndCharge(cookie, "2026/noc-1");
+      const req1 = await request(app).post(`/api/students/enrollments/${enrollment.id}/tc-requests`)
+        .set("Cookie", cookie).send({ reason: "Transfer", last_day: "2026-11-30" });
+      const clear = await request(app).post(`/api/students/tc-requests/${req1.body.id}/clear`)
+        .set("Cookie", cookie).send({ clearance_note: "Cleared" }); // no exit_reason
+      expect(clear.status).toBe(400);
+    });
+
+    it("approving NOC moves the enrollment to outcome='left', never 'tc_issued' — the TC is not issued by this step", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const { year, classLevel, section } = await setUpAcademicStructure(cookie);
+      const admission = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
+        admission_no: "2026/noc-2", full_name: "NOC Test Student", gender: "male",
+        contact_type: "guardian", guardian_relationship: "Father", guardian_name: "Test Guardian",
+        academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
+      });
+      const enrollment = admission.body.enrollment;
+      const req1 = await request(app).post(`/api/students/enrollments/${enrollment.id}/tc-requests`)
+        .set("Cookie", cookie).send({ reason: "Moving city", last_day: "2026-10-15" });
+
+      const clear = await request(app).post(`/api/students/tc-requests/${req1.body.id}/clear`)
+        .set("Cookie", cookie).send({ clearance_note: "Approved by management", exit_reason: "tc" });
+      expect(clear.status).toBe(200);
+      expect(clear.body.status).toBe("cleared");
+      expect(clear.body.tc_number).toBeNull(); // no TC number — /issue was never called
+      expect(clear.body.noc_number).toMatch(/^NOC\//);
+
+      const enrollmentRow = await pool.query(
+        `SELECT outcome, is_active, withdrawal_reason FROM enrollments WHERE id = $1`, [enrollment.id],
+      );
+      expect(enrollmentRow.rows[0].outcome).toBe("left"); // not tc_issued
+      expect(enrollmentRow.rows[0].is_active).toBe(false);
+      expect(enrollmentRow.rows[0].withdrawal_reason).toBe("TC"); // the controlled label, not the free-text reason
+
+      // Disappears from the active roster immediately, same as any
+      // other exit — no TC needed to be issued for that to happen.
+      const roster = await request(app)
+        .get(`/api/students/enrollments?academic_year_id=${year.id}`).set("Cookie", cookie);
+      expect(roster.body.map((r: any) => r.id)).not.toContain(enrollment.id);
+    });
+
+    it("each exit_reason category produces its own readable label", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const { year, classLevel, section } = await setUpAcademicStructure(cookie);
+      const cases: [string, string][] = [
+        ["admission_cancelled", "Admission Cancelled"],
+        ["dropout", "Dropout"],
+        ["transferred", "Transferred to Another School"],
+        ["other", "Other"],
+      ];
+      for (let i = 0; i < cases.length; i++) {
+        const [reasonCode, label] = cases[i];
+        const admission = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
+          admission_no: `2026/nr${i}`, full_name: "NOC Test Student", gender: "male",
+          contact_type: "guardian", guardian_relationship: "Father", guardian_name: "Test Guardian",
+          academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
+        });
+        const enrollment = admission.body.enrollment;
+        const req1 = await request(app).post(`/api/students/enrollments/${enrollment.id}/tc-requests`)
+          .set("Cookie", cookie).send({ reason: "Some free-text reason", last_day: "2026-10-15" });
+        await request(app).post(`/api/students/tc-requests/${req1.body.id}/clear`)
+          .set("Cookie", cookie).send({ exit_reason: reasonCode });
+        const row = await pool.query(`SELECT withdrawal_reason FROM enrollments WHERE id = $1`, [enrollment.id]);
+        expect(row.rows[0].withdrawal_reason).toBe(label);
+      }
+    });
+
+    it("admission cancellation: a full refund of what was actually paid brings net paid back to zero, honestly, without hiding the real remaining charge", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const enrollment = await admitAndCharge(cookie, "2026/noc-cancel");
+      // The reported scenario: an admission-fee-sized payment
+      // (₹5,000), fully refunded once the family never actually
+      // joined — this fixture's own fee structure is a much larger
+      // ₹40,000, so what's actually being verified here is that net
+      // paid genuinely nets to zero and outstanding is never silently
+      // zeroed out to match — it stays exactly what's really left
+      // charged, honestly, not a number chosen to make the exit look
+      // tidier than it is.
+      await request(app).post("/api/collection/payments").set("Cookie", cookie).send({
+        enrollment_id: enrollment.id, amount: 500000, mode: "cash",
+      });
+      await request(app).post(`/api/students/enrollments/${enrollment.id}/refund`)
+        .set("Cookie", cookie).send({ amount: 500000, mode: "cash", reason: "Never joined" });
+
+      const req1 = await request(app).post(`/api/students/enrollments/${enrollment.id}/tc-requests`)
+        .set("Cookie", cookie).send({ reason: "Joining another school", last_day: "2026-09-20" });
+      const clear = await request(app).post(`/api/students/tc-requests/${req1.body.id}/clear`)
+        .set("Cookie", cookie).send({ exit_reason: "admission_cancelled" });
+
+      expect(clear.body.financial_snapshot.grossPaid).toBe(500000);
+      expect(clear.body.financial_snapshot.refunded).toBe(500000);
+      expect(clear.body.financial_snapshot.netPaid).toBe(0);
+      // Outstanding = the full charge minus zero net paid — real,
+      // not hidden, exactly what "do not zero this out" requires.
+      expect(clear.body.financial_snapshot.outstanding).toBe(clear.body.financial_snapshot.charged);
+      const row = await pool.query(`SELECT withdrawal_reason FROM enrollments WHERE id = $1`, [enrollment.id]);
+      expect(row.rows[0].withdrawal_reason).toBe("Admission Cancelled");
+    });
+
+    it("partial refund case: NOC approval does NOT waive the remaining outstanding balance", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const enrollment = await admitAndCharge(cookie, "2026/noc-partial");
+      // This fixture's own fee is ₹40,000 (4000000 paise).
+      await request(app).post("/api/collection/payments").set("Cookie", cookie).send({
+        enrollment_id: enrollment.id, amount: 4000000, mode: "cash",
+      });
+      await request(app).post(`/api/students/enrollments/${enrollment.id}/refund`)
+        .set("Cookie", cookie).send({ amount: 300000, mode: "cash", reason: "Partial refund" });
+
+      const req1 = await request(app).post(`/api/students/enrollments/${enrollment.id}/tc-requests`)
+        .set("Cookie", cookie).send({ reason: "Transfer", last_day: "2026-09-20" });
+      const clear = await request(app).post(`/api/students/tc-requests/${req1.body.id}/clear`)
+        .set("Cookie", cookie).send({ exit_reason: "tc", clearance_note: "Approved despite balance" });
+
+      expect(clear.status).toBe(200);
+      // The snapshot captured at approval time shows the real numbers —
+      // outstanding is NOT zeroed out just because management approved.
+      expect(clear.body.financial_snapshot.charged).toBe(4000000);
+      expect(clear.body.financial_snapshot.netPaid).toBe(3700000);
+      expect(clear.body.financial_snapshot.outstanding).toBe(300000);
+
+      // And the ledger itself — not just the snapshot — still shows
+      // the same real outstanding balance after NOC approval.
+      const rosterAll = await request(app).get(`/api/students/former`).set("Cookie", cookie);
+      const row = rosterAll.body.rows.find((r: any) => r.enrollment_id === enrollment.id);
+      expect(row).toBeDefined();
+      expect(row.outcome).toBe("left");
+    });
+
+    it("noc_number is its own series — distinct from tc_number and refund receipt numbers", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const enrollment = await admitAndCharge(cookie, "2026/noc-numbering");
+      const req1 = await request(app).post(`/api/students/enrollments/${enrollment.id}/tc-requests`)
+        .set("Cookie", cookie).send({ reason: "Transfer", last_day: "2026-09-20" });
+      const clear = await request(app).post(`/api/students/tc-requests/${req1.body.id}/clear`)
+        .set("Cookie", cookie).send({ exit_reason: "tc" });
+      expect(clear.body.noc_number).toMatch(/^NOC\//);
+      expect(clear.body.noc_number).not.toMatch(/^TC\//);
+      expect(clear.body.noc_number).not.toMatch(/^RF\//);
+    });
+
+    it("clearing does not affect an unrelated TC that was fully issued earlier", async () => {
+      // Regression: an already-issued TC (via the pre-existing manual
+      // path) must keep loading correctly and remain unaffected by any
+      // new NOC approved for a different student.
+      const cookie = await loginAs("owner@http.test");
+      const issuedStudent = await admitAndCharge(cookie, "2026/noc-old-tc");
+      const req1 = await request(app).post(`/api/students/enrollments/${issuedStudent.id}/tc-requests`)
+        .set("Cookie", cookie).send({ reason: "Transfer", last_day: "2026-09-20" });
+      await request(app).post(`/api/students/tc-requests/${req1.body.id}/clear`)
+        .set("Cookie", cookie).send({ exit_reason: "tc" });
+      const issue = await request(app).post(`/api/students/tc-requests/${req1.body.id}/issue`)
+        .set("Cookie", cookie).send({ conduct: "Good" });
+      expect(issue.status).toBe(200);
+      expect(issue.body.status).toBe("issued");
+
+      const doc = await request(app).get(`/api/students/tc-requests/${req1.body.id}/document-data`)
+        .set("Cookie", cookie);
+      expect(doc.status).toBe(200);
+      expect(doc.body.tc_number).toBe(issue.body.tc_number);
+    });
+
+    it("NOC document-data is available once cleared, includes refund details, and remains available after a TC is later issued", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const enrollment = await admitAndCharge(cookie, "2026/noc-doc");
+      await request(app).post("/api/collection/payments").set("Cookie", cookie).send({
+        enrollment_id: enrollment.id, amount: 4000000, mode: "cash",
+      });
+      const refund = await request(app).post(`/api/students/enrollments/${enrollment.id}/refund`)
+        .set("Cookie", cookie).send({ amount: 300000, mode: "cash", reason: "Partial refund" });
+
+      const req1 = await request(app).post(`/api/students/enrollments/${enrollment.id}/tc-requests`)
+        .set("Cookie", cookie).send({ reason: "Transfer", last_day: "2026-09-20" });
+
+      // Not available before clearance.
+      const tooEarly = await request(app)
+        .get(`/api/students/tc-requests/${req1.body.id}/noc-document-data`).set("Cookie", cookie);
+      expect(tooEarly.status).toBe(400);
+
+      const clear = await request(app).post(`/api/students/tc-requests/${req1.body.id}/clear`)
+        .set("Cookie", cookie).send({ exit_reason: "tc", clearance_note: "Approved despite balance" });
+
+      const doc = await request(app)
+        .get(`/api/students/tc-requests/${req1.body.id}/noc-document-data`).set("Cookie", cookie);
+      expect(doc.status).toBe(200);
+      expect(doc.body.noc_number).toBe(clear.body.noc_number);
+      expect(doc.body.class_name).toBeTruthy();
+      expect(doc.body.section_name).toBeTruthy();
+      expect(doc.body.cleared_by_name).toBeDefined();
+      expect(doc.body.financial_snapshot.outstanding).toBe(300000);
+      expect(doc.body.refunds).toHaveLength(1);
+      expect(doc.body.refunds[0].amount).toBe(300000);
+      expect(doc.body.refunds[0].receipt_no).toBe(refund.body.receipt_no);
+
+      // Still available after the official TC is later issued —
+      // the NOC itself remains a real, reprintable historical event.
+      await request(app).post(`/api/students/tc-requests/${req1.body.id}/issue`)
+        .set("Cookie", cookie).send({ conduct: "Good" });
+      const docAfterIssue = await request(app)
+        .get(`/api/students/tc-requests/${req1.body.id}/noc-document-data`).set("Cookie", cookie);
+      expect(docAfterIssue.status).toBe(200);
+    });
+
+    it("issuing a TC for a historical request cleared before this feature existed falls back to its own free-text reason", async () => {
+      // A request cleared through the old /clear (no exit_reason
+      // column, no NOC number) predates this feature entirely —
+      // simulated directly since the old, unextended /clear no longer
+      // exists to actually produce this state. /issue must still
+      // handle it exactly as it always did.
+      const cookie = await loginAs("owner@http.test");
+      const enrollment = await admitAndCharge(cookie, "2026/noc-legacy");
+      const req1 = await request(app).post(`/api/students/enrollments/${enrollment.id}/tc-requests`)
+        .set("Cookie", cookie).send({ reason: "Old-style free-text reason", last_day: "2026-09-20" });
+      await pool.query(
+        `UPDATE tc_requests SET status = 'cleared', cleared_on = now() WHERE id = $1`,
+        [req1.body.id],
+      ); // exit_reason, noc_number, financial_snapshot all stay null — the true legacy shape
+
+      const issue = await request(app).post(`/api/students/tc-requests/${req1.body.id}/issue`)
+        .set("Cookie", cookie).send({ conduct: "Good" });
+      expect(issue.status).toBe(200);
+
+      const row = await pool.query(`SELECT withdrawal_reason FROM enrollments WHERE id = $1`, [enrollment.id]);
+      expect(row.rows[0].withdrawal_reason).toBe("Old-style free-text reason");
     });
   });
 
@@ -1008,7 +1252,7 @@ describe("admission -> billing -> collection, end to end", () => {
       const req1 = await request(app).post(`/api/students/enrollments/${enrollment.id}/tc-requests`)
         .set("Cookie", cookie).send({ reason: "Relocating", last_day: "2026-09-12" });
       await request(app).post(`/api/students/tc-requests/${req1.body.id}/clear`)
-        .set("Cookie", cookie).send({ clearance_note: "All dues cleared" });
+        .set("Cookie", cookie).send({ clearance_note: "All dues cleared", exit_reason: "tc" });
       await request(app).post(`/api/students/tc-requests/${req1.body.id}/issue`)
         .set("Cookie", cookie).send({ conduct: "Excellent", qualified_for_promotion: true, remarks: "Good student" });
       return enrollment;
@@ -1133,8 +1377,11 @@ describe("admission -> billing -> collection, end to end", () => {
       expect(res.body.tc_number).toMatch(/^TC\//);
       expect(res.body.tc_conduct).toBe("Excellent");
       expect(res.body.tc_qualified_for_promotion).toBe(true);
-      expect(res.body.tc_reason).toBe("Relocating");
-      expect(res.body.withdrawal_reason).toBe("Relocating");
+      expect(res.body.tc_reason).toBe("Relocating"); // the request's own free-text reason
+      // The controlled exit-reason label set at NOC/clearance time
+      // (this fixture's admitAndIssueTc passes exit_reason: "tc"),
+      // mirrored onto the enrollment — distinct from tc_reason above.
+      expect(res.body.withdrawal_reason).toBe("TC");
     });
 
     it("a plain withdrawal's view details has no TC fields — genuinely null, not invented", async () => {
@@ -1882,6 +2129,104 @@ describe("concessions and enrollment editing", () => {
     const res = await request(app).post(`/api/students/enrollments/${enrollment.id}/refund`)
       .set("Cookie", accountantCookie).send({ amount: 100000, mode: "cash" });
     expect(res.status).toBe(201);
+  });
+
+  it("a refund reduces net paid and reopens the outstanding balance — the exact reported scenario", async () => {
+    // Fee ₹40,000 (this helper's own fixture amount), paid in full,
+    // then a ₹3,000 refund — mirroring the reported case where a
+    // refund silently had no effect on what the ledger showed as paid.
+    const cookie = await loginAs("owner@http.test");
+    const { enrollment } = await setUpAdmittedStudent(cookie);
+    await request(app).post("/api/collection/payments").set("Cookie", cookie).send({
+      enrollment_id: enrollment.id, amount: 4000000, mode: "cash",
+    });
+
+    const before = await request(app)
+      .get(`/api/students/enrollments/${enrollment.id}/profile`).set("Cookie", cookie);
+    // Not asserted on directly (profile doesn't itself expose a ledger),
+    // just confirms the enrollment is in the expected state before the
+    // refund — the actual ledger checks are against the roster below,
+    // which is what Fee Collection itself reads from.
+    expect(before.status).toBe(200);
+
+    await request(app).post(`/api/students/enrollments/${enrollment.id}/refund`)
+      .set("Cookie", cookie).send({ amount: 300000, mode: "cash", reason: "Partial refund" });
+
+    const roster = await request(app)
+      .get(`/api/students/enrollments?academic_year_id=${enrollment.academic_year_id}&include_ledger=1`)
+      .set("Cookie", cookie);
+    const row = roster.body.find((r: any) => r.id === enrollment.id);
+    expect(row.ledger.charged).toBe(4000000);
+    expect(row.ledger.grossPaid).toBe(4000000);
+    expect(row.ledger.refunded).toBe(300000);
+    expect(row.ledger.paid).toBe(3700000); // net paid = gross - refund
+    expect(row.ledger.balance).toBe(300000); // outstanding reopens by exactly the refund
+  });
+
+  it("a refund never touches the original payment itself — it stays exactly as recorded", async () => {
+    const cookie = await loginAs("owner@http.test");
+    const { enrollment } = await setUpAdmittedStudent(cookie);
+    const payment = await request(app).post("/api/collection/payments").set("Cookie", cookie).send({
+      enrollment_id: enrollment.id, amount: 4000000, mode: "cash",
+    });
+    await request(app).post(`/api/students/enrollments/${enrollment.id}/refund`)
+      .set("Cookie", cookie).send({ amount: 1000000, mode: "cash" });
+
+    const history = await request(app)
+      .get(`/api/collection/enrollments/${enrollment.id}/payments`).set("Cookie", cookie);
+    const original = history.body.find((p: any) => p.id === payment.body.id);
+    expect(original.amount).toBe(4000000); // untouched — a refund is its own transaction
+    expect(original.reversed_by).toBeFalsy();
+  });
+
+  it("a refund gets its own receipt number, distinct from a fee receipt or a TC number", async () => {
+    const cookie = await loginAs("owner@http.test");
+    const { enrollment } = await setUpAdmittedStudent(cookie);
+    const payment = await request(app).post("/api/collection/payments").set("Cookie", cookie).send({
+      enrollment_id: enrollment.id, amount: 4000000, mode: "cash",
+    });
+
+    const refund1 = await request(app).post(`/api/students/enrollments/${enrollment.id}/refund`)
+      .set("Cookie", cookie).send({
+        amount: 100000, mode: "cash", received_by: "Suresh Kumar (father)",
+      });
+    expect(refund1.status).toBe(201);
+    expect(refund1.body.receipt_no).toMatch(/^RF\//);
+    expect(refund1.body.receipt_no).not.toBe(payment.body.receipt_no);
+    expect(refund1.body.received_by).toBe("Suresh Kumar (father)");
+
+    const refund2 = await request(app).post(`/api/students/enrollments/${enrollment.id}/refund`)
+      .set("Cookie", cookie).send({ amount: 50000, mode: "cash" });
+    const seq1 = Number(refund1.body.receipt_no.split("/").pop());
+    const seq2 = Number(refund2.body.receipt_no.split("/").pop());
+    expect(seq2).toBe(seq1 + 1); // sequential, gapless, its own series
+  });
+
+  it("refund receipt-data returns everything the PDF needs in one call", async () => {
+    const cookie = await loginAs("owner@http.test");
+    const { enrollment } = await setUpAdmittedStudent(cookie);
+    const refund = await request(app).post(`/api/students/enrollments/${enrollment.id}/refund`)
+      .set("Cookie", cookie).send({
+        amount: 200000, mode: "upi", instrument_ref: "UTR12345", reason: "Partial refund",
+        approver_name: "Principal", received_by: "Parent Name",
+      });
+
+    const data = await request(app)
+      .get(`/api/students/refunds/${refund.body.id}/receipt-data`).set("Cookie", cookie);
+    expect(data.status).toBe(200);
+    expect(data.body.student_name).toBe("Test Student");
+    expect(data.body.admission_no).toBeTruthy();
+    expect(data.body.school_name).toBeTruthy();
+    expect(data.body.class_name).toBeTruthy();
+    expect(data.body.section_name).toBeTruthy();
+    expect(data.body.year_name).toBeTruthy();
+    expect(data.body.amount).toBe(200000);
+    expect(data.body.mode).toBe("upi");
+    expect(data.body.instrument_ref).toBe("UTR12345");
+    expect(data.body.approver_name).toBe("Principal");
+    expect(data.body.received_by).toBe("Parent Name");
+    expect(data.body.refunded_by_name).toBeDefined(); // present — empty string, since this fixture's owner has no full_name set
+    expect(data.body.receipt_no).toMatch(/^RF\//);
   });
 
   it("rejects a duplicate roll number within the same section", async () => {

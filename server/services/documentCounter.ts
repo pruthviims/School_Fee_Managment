@@ -15,7 +15,7 @@
 
 import type { PoolClient } from "pg";
 
-export type DocType = "receipt" | "invoice" | "tc";
+export type DocType = "receipt" | "invoice" | "tc" | "refund" | "noc";
 
 export async function issueDocumentNumber(
   client: PoolClient,

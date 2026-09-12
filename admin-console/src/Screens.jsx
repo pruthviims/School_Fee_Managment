@@ -64,6 +64,8 @@ import {
   validateRows,
 } from "./lib";
 import { downloadReceipt } from "./receipt";
+import { downloadRefundReceipt } from "./refundReceipt";
+import { downloadNoc } from "./noc";
 import { downloadTcCertificate } from "./tc";
 
 /* ---------------- shared bits ---------------- */
@@ -3788,7 +3790,7 @@ export function LeftTcStudentsScreen({ academicYears, classLevels }) {
                     <td className="px-5 py-3">
                       <span className={`text-xs font-bold rounded-lg px-2.5 py-1 whitespace-nowrap ${
                         r.outcome === "tc_issued" ? "bg-brand-50 text-brand-600" : "bg-amber-50 text-amber-700"}`}>
-                        {r.outcome === "tc_issued" ? "TC Issued" : "Withdrawn"}
+                        {r.withdrawal_reason || (r.outcome === "tc_issued" ? "TC Issued" : "Withdrawn")}
                       </span>
                     </td>
                     <td className="px-5 py-3 text-slate-500 whitespace-nowrap">
@@ -3880,7 +3882,7 @@ function FormerStudentDetailModal({ enrollmentId, onClose }) {
           <div className="px-6 py-5 space-y-6">
             <div className={`rounded-xl px-4 py-3 text-sm font-bold ${
               isTc ? "bg-brand-50 text-brand-700" : "bg-amber-50 text-amber-700"}`}>
-              {isTc ? "TC Issued" : "Withdrawn"}
+              {detail.withdrawal_reason || (isTc ? "TC Issued" : "Withdrawn")}
               {detail.withdrawn_on && ` on ${displayDate(detail.withdrawn_on)}`}
             </div>
 
@@ -4138,7 +4140,9 @@ function StudentProfileModal({ enrollmentId, capabilities, onClose, onCollectPay
         <div className="px-6 py-5 space-y-4">
           {withdrawn && (
             <div className="bg-amber-50 border border-amber-200 text-amber-800 rounded-xl px-4 py-3 text-sm">
-              <span className="font-bold">{profile.outcome === "tc_issued" ? "TC Issued" : "Withdrawn"}</span>
+              <span className="font-bold">
+                {profile.withdrawal_reason || (profile.outcome === "tc_issued" ? "TC Issued" : "Withdrawn")}
+              </span>
               {profile.withdrawn_on && ` on ${displayDate(profile.withdrawn_on)}`}
               {profile.withdrawal_reason && ` — ${profile.withdrawal_reason}`}
             </div>
@@ -4351,6 +4355,15 @@ function TcPanel({ enrollmentId, capabilities, onChanged, studentName }) {
     }
   }
 
+  async function downloadNocDoc(id) {
+    try {
+      const data = await api.get(`/students/tc-requests/${id}/noc-document-data`);
+      downloadNoc(data);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Could not fetch that NOC.");
+    }
+  }
+
   return (
     <div className="border-t border-slate-100">
       {!latest && (
@@ -4366,11 +4379,11 @@ function TcPanel({ enrollmentId, capabilities, onChanged, studentName }) {
         <div className="px-6 py-4">
           <div className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm">
             <span className="font-bold">TC requested</span> — {latest.reason}, last day{" "}
-            {displayDate(latest.last_day)}. Awaiting finance clearance.
+            {displayDate(latest.last_day)}. Awaiting management's NOC decision.
           </div>
           {canManageTc && (
             <button onClick={() => setShowClearForm((v) => !v)} className={`${ghost} mt-3`}>
-              <Check size={14} /> Give finance clearance
+              <Check size={14} /> Review & approve NOC
             </button>
           )}
         </div>
@@ -4378,13 +4391,24 @@ function TcPanel({ enrollmentId, capabilities, onChanged, studentName }) {
 
       {latest?.status === "cleared" && (
         <div className="px-6 py-4">
-          <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl px-4 py-3 text-sm">
-            <span className="font-bold">Finance cleared</span>
-            {latest.clearance_note ? ` — ${latest.clearance_note}` : ""}. Ready to issue.
+          <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl px-4 py-3 text-sm flex items-center justify-between gap-3">
+            <span>
+              <span className="font-bold">NOC issued</span> — {latest.noc_number}
+              {latest.clearance_note ? ` — ${latest.clearance_note}` : ""}
+            </span>
+            <button onClick={() => downloadNocDoc(latest.id)}
+              className="text-xs font-bold rounded-lg px-3 py-1.5 border border-emerald-300 text-emerald-800 hover:bg-emerald-100 flex items-center gap-1.5 shrink-0">
+              <Download size={13} /> Download NOC
+            </button>
           </div>
+          <p className="text-xs text-slate-400 mt-2">
+            The student now shows under Left / TC Students. The official TC itself is issued
+            separately through the government portal — the button below only records that in
+            this system too, if management chooses to.
+          </p>
           {canManageTc && (
-            <button onClick={() => setShowIssueForm((v) => !v)} className={`${primary} mt-3`}>
-              <FileSpreadsheet size={14} /> Issue TC
+            <button onClick={() => setShowIssueForm((v) => !v)} className={`${ghost} mt-2`}>
+              <FileSpreadsheet size={14} /> Also record the official TC here
             </button>
           )}
         </div>
@@ -4399,6 +4423,12 @@ function TcPanel({ enrollmentId, capabilities, onChanged, studentName }) {
               <Download size={13} /> Download TC
             </button>
           </div>
+          {latest.noc_number && (
+            <button onClick={() => downloadNocDoc(latest.id)}
+              className="mt-2 text-xs font-bold text-slate-500 hover:text-slate-700 flex items-center gap-1.5">
+              <Download size={12} /> Download NOC ({latest.noc_number})
+            </button>
+          )}
         </div>
       )}
 
@@ -4463,8 +4493,17 @@ function TcRequestForm({ enrollmentId, onDone }) {
   );
 }
 
+const EXIT_REASON_OPTIONS = [
+  { value: "tc", label: "TC" },
+  { value: "admission_cancelled", label: "Admission Cancelled" },
+  { value: "dropout", label: "Dropout" },
+  { value: "transferred", label: "Transferred to Another School" },
+  { value: "other", label: "Other" },
+];
+
 function TcClearForm({ requestId, onDone }) {
   const [note, setNote] = useState("");
+  const [exitReason, setExitReason] = useState("tc");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -4472,7 +4511,9 @@ function TcClearForm({ requestId, onDone }) {
     setError("");
     setBusy(true);
     try {
-      await api.post(`/students/tc-requests/${requestId}/clear`, { clearance_note: note.trim() });
+      await api.post(`/students/tc-requests/${requestId}/clear`, {
+        clearance_note: note.trim(), exit_reason: exitReason,
+      });
       await onDone();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not clear this TC request.");
@@ -4483,13 +4524,22 @@ function TcClearForm({ requestId, onDone }) {
 
   return (
     <div className="px-6 py-5 border-t border-slate-100 bg-slate-50">
-      <h3 className="font-bold text-sm mb-3">Finance clearance</h3>
+      <h3 className="font-bold text-sm mb-3">NOC / Management Clearance</h3>
       {error && <p className="text-xs font-semibold text-red-600 mb-2">{error}</p>}
-      <label className={eyebrow}>Note</label>
+      <label className={eyebrow}>Exit reason<span className="text-red-500"> *</span></label>
+      <select className={`${field} mt-2`} value={exitReason} onChange={(e) => setExitReason(e.target.value)}>
+        {EXIT_REASON_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+      </select>
+      <label className={`${eyebrow} mt-3 block`}>Remarks</label>
       <input className={`${field} mt-2`} value={note} onChange={(e) => setNote(e.target.value)}
         placeholder="All dues cleared, or how any remaining balance is being handled" />
+      <p className="text-xs text-slate-400 mt-2">
+        Approving does not waive any outstanding balance — it records management's decision to
+        let the student proceed with exit/TC regardless. Use a concession if the balance itself
+        needs to be waived.
+      </p>
       <button onClick={submit} disabled={busy} className={`${primary} mt-3`}>
-        {busy ? "Clearing…" : "Confirm clearance"}
+        {busy ? "Approving…" : "Approve NOC"}
       </button>
     </div>
   );
@@ -4563,8 +4613,13 @@ function RefundPanel({ enrollmentId, onDone }) {
   const [reference, setReference] = useState("");
   const [reason, setReason] = useState("");
   const [approverName, setApproverName] = useState("");
+  const [receivedBy, setReceivedBy] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  // Set once the refund actually succeeds — replaces the form with the
+  // receipt number and View/Print/Download, rather than immediately
+  // closing back to a bare "Refund recorded successfully."
+  const [justRecorded, setJustRecorded] = useState(null);
 
   async function submit() {
     setError("");
@@ -4572,16 +4627,42 @@ function RefundPanel({ enrollmentId, onDone }) {
     if (!(amt > 0)) return setError("Enter an amount greater than zero.");
     setBusy(true);
     try {
-      await api.post(`/students/enrollments/${enrollmentId}/refund`, {
+      const refund = await api.post(`/students/enrollments/${enrollmentId}/refund`, {
         amount: amt * 100, mode, instrument_ref: reference.trim(),
-        reason: reason.trim(), approver_name: approverName.trim(),
+        reason: reason.trim(), approver_name: approverName.trim(), received_by: receivedBy.trim(),
       });
-      await onDone();
+      setJustRecorded(refund);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not record that refund.");
     } finally {
       setBusy(false);
     }
+  }
+
+  async function openReceipt() {
+    try {
+      const data = await api.get(`/students/refunds/${justRecorded.id}/receipt-data`);
+      downloadRefundReceipt(data);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Could not fetch that refund receipt.");
+    }
+  }
+
+  if (justRecorded) {
+    return (
+      <div className="px-6 py-5 border-t border-slate-100 bg-emerald-50/40">
+        <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl px-4 py-3 text-sm">
+          <p className="font-bold">Refund recorded successfully.</p>
+          <p className="mt-1">Refund Receipt: <span className="font-bold tabular-nums">{justRecorded.receipt_no}</span></p>
+        </div>
+        <div className="flex gap-2 mt-3">
+          <button onClick={openReceipt} className={`${primary}`}>
+            <Download size={14} /> View / Print / Download
+          </button>
+          <button onClick={onDone} className={ghost}>Done</button>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -4613,10 +4694,17 @@ function RefundPanel({ enrollmentId, onDone }) {
             onChange={(e) => setApproverName(e.target.value)} placeholder="Management name" />
         </div>
       </div>
-      <div className="mt-3">
-        <label className={eyebrow}>Reason</label>
-        <input className={`${field} mt-2`} value={reason} onChange={(e) => setReason(e.target.value)}
-          placeholder="Withdrawal, overpayment, etc." />
+      <div className="grid sm:grid-cols-2 gap-3 mt-3">
+        <div>
+          <label className={eyebrow}>Reason</label>
+          <input className={`${field} mt-2`} value={reason} onChange={(e) => setReason(e.target.value)}
+            placeholder="Withdrawal, overpayment, etc." />
+        </div>
+        <div>
+          <label className={eyebrow}>Received by (optional)</label>
+          <input className={`${field} mt-2`} value={receivedBy}
+            onChange={(e) => setReceivedBy(e.target.value)} placeholder="Parent/guardian name" />
+        </div>
       </div>
       <button onClick={submit} disabled={busy} className={`${primary} mt-3`}>
         {busy ? "Recording…" : "Record refund"}
