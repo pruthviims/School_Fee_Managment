@@ -1228,6 +1228,142 @@ describe("admission -> billing -> collection, end to end", () => {
     });
   });
 
+  describe("GET /setup/sections — student_count for New Admission's section picker", () => {
+    async function admitInto(cookie: string, sectionId: string, year: any, classLevel: any, n: number) {
+      for (let i = 0; i < n; i++) {
+        const unique = `${Date.now()}${Math.floor(Math.random() * 100000)}`;
+        const res = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
+          admission_no: `2026/hc-${unique}`, full_name: `Headcount Student ${i}`,
+          gender: "male", contact_type: "guardian", guardian_relationship: "Father",
+          guardian_name: "Test Parent", academic_year_id: year.id,
+          class_level_id: classLevel.id, section_id: sectionId,
+        });
+        expect(res.status).toBe(201);
+      }
+    }
+
+    it("returns the correct active-enrollment count for every section of a class, in one call", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const { year, classLevel, section: sectionA } = await setUpAcademicStructure(cookie);
+      const sectionB = await request(app).post("/api/setup/sections").set("Cookie", cookie)
+        .send({ academic_year_id: year.id, class_level_id: classLevel.id, name: "B" }).then((r) => r.body);
+
+      await admitInto(cookie, sectionA.id, year, classLevel, 3);
+      await admitInto(cookie, sectionB.id, year, classLevel, 1);
+
+      const res = await request(app)
+        .get(`/api/setup/sections?academic_year_id=${year.id}&class_level_id=${classLevel.id}`)
+        .set("Cookie", cookie);
+      expect(res.status).toBe(200);
+      const byName = Object.fromEntries(res.body.map((s: any) => [s.name, s.student_count]));
+      expect(byName.A).toBe(3);
+      expect(byName.B).toBe(1);
+    });
+
+    it("a section with no students shows 0, not null or missing", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const { year, classLevel } = await setUpAcademicStructure(cookie);
+      await request(app).post("/api/setup/sections").set("Cookie", cookie)
+        .send({ academic_year_id: year.id, class_level_id: classLevel.id, name: "Empty" });
+
+      const res = await request(app)
+        .get(`/api/setup/sections?academic_year_id=${year.id}&class_level_id=${classLevel.id}`)
+        .set("Cookie", cookie);
+      const empty = res.body.find((s: any) => s.name === "Empty");
+      expect(empty.student_count).toBe(0);
+    });
+
+    it("excludes withdrawn students from the count — the same active-enrollment rule everywhere else", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const { year, classLevel } = await setUpAcademicStructure(cookie);
+      const section = await request(app).post("/api/setup/sections").set("Cookie", cookie)
+        .send({ academic_year_id: year.id, class_level_id: classLevel.id, name: "W" }).then((r) => r.body);
+
+      const admission = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
+        admission_no: "2026/hc-w1", full_name: "Will Withdraw", gender: "male",
+        contact_type: "guardian", guardian_relationship: "Father", guardian_name: "Parent",
+        academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
+      });
+      await admitInto(cookie, section.id, year, classLevel, 2); // 2 who stay active
+
+      let res = await request(app)
+        .get(`/api/setup/sections?academic_year_id=${year.id}&class_level_id=${classLevel.id}`)
+        .set("Cookie", cookie);
+      expect(res.body.find((s: any) => s.name === "W").student_count).toBe(3);
+
+      await request(app).post(`/api/students/enrollments/${admission.body.enrollment.id}/withdraw`)
+        .set("Cookie", cookie).send({ withdrawn_on: "2026-09-01", reason: "Test" });
+
+      res = await request(app)
+        .get(`/api/setup/sections?academic_year_id=${year.id}&class_level_id=${classLevel.id}`)
+        .set("Cookie", cookie);
+      expect(res.body.find((s: any) => s.name === "W").student_count).toBe(2);
+    });
+
+    it("does not count a student from a different academic year", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const { year, classLevel } = await setUpAcademicStructure(cookie);
+      const section = await request(app).post("/api/setup/sections").set("Cookie", cookie)
+        .send({ academic_year_id: year.id, class_level_id: classLevel.id, name: "Y" }).then((r) => r.body);
+      await admitInto(cookie, section.id, year, classLevel, 2);
+
+      const otherYear = await request(app).post("/api/setup/academic-years").set("Cookie", cookie)
+        .send({ name: "2027-28", starts_on: "2027-06-01", ends_on: "2028-03-31" }).then((r) => r.body);
+      const otherYearSection = await request(app).post("/api/setup/sections").set("Cookie", cookie)
+        .send({ academic_year_id: otherYear.id, class_level_id: classLevel.id, name: "Y" }).then((r) => r.body);
+
+      const res = await request(app)
+        .get(`/api/setup/sections?academic_year_id=${otherYear.id}&class_level_id=${classLevel.id}`)
+        .set("Cookie", cookie);
+      // A brand-new section in the new year, same name — its own count
+      // must be 0, not inherit the 2 students actually enrolled in the
+      // *previous* year's "Y" section.
+      expect(res.body.find((s: any) => s.id === otherYearSection.id).student_count).toBe(0);
+    });
+
+    it("refreshes to reflect a new admission immediately", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const { year, classLevel } = await setUpAcademicStructure(cookie);
+      const section = await request(app).post("/api/setup/sections").set("Cookie", cookie)
+        .send({ academic_year_id: year.id, class_level_id: classLevel.id, name: "R" }).then((r) => r.body);
+      await admitInto(cookie, section.id, year, classLevel, 1);
+
+      let res = await request(app)
+        .get(`/api/setup/sections?academic_year_id=${year.id}&class_level_id=${classLevel.id}`)
+        .set("Cookie", cookie);
+      expect(res.body.find((s: any) => s.name === "R").student_count).toBe(1);
+
+      await admitInto(cookie, section.id, year, classLevel, 1); // one more, right after
+
+      res = await request(app)
+        .get(`/api/setup/sections?academic_year_id=${year.id}&class_level_id=${classLevel.id}`)
+        .set("Cookie", cookie);
+      expect(res.body.find((s: any) => s.name === "R").student_count).toBe(2);
+    });
+
+    it("never counts another school's students in this school's sections", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const { year, classLevel } = await setUpAcademicStructure(cookie);
+      const section = await request(app).post("/api/setup/sections").set("Cookie", cookie)
+        .send({ academic_year_id: year.id, class_level_id: classLevel.id, name: "T" }).then((r) => r.body);
+      await admitInto(cookie, section.id, year, classLevel, 4);
+
+      const otherSchool = await createSchool({ short_code: "http-test-hc-other" });
+      const otherOwner = await createUser("owner-hc@http.test", "x".repeat(14));
+      await createMembership(otherOwner.id, otherSchool.id, "owner");
+      const otherCookie = await loginAs("owner-hc@http.test");
+      const { year: otherYear, classLevel: otherClassLevel } = await setUpAcademicStructure(otherCookie);
+      const otherSection = await request(app).post("/api/setup/sections").set("Cookie", otherCookie)
+        .send({ academic_year_id: otherYear.id, class_level_id: otherClassLevel.id, name: "T" })
+        .then((r) => r.body);
+
+      const res = await request(app)
+        .get(`/api/setup/sections?academic_year_id=${otherYear.id}&class_level_id=${otherClassLevel.id}`)
+        .set("Cookie", otherCookie);
+      expect(res.body.find((s: any) => s.id === otherSection.id).student_count).toBe(0);
+    });
+  });
+
   it("an accountant can see the day book after front desk collects", async () => {
     const ownerCookie = await loginAs("owner@http.test");
     const { year, classLevel, section } = await setUpAcademicStructure(ownerCookie);

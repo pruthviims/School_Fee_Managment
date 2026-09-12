@@ -1899,6 +1899,8 @@ export function NewAdmissionTab({ state, save, classLevels, academicYears }) {
     guardianRelationship: "", guardianName: "", phone: "", email: "", address: "" };
   const [f, setF] = useState(blank);
   const [sections, setSections] = useState([]);
+  const [sectionsLoading, setSectionsLoading] = useState(false);
+  const [sectionsError, setSectionsError] = useState(false);
   const [error, setError] = useState("");
   const [done, setDone] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -1917,12 +1919,25 @@ export function NewAdmissionTab({ state, save, classLevels, academicYears }) {
   // deferred-to-Fee-Collection design. Refetched whenever the class
   // changes; the section field resets alongside it, since a section
   // that belonged to the previous class choice would be meaningless.
+  // student_count rides along on each section from the same call —
+  // GET /setup/sections already returns it, computed server-side from
+  // active enrollments, so there's nothing extra to fetch here.
   async function refreshSections(classLevelId, yearId) {
-    if (!classLevelId || !yearId) { setSections([]); return; }
+    if (!classLevelId || !yearId) { setSections([]); setSectionsError(false); return; }
+    setSectionsLoading(true);
+    setSectionsError(false);
     try {
       setSections(await api.get(`/setup/sections?academic_year_id=${yearId}&class_level_id=${classLevelId}`));
     } catch {
+      // A failed headcount lookup shouldn't take the whole form down
+      // with it — sections still renders (just without counts), so the
+      // office can still admit a student even if this particular call
+      // failed; showing a stale or invented count would be worse than
+      // showing none.
       setSections([]);
+      setSectionsError(true);
+    } finally {
+      setSectionsLoading(false);
     }
   }
   useEffect(() => {
@@ -1939,7 +1954,10 @@ export function NewAdmissionTab({ state, save, classLevels, academicYears }) {
         academic_year_id: year.id, class_level_id: f.classLevelId,
         name: name.trim().toUpperCase().slice(0, 10),
       });
-      setSections((prev) => [...prev, created]);
+      // POST doesn't return student_count (only GET computes it) — a
+      // brand-new section always starts at 0, so that's filled in
+      // directly rather than re-fetching the whole list just for this.
+      setSections((prev) => [...prev, { ...created, student_count: 0 }]);
       setF((prev) => ({ ...prev, sectionId: created.id }));
     } catch (err) {
       alert(err instanceof Error ? err.message : "Could not add that section.");
@@ -2075,17 +2093,50 @@ export function NewAdmissionTab({ state, save, classLevels, academicYears }) {
           </div>
           <div>
             <label className={eyebrow}>Section<span className="text-red-500"> *</span></label>
-            <FilterSelect value={f.sectionId} active={Boolean(f.sectionId)} disabled={!f.classLevelId}
+            <FilterSelect value={f.sectionId} active={Boolean(f.sectionId)}
+              disabled={!f.classLevelId || sectionsLoading}
               className="mt-2"
               onChange={(e) => {
                 if (e.target.value === "__new__") return addSection();
                 setF({ ...f, sectionId: e.target.value });
               }}>
-              <option value="">{f.classLevelId ? "Choose a section" : "Choose a class first"}</option>
-              {sections.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+              <option value="">
+                {!f.classLevelId ? "Choose a class first" : sectionsLoading ? "Loading sections…" : "Choose a section"}
+              </option>
+              {sections.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name} — {s.student_count} student{s.student_count === 1 ? "" : "s"}
+                </option>
+              ))}
               {f.classLevelId && <option value="__new__">+ Add new section</option>}
             </FilterSelect>
+            {sectionsError && (
+              <p className="mt-1.5 text-xs font-semibold text-red-500">
+                Couldn't load section headcounts — you can still choose a section above.
+              </p>
+            )}
           </div>
+
+          {f.classLevelId && !sectionsLoading && sections.length > 1 && (
+            <div className="sm:col-span-2 bg-slate-50 border border-slate-100 rounded-xl px-4 py-3.5">
+              <p className={`${eyebrow} mb-2.5`}>Current headcount, lowest first</p>
+              <div className="flex flex-wrap gap-2">
+                {/* Sorted only for this at-a-glance comparison — the
+                    dropdown above keeps its own existing order, and
+                    picking a section here is still entirely up to the
+                    office; nothing here selects one automatically. */}
+                {[...sections].sort((a, b) => a.student_count - b.student_count).map((s) => (
+                  <button key={s.id} type="button"
+                    onClick={() => setF({ ...f, sectionId: s.id })}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold border-2 transition ${
+                      f.sectionId === s.id ? "bg-brand-600 border-brand-600 text-white"
+                        : "bg-white border-slate-200 text-slate-600 hover:border-brand-300"}`}>
+                    {s.name} · {s.student_count}{s.capacity ? `/${s.capacity}` : ""}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           <div>
             <label className={eyebrow}>Admission no.</label>
             <div className={`mt-2 rounded-xl px-3.5 py-2.5 text-sm font-bold tabular-nums border-2 ${

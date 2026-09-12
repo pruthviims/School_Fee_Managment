@@ -218,9 +218,28 @@ setupRouter.get("/sections", async (req, res) => {
     params.push(class_level_id);
     where += ` AND s.class_level_id = $${params.length}`;
   }
+  // student_count rides along with the same query that already loads
+  // sections — one grouped count over enrollments, not one query per
+  // section. New Admission is what actually needs this (so the office
+  // can see which section is already crowded before picking one), but
+  // it's added here rather than as a separate endpoint since every
+  // caller of this one already gets it for free, and none of them stop
+  // working because of an extra column they don't use. "Active" here
+  // is exactly is_active = true — the same definition Fee Collection,
+  // Class Promotion, and everywhere else in the app already uses; a
+  // withdrawn or TC'd student was never going to be counted here as
+  // long as this stays consistent with that.
   const result = await pool.query(
-    `SELECT s.*, cl.name AS class_name, cl.ladder_order FROM sections s
+    `SELECT s.*, cl.name AS class_name, cl.ladder_order,
+            COALESCE(ec.student_count, 0)::int AS student_count
+     FROM sections s
      JOIN class_levels cl ON cl.id = s.class_level_id
+     LEFT JOIN (
+       SELECT section_id, COUNT(*) AS student_count
+       FROM enrollments
+       WHERE school_id = $1 AND is_active = true
+       GROUP BY section_id
+     ) ec ON ec.section_id = s.id
      WHERE ${where} ORDER BY cl.ladder_order, s.name`,
     params,
   );
