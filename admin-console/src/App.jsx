@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
+  Bell,
   Bus,
   ChevronDown,
   FileSpreadsheet,
@@ -8,7 +9,6 @@ import {
   LogOut,
   Percent,
   ReceiptIndianRupee,
-  RefreshCw,
   School,
   Sparkles,
   UserMinus,
@@ -25,6 +25,7 @@ import {
   ImportScreen,
   LeftTcStudentsScreen,
   NewAdmissionTab,
+  PendingApprovalsScreen,
   PromoteTab,
   QuickBalanceSearch,
   SchoolScreen,
@@ -186,6 +187,35 @@ export default function App() {
   // and search, then cleared, rather than a second student-detail view
   // built just for this sidebar search.
   const [jumpToStudent, setJumpToStudent] = useState(null);
+  // Pending TC/refund requests awaiting Accountant/Owner review — the
+  // notification bell's own count, refetched on sign-in and whenever
+  // the Pending Approvals screen itself changes something, plus a
+  // light poll so the badge doesn't go stale across a long session.
+  // No new notification framework: a plain count from the same
+  // pending-approvals endpoint the review screen itself reads from.
+  const [pendingApprovals, setPendingApprovals] = useState({ tcCount: 0, refundCount: 0 });
+  const canApproveRequests = (state?.school?.capabilities || []).includes("manage_tc")
+    || (state?.school?.capabilities || []).includes("void_payments");
+
+  async function refreshPendingApprovals() {
+    if (!canApproveRequests) return;
+    try {
+      const data = await api.get("/students/pending-approvals");
+      setPendingApprovals({ tcCount: data.tcCount, refundCount: data.refundCount });
+    } catch {
+      // A failed count fetch shouldn't put an error on screen for
+      // something this incidental — the badge just stays at its last
+      // known value until the next successful refresh.
+    }
+  }
+
+  useEffect(() => {
+    if (!signedIn || !canApproveRequests) return;
+    refreshPendingApprovals();
+    const interval = setInterval(refreshPendingApprovals, 60000);
+    return () => clearInterval(interval);
+  }, [signedIn, canApproveRequests]); // eslint-disable-line
+
   const userMenuRef = useRef(null);
   useEffect(() => {
     if (!userMenuOpen) return;
@@ -564,9 +594,18 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-3">
-            <button className="eyebrow text-slate-400 hover:text-slate-600 flex items-center gap-1.5">
-              <RefreshCw size={13} /> Sync Now
-            </button>
+            {canApproveRequests && (
+              <button onClick={() => setStep("pendingApprovals")}
+                className="relative eyebrow text-slate-400 hover:text-slate-600 flex items-center gap-1.5"
+                aria-label="Pending approvals">
+                <Bell size={15} />
+                {(pendingApprovals.tcCount + pendingApprovals.refundCount) > 0 && (
+                  <span className="absolute -top-1.5 -right-2 min-w-[16px] h-4 px-1 rounded-full bg-red-500 text-white text-[10px] font-extrabold grid place-items-center">
+                    {pendingApprovals.tcCount + pendingApprovals.refundCount}
+                  </span>
+                )}
+              </button>
+            )}
             <div className="relative" ref={userMenuRef}>
               <button
                 type="button"
@@ -613,6 +652,9 @@ export default function App() {
 
         {step === "activityLog" && state.school.capabilities.includes("view_audit_log") && (
           <ActivityLogScreen />
+        )}
+        {step === "pendingApprovals" && canApproveRequests && (
+          <PendingApprovalsScreen onChanged={refreshPendingApprovals} />
         )}
 
         {(step === "transport" || step === "fees") && (

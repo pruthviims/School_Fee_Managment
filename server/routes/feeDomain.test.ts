@@ -1221,6 +1221,306 @@ describe("admission -> billing -> collection, end to end", () => {
     });
   });
 
+  describe("TC/Refund request approval — Front Desk requests, Accountant/Owner decides", () => {
+    async function admitAndChargeFor(cookie: string, admissionNo: string) {
+      const { year, classLevel, section } = await setUpAcademicStructure(cookie);
+      const admission = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
+        admission_no: admissionNo, full_name: "Review Test Student", gender: "male",
+        contact_type: "guardian", guardian_relationship: "Father", guardian_name: "Test Guardian",
+        academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
+      });
+      return admission.body.enrollment;
+    }
+
+    it("front desk can raise a TC request; front desk cannot approve or reject it", async () => {
+      const ownerCookie = await loginAs("owner@http.test");
+      const enrollment = await admitAndChargeFor(ownerCookie, "2026/req-1");
+      const deskCookie = await loginAs("desk@http.test");
+
+      const created = await request(app).post(`/api/students/enrollments/${enrollment.id}/tc-requests`)
+        .set("Cookie", deskCookie).send({ reason: "Transfer", last_day: "2026-10-01" });
+      expect(created.status).toBe(201);
+      expect(created.body.status).toBe("pending_clearance");
+
+      const approveAttempt = await request(app).post(`/api/students/tc-requests/${created.body.id}/clear`)
+        .set("Cookie", deskCookie).send({ exit_reason: "tc" });
+      expect(approveAttempt.status).toBe(403);
+
+      const rejectAttempt = await request(app).post(`/api/students/tc-requests/${created.body.id}/reject`)
+        .set("Cookie", deskCookie).send({ rejection_comments: "no" });
+      expect(rejectAttempt.status).toBe(403);
+    });
+
+    it("rejecting a TC request requires comments, records who/when, and does not touch the enrollment", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const enrollment = await admitAndChargeFor(cookie, "2026/req-2");
+      const deskCookie = await loginAs("desk@http.test");
+      const req1 = await request(app).post(`/api/students/enrollments/${enrollment.id}/tc-requests`)
+        .set("Cookie", deskCookie).send({ reason: "Transfer", last_day: "2026-10-01" });
+
+      const noComment = await request(app).post(`/api/students/tc-requests/${req1.body.id}/reject`)
+        .set("Cookie", cookie).send({});
+      expect(noComment.status).toBe(400); // comments are mandatory
+
+      const reject = await request(app).post(`/api/students/tc-requests/${req1.body.id}/reject`)
+        .set("Cookie", cookie).send({
+          rejection_comments: "₹1,318 is outstanding. Please collect the balance before submitting again.",
+        });
+      expect(reject.status).toBe(200);
+      expect(reject.body.status).toBe("rejected");
+      expect(reject.body.rejected_by).toBeTruthy();
+      expect(reject.body.rejected_on).toBeTruthy();
+      expect(reject.body.rejection_comments).toContain("outstanding");
+
+      // A rejection is not an exit — the student stays fully active,
+      // with whatever outcome value a never-exited enrollment already
+      // has (its own pre-existing default, not something this touches).
+      const enrollmentRow = await pool.query(`SELECT is_active, outcome FROM enrollments WHERE id = $1`, [enrollment.id]);
+      expect(enrollmentRow.rows[0].is_active).toBe(true);
+      expect(enrollmentRow.rows[0].outcome).not.toBe("left");
+      expect(enrollmentRow.rows[0].outcome).not.toBe("tc_issued");
+    });
+
+    it("front desk can raise a new TC request after a rejection — it is not blocked as 'already in progress'", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const enrollment = await admitAndChargeFor(cookie, "2026/req-3");
+      const deskCookie = await loginAs("desk@http.test");
+      const first = await request(app).post(`/api/students/enrollments/${enrollment.id}/tc-requests`)
+        .set("Cookie", deskCookie).send({ reason: "Transfer", last_day: "2026-10-01" });
+      await request(app).post(`/api/students/tc-requests/${first.body.id}/reject`)
+        .set("Cookie", cookie).send({ rejection_comments: "Not yet" });
+
+      const second = await request(app).post(`/api/students/enrollments/${enrollment.id}/tc-requests`)
+        .set("Cookie", deskCookie).send({ reason: "Transfer, take two", last_day: "2026-10-05" });
+      expect(second.status).toBe(201);
+
+      const approve = await request(app).post(`/api/students/tc-requests/${second.body.id}/clear`)
+        .set("Cookie", cookie).send({ exit_reason: "tc" });
+      expect(approve.status).toBe(200);
+      expect(approve.body.status).toBe("cleared");
+    });
+
+    it("outstanding balance never auto-rejects — accountant can approve a TC request despite it, and the balance is preserved", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const enrollment = await admitAndChargeFor(cookie, "2026/req-4");
+      await request(app).post("/api/collection/payments").set("Cookie", cookie).send({
+        enrollment_id: enrollment.id, amount: 3868200, mode: "cash", // ₹40,000 - ₹1,318 (paise)
+      });
+      const deskCookie = await loginAs("desk@http.test");
+      const req1 = await request(app).post(`/api/students/enrollments/${enrollment.id}/tc-requests`)
+        .set("Cookie", deskCookie).send({ reason: "Transfer", last_day: "2026-10-01" });
+
+      const accCookie = await loginAs("acc@http.test");
+      const approve = await request(app).post(`/api/students/tc-requests/${req1.body.id}/clear`)
+        .set("Cookie", accCookie).send({ exit_reason: "tc", clearance_note: "Approved despite balance" });
+      expect(approve.status).toBe(200);
+      expect(approve.body.financial_snapshot.outstanding).toBe(131800); // never zeroed
+    });
+
+    it("pending-approvals shows the TC request with its outstanding balance, correctly for accountant/owner and empty for front desk/viewer", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const enrollment = await admitAndChargeFor(cookie, "2026/req-5");
+      const deskCookie = await loginAs("desk@http.test");
+      await request(app).post(`/api/students/enrollments/${enrollment.id}/tc-requests`)
+        .set("Cookie", deskCookie).send({ reason: "Transfer", last_day: "2026-10-01" });
+
+      const ownerView = await request(app).get("/api/students/pending-approvals").set("Cookie", cookie);
+      expect(ownerView.status).toBe(200);
+      expect(ownerView.body.tcCount).toBe(1);
+      const row = ownerView.body.tcRequests[0];
+      expect(row.full_name).toBe("Review Test Student");
+      expect(row.admission_no).toBe("2026/req-5");
+      expect(row.class_name).toBeTruthy();
+      expect(row.requested_by_name).toBeDefined();
+      expect(row.outstanding).toBe(4000000); // nothing paid yet
+
+      const accView = await request(app).get("/api/students/pending-approvals").set("Cookie", await loginAs("acc@http.test"));
+      expect(accView.body.tcCount).toBe(1);
+
+      const deskView = await request(app).get("/api/students/pending-approvals").set("Cookie", deskCookie);
+      expect(deskView.status).toBe(403); // Front Desk has neither manage_tc nor void_payments
+    });
+
+    it("an approved or rejected TC request stops appearing in pending-approvals", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const enrollment = await admitAndChargeFor(cookie, "2026/req-6");
+      const req1 = await request(app).post(`/api/students/enrollments/${enrollment.id}/tc-requests`)
+        .set("Cookie", cookie).send({ reason: "Transfer", last_day: "2026-10-01" });
+
+      let pending = await request(app).get("/api/students/pending-approvals").set("Cookie", cookie);
+      expect(pending.body.tcCount).toBe(1);
+
+      await request(app).post(`/api/students/tc-requests/${req1.body.id}/clear`)
+        .set("Cookie", cookie).send({ exit_reason: "tc" });
+
+      pending = await request(app).get("/api/students/pending-approvals").set("Cookie", cookie);
+      expect(pending.body.tcCount).toBe(0);
+    });
+
+    it("front desk can raise a refund request; it creates no actual refund and does not affect the ledger", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const enrollment = await admitAndChargeFor(cookie, "2026/refreq-1");
+      await request(app).post("/api/collection/payments").set("Cookie", cookie).send({
+        enrollment_id: enrollment.id, amount: 4000000, mode: "cash",
+      });
+      const deskCookie = await loginAs("desk@http.test");
+
+      const created = await request(app).post(`/api/students/enrollments/${enrollment.id}/refund-requests`)
+        .set("Cookie", deskCookie).send({ amount: 300000, mode: "cash", reason: "Overpaid" });
+      expect(created.status).toBe(201);
+      expect(created.body.status).toBe("pending");
+
+      // No actual refund exists yet.
+      const refunds = await request(app).get(`/api/students/enrollments/${enrollment.id}/refunds`).set("Cookie", cookie);
+      expect(refunds.body).toHaveLength(0);
+
+      // Ledger is completely unaffected while pending — the exact
+      // financial-safety requirement: net paid still shows the full
+      // amount, nothing is reserved or reduced by a request that
+      // hasn't been approved.
+      const roster = await request(app)
+        .get(`/api/students/enrollments?academic_year_id=${enrollment.academic_year_id || ""}&include_ledger=1`)
+        .set("Cookie", cookie);
+      // academic_year_id may not be on the admission response directly; fetch via profile instead for certainty.
+      const profile = await request(app).get(`/api/students/enrollments/${enrollment.id}/profile`).set("Cookie", cookie);
+      const rosterByYear = await request(app)
+        .get(`/api/students/enrollments?academic_year_id=${profile.body.academic_year_id}&include_ledger=1`)
+        .set("Cookie", cookie);
+      const row = rosterByYear.body.find((r: any) => r.id === enrollment.id);
+      expect(row.ledger.paid).toBe(4000000);
+      expect(row.ledger.balance).toBe(0);
+    });
+
+    it("front desk cannot approve or reject a refund request", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const enrollment = await admitAndChargeFor(cookie, "2026/refreq-2");
+      const deskCookie = await loginAs("desk@http.test");
+      const created = await request(app).post(`/api/students/enrollments/${enrollment.id}/refund-requests`)
+        .set("Cookie", deskCookie).send({ amount: 100000, mode: "cash" });
+
+      const approveAttempt = await request(app).post(`/api/students/refund-requests/${created.body.id}/approve`)
+        .set("Cookie", deskCookie).send({});
+      expect(approveAttempt.status).toBe(403);
+      const rejectAttempt = await request(app).post(`/api/students/refund-requests/${created.body.id}/reject`)
+        .set("Cookie", deskCookie).send({ rejection_comments: "no" });
+      expect(rejectAttempt.status).toBe(403);
+    });
+
+    it("rejecting a refund request requires comments and creates no refund", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const enrollment = await admitAndChargeFor(cookie, "2026/refreq-3");
+      const deskCookie = await loginAs("desk@http.test");
+      const created = await request(app).post(`/api/students/enrollments/${enrollment.id}/refund-requests`)
+        .set("Cookie", deskCookie).send({ amount: 100000, mode: "cash" });
+
+      const noComment = await request(app).post(`/api/students/refund-requests/${created.body.id}/reject`)
+        .set("Cookie", cookie).send({});
+      expect(noComment.status).toBe(400);
+
+      const reject = await request(app).post(`/api/students/refund-requests/${created.body.id}/reject`)
+        .set("Cookie", cookie).send({ rejection_comments: "Not eligible for a refund." });
+      expect(reject.status).toBe(200);
+      expect(reject.body.status).toBe("rejected");
+      expect(reject.body.reviewed_by).toBeTruthy();
+
+      const refunds = await request(app).get(`/api/students/enrollments/${enrollment.id}/refunds`).set("Cookie", cookie);
+      expect(refunds.body).toHaveLength(0);
+    });
+
+    it("approving a refund request creates the real refund via the existing logic — receipt, correct ledger, linked back to the request", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const enrollment = await admitAndChargeFor(cookie, "2026/refreq-4");
+      await request(app).post("/api/collection/payments").set("Cookie", cookie).send({
+        enrollment_id: enrollment.id, amount: 4000000, mode: "cash",
+      });
+      const deskCookie = await loginAs("desk@http.test");
+      const created = await request(app).post(`/api/students/enrollments/${enrollment.id}/refund-requests`)
+        .set("Cookie", deskCookie).send({
+          amount: 300000, mode: "upi", instrument_ref: "UTR999", reason: "Overpaid",
+        });
+
+      const approve = await request(app).post(`/api/students/refund-requests/${created.body.id}/approve`)
+        .set("Cookie", cookie).send({ comments: "Confirmed overpayment" });
+      expect(approve.status).toBe(200);
+      expect(approve.body.status).toBe("approved");
+      expect(approve.body.refund.receipt_no).toMatch(/^RF\//);
+      expect(approve.body.refund.amount).toBe(300000);
+
+      const refunds = await request(app).get(`/api/students/enrollments/${enrollment.id}/refunds`).set("Cookie", cookie);
+      expect(refunds.body).toHaveLength(1);
+      expect(refunds.body[0].receipt_no).toBe(approve.body.refund.receipt_no);
+
+      const profile = await request(app).get(`/api/students/enrollments/${enrollment.id}/profile`).set("Cookie", cookie);
+      const roster = await request(app)
+        .get(`/api/students/enrollments?academic_year_id=${profile.body.academic_year_id}&include_ledger=1`)
+        .set("Cookie", cookie);
+      const row = roster.body.find((r: any) => r.id === enrollment.id);
+      expect(row.ledger.paid).toBe(3700000); // net paid after refund
+      expect(row.ledger.balance).toBe(300000);
+    });
+
+    it("a second approval attempt on an already-approved request fails cleanly — no duplicate refund", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const enrollment = await admitAndChargeFor(cookie, "2026/refreq-5");
+      await request(app).post("/api/collection/payments").set("Cookie", cookie).send({
+        enrollment_id: enrollment.id, amount: 4000000, mode: "cash",
+      });
+      const created = await request(app).post(`/api/students/enrollments/${enrollment.id}/refund-requests`)
+        .set("Cookie", cookie).send({ amount: 300000, mode: "cash" });
+
+      const first = await request(app).post(`/api/students/refund-requests/${created.body.id}/approve`)
+        .set("Cookie", cookie).send({});
+      expect(first.status).toBe(200);
+
+      // Simulates the second reviewer clicking approve on the same,
+      // now-already-resolved request — the FOR UPDATE + status guard
+      // inside one transaction is what makes this fail instead of
+      // silently creating a second refund.
+      const second = await request(app).post(`/api/students/refund-requests/${created.body.id}/approve`)
+        .set("Cookie", cookie).send({});
+      expect(second.status).toBe(400);
+
+      const refunds = await request(app).get(`/api/students/enrollments/${enrollment.id}/refunds`).set("Cookie", cookie);
+      expect(refunds.body).toHaveLength(1); // still exactly one, not two
+    });
+
+    it("pending-approvals shows the refund request and drops it once reviewed", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const enrollment = await admitAndChargeFor(cookie, "2026/refreq-6");
+      const created = await request(app).post(`/api/students/enrollments/${enrollment.id}/refund-requests`)
+        .set("Cookie", cookie).send({ amount: 200000, mode: "cash", reason: "Test" });
+
+      let pending = await request(app).get("/api/students/pending-approvals").set("Cookie", cookie);
+      expect(pending.body.refundCount).toBe(1);
+      expect(pending.body.refundRequests[0].full_name).toBe("Review Test Student");
+      expect(pending.body.refundRequests[0].amount).toBe(200000);
+
+      await request(app).post(`/api/students/refund-requests/${created.body.id}/reject`)
+        .set("Cookie", cookie).send({ rejection_comments: "Test" });
+
+      pending = await request(app).get("/api/students/pending-approvals").set("Cookie", cookie);
+      expect(pending.body.refundCount).toBe(0);
+    });
+
+    it("tenant isolation: pending-approvals never shows another school's requests", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const enrollment = await admitAndChargeFor(cookie, "2026/refreq-7");
+      await request(app).post(`/api/students/enrollments/${enrollment.id}/tc-requests`)
+        .set("Cookie", cookie).send({ reason: "Transfer", last_day: "2026-10-01" });
+      await request(app).post(`/api/students/enrollments/${enrollment.id}/refund-requests`)
+        .set("Cookie", cookie).send({ amount: 100000, mode: "cash" });
+
+      const otherSchool = await createSchool({ short_code: "http-test-req-other" });
+      const otherOwner = await createUser("owner-req@http.test", "x".repeat(14));
+      await createMembership(otherOwner.id, otherSchool.id, "owner");
+      const otherCookie = await loginAs("owner-req@http.test");
+
+      const otherPending = await request(app).get("/api/students/pending-approvals").set("Cookie", otherCookie);
+      expect(otherPending.body.tcCount).toBe(0);
+      expect(otherPending.body.refundCount).toBe(0);
+    });
+  });
+
   describe("Left / TC Students — a dedicated historical view", () => {
     async function admitAndWithdraw(cookie: string, overrides: {
       admission_no: string; full_name: string; year: any; classLevel: any; section: any;

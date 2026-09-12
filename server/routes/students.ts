@@ -7,13 +7,14 @@
  */
 
 import { Router } from "express";
+import type { PoolClient } from "pg";
 import { z } from "zod";
 import { pool } from "../db/index.js";
-import { requireCapability, requireMember } from "../middleware/permissions.js";
+import { requireCapability, requireMember, requireAnyCapability } from "../middleware/permissions.js";
 import { logActivity } from "../services/auditLog.js";
 import { BillingError, generateCharges } from "../services/billing.js";
 import { fiscalYearFor, issueDocumentNumber } from "../services/documentCounter.js";
-import { getEnrollmentLedger } from "../services/ledger.js";
+import { getBulkEnrollmentLedgers, getEnrollmentLedger } from "../services/ledger.js";
 import { membershipCan, type Role } from "../permissions.js";
 
 export const studentsRouter = Router();
@@ -484,6 +485,36 @@ const refundSchema = z.object({
   received_by: z.string().max(150).optional().default(""),
 });
 
+/**
+ * The one place an actual refunds row gets created — called directly
+ * by the existing POST /refund endpoint (Accountant/Owner refunding
+ * without going through a request first, unchanged from before this
+ * feature existed) and by refund-request approval below. Neither path
+ * duplicates this logic; both call it. Must run inside the caller's
+ * own transaction, same reasoning as recordPaymentsBulk and the NOC
+ * flow before it: issueDocumentNumber's row lock is only meaningful
+ * with a real client, not the bare pool.
+ */
+async function createRefund(
+  client: PoolClient, schoolId: string, enrollmentId: string, refundedBy: string | null,
+  d: { amount: number; mode: string; instrument_ref: string; reason: string;
+       approver_name: string; received_by: string },
+) {
+  const fiscalYear = fiscalYearFor(new Date());
+  const receiptNo = await issueDocumentNumber(client, {
+    schoolId, docType: "refund", fiscalYear, prefix: "RF/",
+  });
+  const result = await client.query(
+    `INSERT INTO refunds
+       (school_id, enrollment_id, amount, mode, instrument_ref, reason, approver_name,
+        received_by, refunded_by, receipt_no)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+    [schoolId, enrollmentId, d.amount, d.mode, d.instrument_ref, d.reason,
+     d.approver_name, d.received_by, refundedBy, receiptNo],
+  );
+  return result.rows[0];
+}
+
 // Accountant/Owner only (void_payments) — a refund is money leaving the
 // school, the same sensitivity level already agreed for voiding a
 // payment, not something Front Desk initiates on their own.
@@ -505,38 +536,19 @@ studentsRouter.post(
       );
       if (!enrollment.rows[0]) { await client.query("ROLLBACK"); return res.status(404).end(); }
 
-      // Its own document identity, via the same counter mechanism every
-      // other numbered document in this app already uses — a refund
-      // receipt must never be mistaken for a fee receipt or an NOC, so
-      // it gets its own doc_type ('refund') and prefix rather than
-      // reusing either of theirs. issueDocumentNumber's row lock is
-      // only meaningful inside a real transaction, which is why this
-      // whole handler is one rather than plain pool.query calls.
-      const fiscalYear = fiscalYearFor(new Date());
-      const receiptNo = await issueDocumentNumber(client, {
-        schoolId: req.school!.id, docType: "refund", fiscalYear, prefix: "RF/",
-      });
-
-      const result = await client.query(
-        `INSERT INTO refunds
-           (school_id, enrollment_id, amount, mode, instrument_ref, reason, approver_name,
-            received_by, refunded_by, receipt_no)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
-        [req.school!.id, req.params.id, d.amount, d.mode, d.instrument_ref, d.reason,
-         d.approver_name, d.received_by, req.user!.id, receiptNo],
-      );
+      const refund = await createRefund(client, req.school!.id, String(req.params.id), req.user!.id, d);
 
       await client.query("COMMIT");
 
       await logActivity(pool, req, {
         action: "refund.create",
         entityType: "refund",
-        entityId: result.rows[0].id,
-        description: `Refunded ${enrollment.rows[0].full_name} — ₹${(d.amount / 100).toFixed(2)} via ${d.mode} (${receiptNo})`,
-        metadata: { amount: d.amount, mode: d.mode, reason: d.reason, receipt_no: receiptNo },
+        entityId: refund.id,
+        description: `Refunded ${enrollment.rows[0].full_name} — ₹${(d.amount / 100).toFixed(2)} via ${d.mode} (${refund.receipt_no})`,
+        metadata: { amount: d.amount, mode: d.mode, reason: d.reason, receipt_no: refund.receipt_no },
       });
 
-      res.status(201).json(result.rows[0]);
+      res.status(201).json(refund);
     } catch (err) {
       await client.query("ROLLBACK");
       throw err;
@@ -556,6 +568,188 @@ studentsRouter.get("/enrollments/:id/refunds", async (req, res) => {
   );
   res.json(result.rows);
 });
+
+// ---------------------------------------------------------------------
+// Refund requests — the review layer in front of the refund logic
+// above, for whoever can't call it directly. Deliberately a separate,
+// small table rather than a status column on refunds itself: a
+// pending request has no financial effect at all (nothing here ever
+// touches the ledger), while a row in `refunds` always represents
+// actual money that moved — mixing "might happen" into the table that
+// means "happened" was exactly what this was built not to do.
+const refundRequestSchema = z.object({
+  amount: z.number().int().positive(),
+  mode: z.enum(["cash", "upi", "card", "netbanking", "neft", "cheque", "dd"]),
+  instrument_ref: z.string().max(100).optional().default(""),
+  reason: z.string().max(500).optional().default(""),
+});
+
+// Front Desk qualifies via collect_payments (the same capability that
+// already lets them handle money at the counter); Accountant/Owner via
+// void_payments, which already covers refunds directly — raising a
+// request isn't required of them, just available, matching the "raise
+// request" row of the requested permission table applying to all three
+// roles without inventing a capability none of them actually have.
+studentsRouter.post(
+  "/enrollments/:id/refund-requests", requireAnyCapability("collect_payments", "void_payments"),
+  async (req, res) => {
+    const parsed = refundRequestSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ detail: parsed.error.issues[0]?.message });
+    const d = parsed.data;
+
+    const enrollment = await pool.query(
+      `SELECT e.id, s.full_name FROM enrollments e JOIN students s ON s.id = e.student_id
+       WHERE e.id = $1 AND e.school_id = $2`,
+      [req.params.id, req.school!.id],
+    );
+    if (!enrollment.rows[0]) return res.status(404).end();
+
+    const result = await pool.query(
+      `INSERT INTO refund_requests
+         (school_id, enrollment_id, amount, mode, instrument_ref, reason, requested_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [req.school!.id, req.params.id, d.amount, d.mode, d.instrument_ref, d.reason, req.user!.id],
+    );
+
+    await logActivity(pool, req, {
+      action: "refund_request.create",
+      entityType: "refund_request",
+      entityId: result.rows[0].id,
+      description: `Requested a refund of ₹${(d.amount / 100).toFixed(2)} for ${enrollment.rows[0].full_name}`,
+      metadata: { amount: d.amount, mode: d.mode, reason: d.reason },
+    });
+
+    res.status(201).json(result.rows[0]);
+  },
+);
+
+studentsRouter.get("/enrollments/:id/refund-requests", async (req, res) => {
+  const result = await pool.query(
+    `SELECT rr.*, u.full_name AS requested_by_name, rv.full_name AS reviewed_by_name
+     FROM refund_requests rr
+     LEFT JOIN users u ON u.id = rr.requested_by
+     LEFT JOIN users rv ON rv.id = rr.reviewed_by
+     WHERE rr.enrollment_id = $1 AND rr.school_id = $2
+     ORDER BY rr.requested_on DESC`,
+    [req.params.id, req.school!.id],
+  );
+  res.json(result.rows);
+});
+
+const refundRequestReviewSchema = z.object({
+  // Reused as both the approval note (optional) and the rejection
+  // reason (required, enforced in the reject handler specifically,
+  // since approval has no equivalent mandatory-comment requirement).
+  comments: z.string().trim().optional().default(""),
+});
+
+// Approving is what actually creates the refund — via createRefund
+// above, the exact same function POST /refund itself calls, not a
+// second implementation of it. FOR UPDATE plus the status check inside
+// one transaction is what stops two reviewers who both opened the same
+// pending request from both succeeding: whichever request's UPDATE
+// commits first wins the row lock, and the second one's own guard
+// (status must still be 'pending') fails cleanly instead of creating a
+// second refund.
+studentsRouter.post(
+  "/refund-requests/:id/approve", requireCapability("void_payments"),
+  async (req, res) => {
+    const parsed = refundRequestReviewSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ detail: parsed.error.issues[0]?.message });
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+
+      const current = await client.query(
+        `SELECT * FROM refund_requests WHERE id = $1 AND school_id = $2 FOR UPDATE`,
+        [req.params.id, req.school!.id],
+      );
+      if (!current.rows[0]) { await client.query("ROLLBACK"); return res.status(404).end(); }
+      if (current.rows[0].status !== "pending") {
+        await client.query("ROLLBACK");
+        return res.status(400).json({ detail: "This refund request has already been reviewed." });
+      }
+      const reqRow = current.rows[0];
+
+      const refund = await createRefund(client, req.school!.id, reqRow.enrollment_id, req.user!.id, {
+        amount: reqRow.amount, mode: reqRow.mode, instrument_ref: reqRow.instrument_ref,
+        reason: reqRow.reason, approver_name: "", received_by: "",
+      });
+
+      const result = await client.query(
+        `UPDATE refund_requests
+         SET status = 'approved', reviewed_by = $1, reviewed_on = now(),
+             approval_comments = $2, refund_id = $3
+         WHERE id = $4 RETURNING *`,
+        [req.user!.id, parsed.data.comments, refund.id, req.params.id],
+      );
+
+      await client.query("COMMIT");
+
+      const student = await pool.query(
+        `SELECT s.full_name FROM enrollments e JOIN students s ON s.id = e.student_id WHERE e.id = $1`,
+        [reqRow.enrollment_id],
+      );
+      await logActivity(pool, req, {
+        action: "refund_request.approve",
+        entityType: "refund_request",
+        entityId: String(req.params.id),
+        description: `Approved a refund request for ${student.rows[0]?.full_name || "a student"} — ₹${(reqRow.amount / 100).toFixed(2)} (${refund.receipt_no})`,
+        metadata: { refund_id: refund.id, receipt_no: refund.receipt_no },
+      });
+
+      res.json({ ...result.rows[0], refund });
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+  },
+);
+
+const refundRequestRejectSchema = z.object({
+  rejection_comments: z.string().trim().min(1, "Rejection comments are required."),
+});
+
+studentsRouter.post(
+  "/refund-requests/:id/reject", requireCapability("void_payments"),
+  async (req, res) => {
+    const parsed = refundRequestRejectSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ detail: parsed.error.issues[0]?.message });
+
+    const current = await pool.query(
+      `SELECT status, enrollment_id FROM refund_requests WHERE id = $1 AND school_id = $2`,
+      [req.params.id, req.school!.id],
+    );
+    if (!current.rows[0]) return res.status(404).end();
+    if (current.rows[0].status !== "pending") {
+      return res.status(400).json({ detail: "This refund request has already been reviewed." });
+    }
+
+    const result = await pool.query(
+      `UPDATE refund_requests
+       SET status = 'rejected', reviewed_by = $1, reviewed_on = now(), rejection_comments = $2
+       WHERE id = $3 RETURNING *`,
+      [req.user!.id, parsed.data.rejection_comments, req.params.id],
+    );
+
+    const student = await pool.query(
+      `SELECT s.full_name FROM enrollments e JOIN students s ON s.id = e.student_id WHERE e.id = $1`,
+      [current.rows[0].enrollment_id],
+    );
+    await logActivity(pool, req, {
+      action: "refund_request.reject",
+      entityType: "refund_request",
+      entityId: String(req.params.id),
+      description: `Rejected a refund request for ${student.rows[0]?.full_name || "a student"} — ${parsed.data.rejection_comments}`,
+      metadata: { rejection_comments: parsed.data.rejection_comments },
+    });
+
+    res.json(result.rows[0]);
+  },
+);
 
 // Everything the refund receipt PDF needs in one call, matching
 // collection.ts's own /payments/:id/receipt-data — school, student,
@@ -600,14 +794,19 @@ const tcRequestSchema = z.object({
 });
 
 studentsRouter.post(
-  "/enrollments/:id/tc-requests", requireCapability("manage_admissions"),
+  "/enrollments/:id/tc-requests", requireAnyCapability("manage_admissions", "manage_tc"),
   async (req, res) => {
     const parsed = tcRequestSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ detail: parsed.error.issues[0]?.message });
     const d = parsed.data;
 
+    // Only an unresolved request blocks a new one — 'rejected' is a
+    // real terminal outcome now, not a dead end. Front Desk raising a
+    // second request after the first was rejected (the exact flow the
+    // review workflow exists for) must not be refused as "already in
+    // progress" just because the earlier row still exists.
     const existing = await pool.query(
-      `SELECT id FROM tc_requests WHERE enrollment_id = $1 AND status != 'issued'`,
+      `SELECT id FROM tc_requests WHERE enrollment_id = $1 AND status IN ('pending_clearance', 'cleared')`,
       [req.params.id],
     );
     if (existing.rows[0]) {
@@ -757,6 +956,55 @@ studentsRouter.post(
     } finally {
       client.release();
     }
+  },
+);
+
+const tcRejectSchema = z.object({
+  rejection_comments: z.string().trim().min(1, "Rejection comments are required."),
+});
+
+// Reject sits alongside /clear as the other terminal outcome for a
+// pending request — same manage_tc gate (Front Desk, which can only
+// create a request via manage_admissions, was never granted this),
+// same "must currently be pending_clearance" guard so a request can't
+// be rejected twice or rejected after already being approved. Unlike
+// approval, rejection has no enrollment-side effect at all — the
+// student was never going anywhere, so there's nothing to undo.
+studentsRouter.post(
+  "/tc-requests/:id/reject", requireCapability("manage_tc"),
+  async (req, res) => {
+    const parsed = tcRejectSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ detail: parsed.error.issues[0]?.message });
+
+    const current = await pool.query(
+      `SELECT status, enrollment_id FROM tc_requests WHERE id = $1 AND school_id = $2`,
+      [req.params.id, req.school!.id],
+    );
+    if (!current.rows[0]) return res.status(404).end();
+    if (current.rows[0].status !== "pending_clearance") {
+      return res.status(400).json({ detail: "This request has already been reviewed." });
+    }
+
+    const result = await pool.query(
+      `UPDATE tc_requests
+       SET status = 'rejected', rejected_by = $1, rejected_on = now(), rejection_comments = $2
+       WHERE id = $3 RETURNING *`,
+      [req.user!.id, parsed.data.rejection_comments, req.params.id],
+    );
+
+    const student = await pool.query(
+      `SELECT s.full_name FROM enrollments e JOIN students s ON s.id = e.student_id WHERE e.id = $1`,
+      [current.rows[0].enrollment_id],
+    );
+    await logActivity(pool, req, {
+      action: "tc.reject",
+      entityType: "tc_request",
+      entityId: String(req.params.id),
+      description: `Rejected TC request for ${student.rows[0]?.full_name || "a student"} — ${parsed.data.rejection_comments}`,
+      metadata: { rejection_comments: parsed.data.rejection_comments },
+    });
+
+    res.json(result.rows[0]);
   },
 );
 
@@ -1118,3 +1366,68 @@ studentsRouter.get("/enrollments", async (req, res) => {
     };
   }));
 });
+
+// ---------------------------------------------------------------------
+// Pending approvals — what the notification bell reads. One call,
+// both request types, enough detail on each row to actually decide
+// without a further lookup (per the requirement that Accountant/Owner
+// shouldn't have to open Student Profile just to review a request).
+// Gated on whichever capability lets someone approve either kind
+// (manage_tc for TC, void_payments for refunds) — Front Desk, having
+// neither, correctly gets nothing back rather than a 403 on a bell
+// icon they'd otherwise never see the count for.
+studentsRouter.get(
+  "/pending-approvals", requireAnyCapability("manage_tc", "void_payments"),
+  async (req, res) => {
+    const canApproveTc = membershipCan(req.membership, "manage_tc");
+    const canApproveRefunds = membershipCan(req.membership, "void_payments");
+
+    const tcRows: unknown[] = [];
+    if (canApproveTc) {
+      const pending = await pool.query(
+        `SELECT tr.id, tr.reason, tr.last_day, tr.requested_on, tr.enrollment_id,
+                s.full_name, s.admission_no, cl.name AS class_name, sec.name AS section_name,
+                u.full_name AS requested_by_name
+         FROM tc_requests tr
+         JOIN enrollments e ON e.id = tr.enrollment_id
+         JOIN students s ON s.id = e.student_id
+         JOIN class_levels cl ON cl.id = e.class_level_id
+         JOIN sections sec ON sec.id = e.section_id
+         LEFT JOIN users u ON u.id = tr.requested_by
+         WHERE tr.school_id = $1 AND tr.status = 'pending_clearance'
+         ORDER BY tr.requested_on ASC`,
+        [req.school!.id],
+      );
+      // Outstanding isn't stored live on a pending request (the
+      // financial_snapshot column only fills in once reviewed) — pulled
+      // via the same shared ledger service every other screen already
+      // uses, not recomputed here.
+      const ledgers = await getBulkEnrollmentLedgers(pending.rows.map((r) => r.enrollment_id));
+      for (const r of pending.rows) {
+        tcRows.push({ ...r, outstanding: ledgers.get(r.enrollment_id)?.balance ?? 0 });
+      }
+    }
+
+    const refundRows = canApproveRefunds
+      ? (await pool.query(
+          `SELECT rr.id, rr.amount, rr.mode, rr.reason, rr.requested_on, rr.enrollment_id,
+                  s.full_name, s.admission_no, cl.name AS class_name, sec.name AS section_name,
+                  u.full_name AS requested_by_name
+           FROM refund_requests rr
+           JOIN enrollments e ON e.id = rr.enrollment_id
+           JOIN students s ON s.id = e.student_id
+           JOIN class_levels cl ON cl.id = e.class_level_id
+           JOIN sections sec ON sec.id = e.section_id
+           LEFT JOIN users u ON u.id = rr.requested_by
+           WHERE rr.school_id = $1 AND rr.status = 'pending'
+           ORDER BY rr.requested_on ASC`,
+          [req.school!.id],
+        )).rows
+      : [];
+
+    res.json({
+      tcRequests: tcRows, refundRequests: refundRows,
+      tcCount: tcRows.length, refundCount: refundRows.length,
+    });
+  },
+);

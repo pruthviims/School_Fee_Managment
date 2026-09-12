@@ -4065,11 +4065,13 @@ function StudentProfileModal({ enrollmentId, capabilities, onClose, onCollectPay
   const [profile, setProfile] = useState(null);
   const [sections, setSections] = useState([]);
   const [refunds, setRefunds] = useState([]);
+  const [refundRequests, setRefundRequests] = useState([]);
   const [form, setForm] = useState(null);
   const [saved, setSaved] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [showRefund, setShowRefund] = useState(false);
+  const [showRefundRequest, setShowRefundRequest] = useState(false);
 
   async function refetch() {
     const p = await api.get(`/students/enrollments/${enrollmentId}/profile`);
@@ -4085,12 +4087,14 @@ function StudentProfileModal({ enrollmentId, capabilities, onClose, onCollectPay
       mother_email: p.mother_email || "",
       guardian_relationship: p.guardian_relationship || "",
     });
-    const [s, r] = await Promise.all([
+    const [s, r, rr] = await Promise.all([
       api.get(`/setup/sections?academic_year_id=${p.academic_year_id}&class_level_id=${p.class_level_id}`),
       api.get(`/students/enrollments/${enrollmentId}/refunds`),
+      api.get(`/students/enrollments/${enrollmentId}/refund-requests`),
     ]);
     setSections(s);
     setRefunds(r);
+    setRefundRequests(rr);
   }
   useEffect(() => { refetch(); }, [enrollmentId]); // eslint-disable-line
 
@@ -4149,6 +4153,7 @@ function StudentProfileModal({ enrollmentId, capabilities, onClose, onCollectPay
   // reads correctly, even though nothing writes it anymore.
   const withdrawn = profile.outcome === "tc_issued" || profile.outcome === "left";
   const canRefund = (capabilities || []).includes("void_payments");
+  const canRequestRefund = (capabilities || []).includes("collect_payments");
 
   return (
     <div className="fixed inset-0 bg-slate-900/40 flex items-center justify-center p-4 z-50"
@@ -4328,6 +4333,33 @@ function StudentProfileModal({ enrollmentId, capabilities, onClose, onCollectPay
           </div>
         )}
 
+        {refundRequests.filter((r) => r.status !== "approved").length > 0 && (
+          <div className="px-6 py-4 border-t border-slate-100">
+            <label className={eyebrow}>Refund requests</label>
+            <div className="mt-2 space-y-2">
+              {refundRequests.filter((r) => r.status !== "approved").map((r) => (
+                <div key={r.id} className="text-sm">
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-500">
+                      {displayDate(r.requested_on)} · requested by {r.requested_by_name || "—"}
+                    </span>
+                    <span className="font-bold flex items-center gap-2">
+                      {inr(r.amount / 100)}
+                      <span className={`text-xs font-bold rounded-lg px-2 py-0.5 ${
+                        r.status === "pending" ? "bg-amber-50 text-amber-700" : "bg-red-50 text-red-700"}`}>
+                        {r.status === "pending" ? "Pending" : "Rejected"}
+                      </span>
+                    </span>
+                  </div>
+                  {r.status === "rejected" && r.rejection_comments && (
+                    <p className="text-xs text-red-500 mt-1">{r.rejection_comments}</p>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         <div className="px-6 py-4 border-t border-slate-100 flex flex-wrap gap-2">
           {canRefund && (
             <button onClick={() => setShowRefund((v) => !v)}
@@ -4335,10 +4367,20 @@ function StudentProfileModal({ enrollmentId, capabilities, onClose, onCollectPay
               <Undo2 size={14} /> Record refund
             </button>
           )}
+          {!canRefund && canRequestRefund && (
+            <button onClick={() => setShowRefundRequest((v) => !v)}
+              className="text-sm font-semibold text-slate-500 hover:text-brand-600 flex items-center gap-1.5">
+              <Undo2 size={14} /> Request refund
+            </button>
+          )}
         </div>
 
         {showRefund && canRefund && (
           <RefundPanel enrollmentId={enrollmentId} onDone={async () => { setShowRefund(false); await refetch(); }} />
+        )}
+        {showRefundRequest && !canRefund && canRequestRefund && (
+          <RefundRequestPanel enrollmentId={enrollmentId}
+            onDone={async () => { setShowRefundRequest(false); await refetch(); }} />
         )}
 
         <TcPanel enrollmentId={enrollmentId} capabilities={capabilities}
@@ -4360,6 +4402,7 @@ function TcPanel({ enrollmentId, capabilities, onChanged, studentName }) {
   const [requests, setRequests] = useState(null);
   const [showRequestForm, setShowRequestForm] = useState(false);
   const [showClearForm, setShowClearForm] = useState(false);
+  const [showRejectForm, setShowRejectForm] = useState(false);
   const [showIssueForm, setShowIssueForm] = useState(false);
   const canManageTc = (capabilities || []).includes("manage_tc");
 
@@ -4412,9 +4455,15 @@ function TcPanel({ enrollmentId, capabilities, onChanged, studentName }) {
             {displayDate(latest.last_day)}. Awaiting management's NOC decision.
           </div>
           {canManageTc && (
-            <button onClick={() => setShowClearForm((v) => !v)} className={`${ghost} mt-3`}>
-              <Check size={14} /> Review & approve NOC
-            </button>
+            <div className="flex gap-2 mt-3">
+              <button onClick={() => setShowClearForm((v) => !v)} className={ghost}>
+                <Check size={14} /> Review & approve NOC
+              </button>
+              <button onClick={() => setShowRejectForm((v) => !v)}
+                className="text-sm font-semibold text-red-500 hover:text-red-600 flex items-center gap-1.5 px-3">
+                Reject
+              </button>
+            </div>
           )}
         </div>
       )}
@@ -4469,6 +4518,10 @@ function TcPanel({ enrollmentId, capabilities, onChanged, studentName }) {
       {showClearForm && latest?.status === "pending_clearance" && (
         <TcClearForm requestId={latest.id}
           onDone={async () => { setShowClearForm(false); await refetch(); }} />
+      )}
+      {showRejectForm && latest?.status === "pending_clearance" && (
+        <TcRejectForm requestId={latest.id}
+          onDone={async () => { setShowRejectForm(false); await refetch(); }} />
       )}
       {showIssueForm && latest?.status === "cleared" && (
         <TcIssueForm requestId={latest.id} studentName={studentName}
@@ -4531,6 +4584,247 @@ const EXIT_REASON_OPTIONS = [
   { value: "other", label: "Other" },
 ];
 
+/**
+ * What the notification bell opens into — every pending TC and refund
+ * request an Accountant/Owner needs to act on, with enough detail on
+ * each row (student, class, outstanding/amount, who asked, when) to
+ * decide without opening Student Profile first. One call
+ * (GET /students/pending-approvals) for both lists — no separate
+ * fetch per request, no student search required.
+ */
+export function PendingApprovalsScreen({ onChanged }) {
+  const [data, setData] = useState({ tcRequests: [], refundRequests: [], tcCount: 0, refundCount: 0 });
+  const [loading, setLoading] = useState(true);
+
+  async function refetch() {
+    setLoading(true);
+    try {
+      setData(await api.get("/students/pending-approvals"));
+    } catch {
+      setData({ tcRequests: [], refundRequests: [], tcCount: 0, refundCount: 0 });
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { refetch(); }, []); // eslint-disable-line
+
+  async function afterAction() {
+    await refetch();
+    await onChanged(); // refreshes the sidebar bell's own count
+  }
+
+  return (
+    <div>
+      <PageHead title="Pending Approvals"
+        subtitle="TC and refund requests raised by Front Desk, awaiting your review." />
+
+      {loading ? (
+        <div className={`${panel} p-12 text-center text-slate-400 font-semibold`}>Loading…</div>
+      ) : (
+        <div className="space-y-8">
+          <div>
+            <h2 className="font-extrabold text-sm mb-3">TC Requests ({data.tcCount})</h2>
+            {data.tcRequests.length === 0 ? (
+              <div className={`${panel} p-6 text-sm text-slate-400 font-semibold`}>Nothing pending.</div>
+            ) : (
+              <div className="space-y-3">
+                {data.tcRequests.map((r) => <PendingTcCard key={r.id} request={r} onDone={afterAction} />)}
+              </div>
+            )}
+          </div>
+
+          <div>
+            <h2 className="font-extrabold text-sm mb-3">Refund Requests ({data.refundCount})</h2>
+            {data.refundRequests.length === 0 ? (
+              <div className={`${panel} p-6 text-sm text-slate-400 font-semibold`}>Nothing pending.</div>
+            ) : (
+              <div className="space-y-3">
+                {data.refundRequests.map((r) => <PendingRefundCard key={r.id} request={r} onDone={afterAction} />)}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PendingTcCard({ request: r, onDone }) {
+  const [expanded, setExpanded] = useState(null); // null | "approve" | "reject"
+  const [exitReason, setExitReason] = useState("tc");
+  const [note, setNote] = useState("");
+  const [rejectComments, setRejectComments] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function approve() {
+    setBusy(true); setError("");
+    try {
+      await api.post(`/students/tc-requests/${r.id}/clear`, { exit_reason: exitReason, clearance_note: note.trim() });
+      await onDone();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not approve this request.");
+      setBusy(false);
+    }
+  }
+
+  async function reject() {
+    if (!rejectComments.trim()) return setError("Rejection comments are required.");
+    setBusy(true); setError("");
+    try {
+      await api.post(`/students/tc-requests/${r.id}/reject`, { rejection_comments: rejectComments.trim() });
+      await onDone();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not reject this request.");
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className={`${panel} p-5`}>
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <p className="font-bold">{r.full_name}</p>
+          <p className="eyebrow text-slate-400 mt-0.5">
+            {r.admission_no} · {r.class_name}-{r.section_name}
+          </p>
+        </div>
+        <div className="text-right">
+          <p className={`text-sm font-extrabold tabular-nums ${r.outstanding > 0 ? "text-red-500" : "text-emerald-600"}`}>
+            {r.outstanding > 0 ? `Outstanding: ${inr(r.outstanding / 100)}` : "No outstanding"}
+          </p>
+          <p className="eyebrow text-slate-400 mt-0.5">
+            Requested by {r.requested_by_name || "—"} · {displayDate(r.requested_on)}
+          </p>
+        </div>
+      </div>
+      {r.reason && <p className="text-sm text-slate-500 mt-2">Reason: {r.reason}</p>}
+
+      {error && <p className="text-xs font-semibold text-red-600 mt-2">{error}</p>}
+
+      {!expanded ? (
+        <div className="flex gap-2 mt-4">
+          <button onClick={() => setExpanded("approve")} className={primary}>Approve</button>
+          <button onClick={() => setExpanded("reject")} className={ghost}>Reject</button>
+        </div>
+      ) : expanded === "approve" ? (
+        <div className="mt-4 pt-4 border-t border-slate-100">
+          <label className={eyebrow}>Exit reason<span className="text-red-500"> *</span></label>
+          <select className={`${field} mt-2`} value={exitReason} onChange={(e) => setExitReason(e.target.value)}>
+            {EXIT_REASON_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+          <label className={`${eyebrow} mt-3 block`}>Remarks</label>
+          <input className={`${field} mt-2`} value={note} onChange={(e) => setNote(e.target.value)}
+            placeholder="Approved despite outstanding balance, etc." />
+          <div className="flex gap-2 mt-3">
+            <button onClick={approve} disabled={busy} className={primary}>
+              {busy ? "Approving…" : "Confirm Approve"}
+            </button>
+            <button onClick={() => setExpanded(null)} className={ghost}>Cancel</button>
+          </div>
+        </div>
+      ) : (
+        <div className="mt-4 pt-4 border-t border-slate-100">
+          <label className={eyebrow}>Rejection comments<span className="text-red-500"> *</span></label>
+          <input className={`${field} mt-2`} value={rejectComments} onChange={(e) => setRejectComments(e.target.value)}
+            placeholder="₹1,318 is outstanding. Please collect the balance before submitting again." />
+          <div className="flex gap-2 mt-3">
+            <button onClick={reject} disabled={busy}
+              className="bg-red-600 hover:bg-red-700 text-white font-bold text-sm rounded-xl px-4 py-2.5 flex items-center gap-2 disabled:opacity-60">
+              {busy ? "Rejecting…" : "Confirm Reject"}
+            </button>
+            <button onClick={() => setExpanded(null)} className={ghost}>Cancel</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PendingRefundCard({ request: r, onDone }) {
+  const [expanded, setExpanded] = useState(null); // null | "approve" | "reject"
+  const [comments, setComments] = useState("");
+  const [rejectComments, setRejectComments] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function approve() {
+    setBusy(true); setError("");
+    try {
+      await api.post(`/students/refund-requests/${r.id}/approve`, { comments: comments.trim() });
+      await onDone();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not approve this refund.");
+      setBusy(false);
+    }
+  }
+
+  async function reject() {
+    if (!rejectComments.trim()) return setError("Rejection comments are required.");
+    setBusy(true); setError("");
+    try {
+      await api.post(`/students/refund-requests/${r.id}/reject`, { rejection_comments: rejectComments.trim() });
+      await onDone();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not reject this refund.");
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className={`${panel} p-5`}>
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <p className="font-bold">{r.full_name}</p>
+          <p className="eyebrow text-slate-400 mt-0.5">
+            {r.admission_no} · {r.class_name}-{r.section_name}
+          </p>
+        </div>
+        <div className="text-right">
+          <p className="text-sm font-extrabold tabular-nums">{inr(r.amount / 100)}</p>
+          <p className="eyebrow text-slate-400 mt-0.5">
+            Requested by {r.requested_by_name || "—"} · {displayDate(r.requested_on)}
+          </p>
+        </div>
+      </div>
+      {r.reason && <p className="text-sm text-slate-500 mt-2">Reason: {r.reason}</p>}
+
+      {error && <p className="text-xs font-semibold text-red-600 mt-2">{error}</p>}
+
+      {!expanded ? (
+        <div className="flex gap-2 mt-4">
+          <button onClick={() => setExpanded("approve")} className={primary}>Approve</button>
+          <button onClick={() => setExpanded("reject")} className={ghost}>Reject</button>
+        </div>
+      ) : expanded === "approve" ? (
+        <div className="mt-4 pt-4 border-t border-slate-100">
+          <label className={eyebrow}>Approval comments (optional)</label>
+          <input className={`${field} mt-2`} value={comments} onChange={(e) => setComments(e.target.value)} />
+          <div className="flex gap-2 mt-3">
+            <button onClick={approve} disabled={busy} className={primary}>
+              {busy ? "Processing…" : "Confirm Approve & Refund"}
+            </button>
+            <button onClick={() => setExpanded(null)} className={ghost}>Cancel</button>
+          </div>
+        </div>
+      ) : (
+        <div className="mt-4 pt-4 border-t border-slate-100">
+          <label className={eyebrow}>Rejection comments<span className="text-red-500"> *</span></label>
+          <input className={`${field} mt-2`} value={rejectComments} onChange={(e) => setRejectComments(e.target.value)} />
+          <div className="flex gap-2 mt-3">
+            <button onClick={reject} disabled={busy}
+              className="bg-red-600 hover:bg-red-700 text-white font-bold text-sm rounded-xl px-4 py-2.5 flex items-center gap-2 disabled:opacity-60">
+              {busy ? "Rejecting…" : "Confirm Reject"}
+            </button>
+            <button onClick={() => setExpanded(null)} className={ghost}>Cancel</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function TcClearForm({ requestId, onDone }) {
   const [note, setNote] = useState("");
   const [exitReason, setExitReason] = useState("tc");
@@ -4570,6 +4864,40 @@ function TcClearForm({ requestId, onDone }) {
       </p>
       <button onClick={submit} disabled={busy} className={`${primary} mt-3`}>
         {busy ? "Approving…" : "Approve NOC"}
+      </button>
+    </div>
+  );
+}
+
+function TcRejectForm({ requestId, onDone }) {
+  const [comments, setComments] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit() {
+    if (!comments.trim()) return setError("Rejection comments are required.");
+    setError("");
+    setBusy(true);
+    try {
+      await api.post(`/students/tc-requests/${requestId}/reject`, { rejection_comments: comments.trim() });
+      await onDone();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not reject this TC request.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="px-6 py-5 border-t border-slate-100 bg-red-50/40">
+      <h3 className="font-bold text-sm mb-3">Reject TC Request</h3>
+      {error && <p className="text-xs font-semibold text-red-600 mb-2">{error}</p>}
+      <label className={eyebrow}>Rejection comments<span className="text-red-500"> *</span></label>
+      <input className={`${field} mt-2`} value={comments} onChange={(e) => setComments(e.target.value)}
+        placeholder="₹1,318 is outstanding. Please collect the balance before submitting again." />
+      <button onClick={submit} disabled={busy}
+        className="mt-3 bg-red-600 hover:bg-red-700 text-white font-bold text-sm rounded-xl px-4 py-2.5 flex items-center gap-2 disabled:opacity-60">
+        {busy ? "Rejecting…" : "Confirm Reject"}
       </button>
     </div>
   );
@@ -4738,6 +5066,91 @@ function RefundPanel({ enrollmentId, onDone }) {
       </div>
       <button onClick={submit} disabled={busy} className={`${primary} mt-3`}>
         {busy ? "Recording…" : "Record refund"}
+      </button>
+    </div>
+  );
+}
+
+/**
+ * Front Desk's own path — same fields as RefundPanel, but posts to
+ * refund-requests instead of refund directly, since Front Desk has
+ * collect_payments, not void_payments. Creates a pending request with
+ * zero financial effect; no receipt exists yet, since no refund exists
+ * yet either — Accountant/Owner approving it from Pending Approvals is
+ * what actually calls the existing refund logic.
+ */
+function RefundRequestPanel({ enrollmentId, onDone }) {
+  const [amount, setAmount] = useState("");
+  const [mode, setMode] = useState("cash");
+  const [reference, setReference] = useState("");
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [submitted, setSubmitted] = useState(false);
+
+  async function submit() {
+    setError("");
+    const amt = Math.round(parseFloat(amount) || 0);
+    if (!(amt > 0)) return setError("Enter an amount greater than zero.");
+    setBusy(true);
+    try {
+      await api.post(`/students/enrollments/${enrollmentId}/refund-requests`, {
+        amount: amt * 100, mode, instrument_ref: reference.trim(), reason: reason.trim(),
+      });
+      setSubmitted(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not submit that refund request.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (submitted) {
+    return (
+      <div className="px-6 py-5 border-t border-slate-100 bg-emerald-50/40">
+        <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl px-4 py-3 text-sm">
+          <p className="font-bold">Refund request submitted.</p>
+          <p className="mt-1">Awaiting Accountant/Owner review — no refund has been processed yet.</p>
+        </div>
+        <button onClick={onDone} className={`${ghost} mt-3`}>Done</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="px-6 py-5 border-t border-slate-100 bg-brand-50/30">
+      <h3 className="font-bold text-sm mb-3">Request a refund</h3>
+      {error && <p className="text-xs font-semibold text-red-600 mb-2">{error}</p>}
+      <div className="grid sm:grid-cols-2 gap-3">
+        <div>
+          <label className={eyebrow}>Amount</label>
+          <input inputMode="numeric" className={`${field} mt-2`} value={amount}
+            onChange={(e) => setAmount(e.target.value)} placeholder="0" />
+        </div>
+        <div>
+          <label className={eyebrow}>Mode</label>
+          <select className={`${field} mt-2`} value={mode} onChange={(e) => setMode(e.target.value)}>
+            {PAYMENT_MODES.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+          </select>
+        </div>
+      </div>
+      <div className="grid sm:grid-cols-2 gap-3 mt-3">
+        <div>
+          <label className={eyebrow}>Reference (optional)</label>
+          <input className={`${field} mt-2`} value={reference} onChange={(e) => setReference(e.target.value)}
+            placeholder="Cheque no., UTR, etc." />
+        </div>
+        <div>
+          <label className={eyebrow}>Reason</label>
+          <input className={`${field} mt-2`} value={reason} onChange={(e) => setReason(e.target.value)}
+            placeholder="Withdrawal, overpayment, etc." />
+        </div>
+      </div>
+      <p className="text-xs text-slate-400 mt-2">
+        This creates a pending request only — no refund is processed until Accountant/Owner approves it.
+      </p>
+      <button onClick={submit} disabled={busy} className={`${primary} mt-3`}>
+        {busy ? "Submitting…" : "Submit request"}
       </button>
     </div>
   );
