@@ -3607,6 +3607,295 @@ export function ActivityLogScreen() {
 }
 
 /**
+ * Dedicated, historical-only view — deliberately separate from the
+ * active roster (Fee Collection) rather than teaching that screen to
+ * also show inactive enrollments. Server-side filtered and paginated:
+ * the list endpoint returns only what the compact table needs, never
+ * every historical record at once.
+ */
+export function LeftTcStudentsScreen({ academicYears, classLevels }) {
+  const [rows, setRows] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const pageSize = 20;
+  const [loading, setLoading] = useState(true);
+  const [academicYearId, setAcademicYearId] = useState("");
+  const [status, setStatus] = useState("");
+  const [classLevelId, setClassLevelId] = useState("");
+  const [query, setQuery] = useState("");
+  const [viewingEnrollmentId, setViewingEnrollmentId] = useState(null);
+  const debounceRef = useRef(null);
+
+  async function refetch(p) {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams();
+      if (academicYearId) params.set("academic_year_id", academicYearId);
+      if (status) params.set("status", status);
+      if (classLevelId) params.set("class_level_id", classLevelId);
+      if (query.trim()) params.set("q", query.trim());
+      params.set("page", p);
+      params.set("page_size", pageSize);
+      const result = await api.get(`/students/former?${params.toString()}`);
+      setRows(result.rows);
+      setTotal(result.total);
+      setPage(result.page);
+    } catch {
+      setRows([]); setTotal(0);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { refetch(1); }, [academicYearId, status, classLevelId]); // eslint-disable-line
+
+  useEffect(() => {
+    clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => refetch(1), 400);
+    return () => clearTimeout(debounceRef.current);
+  }, [query]); // eslint-disable-line
+
+  const anyFilterActive = Boolean(academicYearId || status || classLevelId || query);
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+
+  return (
+    <div>
+      <PageHead title="Left / TC Students"
+        subtitle="Students who withdrew or were issued a Transfer Certificate — a historical record, kept separate from the active roster." />
+
+      <div className={`${panel} p-5 mb-5 flex flex-wrap items-end gap-4`}>
+        <div className="min-w-[160px]">
+          <label className={eyebrow}>Academic Year</label>
+          <FilterSelect value={academicYearId} active={Boolean(academicYearId)} className="mt-2"
+            onChange={(e) => setAcademicYearId(e.target.value)}>
+            <option value="">All years</option>
+            {academicYears.map((y) => <option key={y.id} value={y.id}>{y.name}</option>)}
+          </FilterSelect>
+        </div>
+        <div className="min-w-[150px]">
+          <label className={eyebrow}>Status</label>
+          <FilterSelect value={status} active={Boolean(status)} className="mt-2"
+            onChange={(e) => setStatus(e.target.value)}>
+            <option value="">All</option>
+            <option value="tc_issued">TC Issued</option>
+            <option value="left">Withdrawn</option>
+          </FilterSelect>
+        </div>
+        <div className="min-w-[150px]">
+          <label className={eyebrow}>Class</label>
+          <FilterSelect value={classLevelId} active={Boolean(classLevelId)} className="mt-2"
+            onChange={(e) => setClassLevelId(e.target.value)}>
+            <option value="">All classes</option>
+            {classLevels.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </FilterSelect>
+        </div>
+        <div className="flex-1 min-w-[220px]">
+          <label className={eyebrow}>Search</label>
+          <div className="relative mt-2">
+            <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-300" />
+            <input value={query} onChange={(e) => setQuery(e.target.value)}
+              placeholder="Student name or admission no." className={`${field} pl-9`} />
+          </div>
+        </div>
+        {anyFilterActive && (
+          <button onClick={() => { setAcademicYearId(""); setStatus(""); setClassLevelId(""); setQuery(""); }}
+            className={`${ghost} mb-0.5`}>
+            <X size={14} /> Clear filters
+          </button>
+        )}
+      </div>
+
+      <div className={`${panel} overflow-hidden`}>
+        {loading ? (
+          <div className="p-12 text-center text-slate-400 font-semibold">Loading…</div>
+        ) : rows.length === 0 ? (
+          <div className="p-12 text-center text-slate-400 font-semibold text-sm">
+            {anyFilterActive ? "Nothing matches these filters."
+                              : "No students have left or been issued a TC yet."}
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead className="bg-slate-50/70">
+                <tr>
+                  <th className={th}>Admission No.</th>
+                  <th className={th}>Student Name</th>
+                  <th className={th}>Class</th>
+                  <th className={th}>Section</th>
+                  <th className={th}>Status</th>
+                  <th className={th}>Date</th>
+                  <th className={th} />
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={r.enrollment_id} className="border-b border-slate-50 text-sm">
+                    <td className="px-5 py-3 tabular-nums text-slate-500">{r.admission_no}</td>
+                    <td className="px-5 py-3 font-bold">{r.full_name}</td>
+                    <td className="px-5 py-3">{r.class_name}</td>
+                    <td className="px-5 py-3">{r.section_name}</td>
+                    <td className="px-5 py-3">
+                      <span className={`text-xs font-bold rounded-lg px-2.5 py-1 whitespace-nowrap ${
+                        r.outcome === "tc_issued" ? "bg-brand-50 text-brand-600" : "bg-amber-50 text-amber-700"}`}>
+                        {r.outcome === "tc_issued" ? "TC Issued" : "Withdrawn"}
+                      </span>
+                    </td>
+                    <td className="px-5 py-3 text-slate-500 whitespace-nowrap">
+                      {displayDate(r.withdrawn_on) || "—"}
+                    </td>
+                    <td className="px-5 py-3 text-right">
+                      <button onClick={() => setViewingEnrollmentId(r.enrollment_id)}
+                        className="text-xs font-bold text-brand-600 hover:text-brand-700 whitespace-nowrap">
+                        View Details
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {total > pageSize && (
+        <div className="flex items-center justify-between mt-4 text-sm">
+          <span className="text-slate-400 font-semibold">
+            {(page - 1) * pageSize + 1}–{Math.min(page * pageSize, total)} of {total}
+          </span>
+          <div className="flex items-center gap-2">
+            <button disabled={page <= 1} onClick={() => refetch(page - 1)}
+              className={`${ghost} px-3 py-2 disabled:opacity-40`}>Previous</button>
+            <span className="text-slate-500 font-semibold">Page {page} of {totalPages}</span>
+            <button disabled={page >= totalPages} onClick={() => refetch(page + 1)}
+              className={`${ghost} px-3 py-2 disabled:opacity-40`}>Next</button>
+          </div>
+        </div>
+      )}
+
+      {viewingEnrollmentId && (
+        <FormerStudentDetailModal enrollmentId={viewingEnrollmentId}
+          onClose={() => setViewingEnrollmentId(null)} />
+      )}
+    </div>
+  );
+}
+
+function DetailField({ label, value }) {
+  return (
+    <div>
+      <p className={eyebrow}>{label}</p>
+      <p className="font-semibold text-slate-700 mt-0.5 text-sm break-words">{value}</p>
+    </div>
+  );
+}
+
+/**
+ * One dedicated call for everything the details view needs — student,
+ * guardian, academic, and TC/withdrawal fields all come back together
+ * from GET /students/former/:enrollmentId, not four separate requests.
+ * Every value renders through dash(): missing information shows as
+ * "—" rather than blank, undefined, or an invented placeholder.
+ */
+function FormerStudentDetailModal({ enrollmentId, onClose }) {
+  const [detail, setDetail] = useState(null);
+
+  useEffect(() => {
+    api.get(`/students/former/${enrollmentId}`).then(setDetail).catch(() => setDetail(false));
+  }, [enrollmentId]);
+
+  const dash = (v) => (v === null || v === undefined || v === "" ? "—" : v);
+  const isTc = detail && detail.outcome === "tc_issued";
+
+  return (
+    <div className="fixed inset-0 bg-slate-900/40 flex items-center justify-center p-4 z-50"
+      onClick={onClose}>
+      <div className={`${panel} w-full max-w-lg max-h-[88vh] overflow-y-auto`}
+        onClick={(e) => e.stopPropagation()}>
+        <div className="px-6 py-5 border-b border-slate-100 flex items-start justify-between gap-4">
+          <div>
+            <h2 className="text-lg font-extrabold">{detail ? detail.full_name : "Loading…"}</h2>
+            {detail && <p className="text-sm text-slate-500">{detail.admission_no}</p>}
+          </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600 shrink-0">
+            <X size={20} />
+          </button>
+        </div>
+
+        {!detail ? (
+          <div className="p-12 text-center text-slate-400 font-semibold">
+            {detail === false ? "Could not load this student's record." : "Loading…"}
+          </div>
+        ) : (
+          <div className="px-6 py-5 space-y-6">
+            <div className={`rounded-xl px-4 py-3 text-sm font-bold ${
+              isTc ? "bg-brand-50 text-brand-700" : "bg-amber-50 text-amber-700"}`}>
+              {isTc ? "TC Issued" : "Withdrawn"}
+              {detail.withdrawn_on && ` on ${displayDate(detail.withdrawn_on)}`}
+            </div>
+
+            <div>
+              <h3 className="font-extrabold text-sm mb-3">Student Details</h3>
+              <div className="grid grid-cols-2 gap-4">
+                <DetailField label="Full name" value={dash(detail.full_name)} />
+                <DetailField label="Admission no." value={dash(detail.admission_no)} />
+                <DetailField label="Date of birth" value={dash(displayDate(detail.date_of_birth))} />
+                <DetailField label="Gender" value={dash(detail.gender)} />
+              </div>
+            </div>
+
+            <div>
+              <h3 className="font-extrabold text-sm mb-3">Parent / Guardian Details</h3>
+              <div className="grid grid-cols-2 gap-4">
+                <DetailField label="Father" value={dash(detail.father_name)} />
+                <DetailField label="Father's phone" value={dash(detail.father_phone)} />
+                <DetailField label="Mother" value={dash(detail.mother_name)} />
+                <DetailField label="Mother's phone" value={dash(detail.mother_phone)} />
+                <DetailField label="Guardian" value={dash(detail.guardian_name)} />
+                <DetailField label="Guardian's phone" value={dash(detail.guardian_phone)} />
+                <DetailField label="Email" value={dash(detail.guardian_email)} />
+                <DetailField label="Address" value={dash(detail.address)} />
+              </div>
+            </div>
+
+            <div>
+              <h3 className="font-extrabold text-sm mb-3">Academic Details</h3>
+              <div className="grid grid-cols-2 gap-4">
+                <DetailField label="Academic year" value={dash(detail.academic_year_name)} />
+                <DetailField label="Class" value={dash(detail.class_name)} />
+                <DetailField label="Section" value={dash(detail.section_name)} />
+                <DetailField label="Stream" value={dash(detail.stream_name)} />
+                <DetailField label="Roll no." value={dash(detail.roll_no)} />
+                <DetailField label="Enrolled on" value={dash(displayDate(detail.enrolled_on))} />
+              </div>
+            </div>
+
+            <div>
+              <h3 className="font-extrabold text-sm mb-3">{isTc ? "TC Details" : "Exit Details"}</h3>
+              <div className="grid grid-cols-2 gap-4">
+                <DetailField label="Status" value={isTc ? "TC Issued" : "Withdrawn / Left"} />
+                <DetailField label={isTc ? "TC issue date" : "Exit date"}
+                  value={dash(displayDate(isTc ? detail.tc_issued_on : detail.withdrawn_on))} />
+                {isTc && <DetailField label="TC number" value={dash(detail.tc_number)} />}
+                <DetailField label="Reason" value={dash(detail.withdrawal_reason)} />
+                {isTc && (
+                  <>
+                    <DetailField label="Conduct" value={dash(detail.tc_conduct)} />
+                    <DetailField label="Qualified for promotion"
+                      value={detail.tc_qualified_for_promotion === null ? "—"
+                        : detail.tc_qualified_for_promotion ? "Yes" : "No"} />
+                    <DetailField label="Remarks" value={dash(detail.tc_remarks)} />
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
  * Voids the original payment and records a genuinely new, correct one
  * — never edits the original in place (see voidAndCorrectPayment in
  * server/services/collection.ts for why). Pre-fills with the original's

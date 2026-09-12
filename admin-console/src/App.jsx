@@ -11,6 +11,7 @@ import {
   RefreshCw,
   School,
   Sparkles,
+  UserMinus,
   UserPlus,
   Users,
 } from "lucide-react";
@@ -22,6 +23,7 @@ import {
   FeeScreen,
   FilterSelect,
   ImportScreen,
+  LeftTcStudentsScreen,
   NewAdmissionTab,
   PromoteTab,
   QuickBalanceSearch,
@@ -124,6 +126,7 @@ const STUDENTS_SUBTABS = [
   { id: "promote", label: "Class Promotion", Icon: Sparkles },
   { id: "newadm", label: "New Admission", Icon: UserPlus },
   { id: "roll", label: "Fee Collection", Icon: Percent },
+  { id: "leftTc", label: "Left / TC Students", Icon: UserMinus },
 ];
 // Indian academic year: roughly June to March. Used only to seed a
 // sensible first year automatically when a school has none yet — after
@@ -642,6 +645,9 @@ export default function App() {
         )}
         {step === "bulkimport" && (
           <ImportScreen state={state} academicYears={academicYears} classLevels={classLevels} />
+        )}
+        {step === "leftTc" && (
+          <LeftTcStudentsScreen academicYears={academicYears} classLevels={classLevels} />
         )}
         {step === "promote" && (
           <PromoteTab

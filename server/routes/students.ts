@@ -14,6 +14,7 @@ import { logActivity } from "../services/auditLog.js";
 import { BillingError, generateCharges } from "../services/billing.js";
 import { fiscalYearFor, issueDocumentNumber } from "../services/documentCounter.js";
 import { getEnrollmentLedger } from "../services/ledger.js";
+import { membershipCan, type Role } from "../permissions.js";
 
 export const studentsRouter = Router();
 studentsRouter.use(requireMember);
@@ -195,6 +196,119 @@ studentsRouter.get("/enrollments/:id/profile", async (req, res) => {
      JOIN sections sec ON sec.id = e.section_id
      WHERE e.id = $1 AND e.school_id = $2`,
     [req.params.id, req.school!.id],
+  );
+  if (!result.rows[0]) return res.status(404).end();
+  res.json(result.rows[0]);
+});
+
+// ---------------------------------------------------------------------
+// Left / TC students — a dedicated, historical-only view. Deliberately
+// separate from the active-student endpoints above rather than
+// loosening their own is_active filtering to also cover this case:
+// GET /enrollments/:id/profile, Fee Collection, and Class Promotion all
+// stay exactly as they were, and this pair of endpoints only ever
+// returns enrollments already outside that active set — a student
+// can't show up in both views by construction, since the WHERE clause
+// below is the exact opposite of "is_active = true".
+//
+// Gated on manage_admissions OR manage_tc rather than picking one:
+// either role that can actually create this data (Front Desk
+// withdrawing a student, an Accountant issuing a TC) can also look
+// back at it — Viewer, with neither, correctly cannot.
+function canViewFormerStudents(req: { membership?: { role: Role; is_active: boolean } | null }) {
+  return membershipCan(req.membership, "manage_admissions") || membershipCan(req.membership, "manage_tc");
+}
+
+const formerStudentsQuerySchema = z.object({
+  academic_year_id: z.string().uuid().optional(),
+  status: z.enum(["left", "tc_issued"]).optional(),
+  class_level_id: z.string().uuid().optional(),
+  q: z.string().max(150).optional(),
+  page: z.coerce.number().int().min(1).optional().default(1),
+  page_size: z.coerce.number().int().min(1).max(100).optional().default(25),
+});
+
+studentsRouter.get("/former", requireMember, async (req, res) => {
+  if (!canViewFormerStudents(req)) {
+    return res.status(403).json({ detail: "Your role doesn't include viewing former students." });
+  }
+  const parsed = formerStudentsQuerySchema.safeParse(req.query);
+  if (!parsed.success) return res.status(400).json({ detail: parsed.error.issues[0]?.message });
+  const d = parsed.data;
+
+  const conditions = [`e.school_id = $1`, `e.is_active = false`, `e.outcome IN ('left', 'tc_issued')`];
+  const params: unknown[] = [req.school!.id];
+  if (d.academic_year_id) { params.push(d.academic_year_id); conditions.push(`e.academic_year_id = $${params.length}`); }
+  if (d.status) { params.push(d.status); conditions.push(`e.outcome = $${params.length}`); }
+  if (d.class_level_id) { params.push(d.class_level_id); conditions.push(`e.class_level_id = $${params.length}`); }
+  if (d.q) {
+    params.push(`%${d.q}%`);
+    conditions.push(`(s.full_name ILIKE $${params.length} OR s.admission_no ILIKE $${params.length})`);
+  }
+  const offset = (d.page - 1) * d.page_size;
+  params.push(d.page_size, offset);
+
+  // COUNT(*) OVER() rides along with the same query that fetches the
+  // page itself — one round trip for both the rows and the total,
+  // rather than a second query just to know how many pages exist.
+  const result = await pool.query(
+    `SELECT e.id AS enrollment_id, s.admission_no, s.full_name, cl.name AS class_name,
+            sec.name AS section_name, e.outcome, e.withdrawn_on,
+            count(*) OVER() AS total_count
+     FROM enrollments e
+     JOIN students s ON s.id = e.student_id
+     JOIN class_levels cl ON cl.id = e.class_level_id
+     JOIN sections sec ON sec.id = e.section_id
+     WHERE ${conditions.join(" AND ")}
+     ORDER BY e.withdrawn_on DESC NULLS LAST, e.id DESC
+     LIMIT $${params.length - 1} OFFSET $${params.length}`,
+    params,
+  );
+
+  res.json({
+    rows: result.rows.map((r) => {
+      const { total_count, ...row } = r;
+      return row;
+    }),
+    total: result.rows[0] ? Number(result.rows[0].total_count) : 0,
+    page: d.page,
+    page_size: d.page_size,
+  });
+});
+
+studentsRouter.get("/former/:enrollmentId", requireMember, async (req, res) => {
+  if (!canViewFormerStudents(req)) {
+    return res.status(403).json({ detail: "Your role doesn't include viewing former students." });
+  }
+
+  // One query, every section the details view needs — student,
+  // guardian/parent fields already on students (no second table, no
+  // duplicated data), the historical enrollment itself, and whichever
+  // TC request (if any) was actually issued for it. LEFT JOIN
+  // specifically: a plain withdrawal has no tc_requests row at all,
+  // and that's correctly represented as every tc_* field coming back
+  // null rather than the row failing to match.
+  const result = await pool.query(
+    `SELECT s.admission_no, s.full_name, s.date_of_birth, s.gender, s.blood_group,
+            s.contact_type, s.father_name, s.father_phone, s.father_email,
+            s.mother_name, s.mother_phone, s.mother_email, s.guardian_relationship,
+            s.guardian_name, s.guardian_phone, s.guardian_email, s.address,
+            e.id AS enrollment_id, e.outcome, e.withdrawn_on, e.withdrawal_reason,
+            e.roll_no, e.created_at AS enrolled_on,
+            ay.name AS academic_year_name, cl.name AS class_name, sec.name AS section_name,
+            st.name AS stream_name,
+            tr.tc_number, tr.issued_on AS tc_issued_on, tr.reason AS tc_reason,
+            tr.conduct AS tc_conduct, tr.qualified_for_promotion AS tc_qualified_for_promotion,
+            tr.remarks AS tc_remarks
+     FROM enrollments e
+     JOIN students s ON s.id = e.student_id
+     JOIN academic_years ay ON ay.id = e.academic_year_id
+     JOIN class_levels cl ON cl.id = e.class_level_id
+     JOIN sections sec ON sec.id = e.section_id
+     LEFT JOIN streams st ON st.id = e.stream_id
+     LEFT JOIN tc_requests tr ON tr.enrollment_id = e.id AND tr.status = 'issued'
+     WHERE e.id = $1 AND e.school_id = $2 AND e.is_active = false AND e.outcome IN ('left', 'tc_issued')`,
+    [req.params.enrollmentId, req.school!.id],
   );
   if (!result.rows[0]) return res.status(404).end();
   res.json(result.rows[0]);

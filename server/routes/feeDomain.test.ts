@@ -977,6 +977,257 @@ describe("admission -> billing -> collection, end to end", () => {
     });
   });
 
+  describe("Left / TC Students — a dedicated historical view", () => {
+    async function admitAndWithdraw(cookie: string, overrides: {
+      admission_no: string; full_name: string; year: any; classLevel: any; section: any;
+    }) {
+      const admission = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
+        admission_no: overrides.admission_no, full_name: overrides.full_name,
+        gender: "female", contact_type: "guardian",
+        guardian_relationship: "Mother", guardian_name: "Test Guardian",
+        guardian_phone: "9000000099", academic_year_id: overrides.year.id,
+        class_level_id: overrides.classLevel.id, section_id: overrides.section.id,
+      });
+      const enrollment = admission.body.enrollment;
+      await request(app).post(`/api/students/enrollments/${enrollment.id}/withdraw`)
+        .set("Cookie", cookie).send({ withdrawn_on: "2026-09-10", reason: "Moved to another city" });
+      return enrollment;
+    }
+
+    async function admitAndIssueTc(cookie: string, overrides: {
+      admission_no: string; full_name: string; year: any; classLevel: any; section: any;
+    }) {
+      const admission = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
+        admission_no: overrides.admission_no, full_name: overrides.full_name,
+        gender: "male", contact_type: "guardian",
+        guardian_relationship: "Father", guardian_name: "Test Guardian TC",
+        guardian_phone: "9000000098", academic_year_id: overrides.year.id,
+        class_level_id: overrides.classLevel.id, section_id: overrides.section.id,
+      });
+      const enrollment = admission.body.enrollment;
+      const req1 = await request(app).post(`/api/students/enrollments/${enrollment.id}/tc-requests`)
+        .set("Cookie", cookie).send({ reason: "Relocating", last_day: "2026-09-12" });
+      await request(app).post(`/api/students/tc-requests/${req1.body.id}/clear`)
+        .set("Cookie", cookie).send({ clearance_note: "All dues cleared" });
+      await request(app).post(`/api/students/tc-requests/${req1.body.id}/issue`)
+        .set("Cookie", cookie).send({ conduct: "Excellent", qualified_for_promotion: true, remarks: "Good student" });
+      return enrollment;
+    }
+
+    it("lists a withdrawn student and a TC-issued student, but not an active one", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const { year, classLevel, section } = await setUpAcademicStructure(cookie);
+      const withdrawn = await admitAndWithdraw(cookie,
+        { admission_no: "2026/801", full_name: "Withdrawn Student", year, classLevel, section });
+      const tcIssued = await admitAndIssueTc(cookie,
+        { admission_no: "2026/802", full_name: "TC Student", year, classLevel, section });
+      // A genuinely active student, admitted the same way, for contrast.
+      await request(app).post("/api/students/admit").set("Cookie", cookie).send({
+        admission_no: "2026/803", full_name: "Still Active Student", gender: "male",
+        contact_type: "guardian", guardian_relationship: "Father", guardian_name: "Active Parent",
+        academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
+      });
+
+      const res = await request(app).get("/api/students/former").set("Cookie", cookie);
+      expect(res.status).toBe(200);
+      const admissionNos = res.body.rows.map((r: any) => r.admission_no);
+      expect(admissionNos).toContain("2026/801");
+      expect(admissionNos).toContain("2026/802");
+      expect(admissionNos).not.toContain("2026/803");
+
+      const withdrawnRow = res.body.rows.find((r: any) => r.admission_no === "2026/801");
+      expect(withdrawnRow.outcome).toBe("left");
+      const tcRow = res.body.rows.find((r: any) => r.admission_no === "2026/802");
+      expect(tcRow.outcome).toBe("tc_issued");
+    });
+
+    it("filters by status, class, academic year, and search — each independently", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const { year, classLevel, section } = await setUpAcademicStructure(cookie);
+      const otherClass = await request(app).post("/api/setup/class-levels").set("Cookie", cookie)
+        .send({ name: "IX", ladder_order: 9, stage: "middle" });
+      const otherSection = await request(app).post("/api/setup/sections").set("Cookie", cookie)
+        .send({ academic_year_id: year.id, class_level_id: otherClass.body.id, name: "A" });
+      const feeHead2 = await request(app).post("/api/setup/fee-heads").set("Cookie", cookie)
+        .send({ name: "IX Tuition fee" });
+      await request(app).post("/api/setup/fee-structure").set("Cookie", cookie).send({
+        academic_year_id: year.id, class_level_id: otherClass.body.id,
+        fee_head_id: feeHead2.body.id, amount: 4000000, due_on: "2026-06-15",
+      });
+
+      await admitAndWithdraw(cookie,
+        { admission_no: "2026/810", full_name: "Rahul Kumar", year, classLevel, section });
+      await admitAndIssueTc(cookie,
+        { admission_no: "2026/811", full_name: "Priya Sharma", year,
+          classLevel: otherClass.body, section: otherSection.body });
+
+      // Status filter.
+      const onlyTc = await request(app).get("/api/students/former?status=tc_issued").set("Cookie", cookie);
+      expect(onlyTc.body.rows.map((r: any) => r.admission_no)).toEqual(["2026/811"]);
+
+      const onlyLeft = await request(app).get("/api/students/former?status=left").set("Cookie", cookie);
+      expect(onlyLeft.body.rows.map((r: any) => r.admission_no)).toEqual(["2026/810"]);
+
+      // Class filter.
+      const classFiltered = await request(app)
+        .get(`/api/students/former?class_level_id=${classLevel.id}`).set("Cookie", cookie);
+      expect(classFiltered.body.rows.map((r: any) => r.admission_no)).toEqual(["2026/810"]);
+
+      // Academic year filter.
+      const yearFiltered = await request(app)
+        .get(`/api/students/former?academic_year_id=${year.id}`).set("Cookie", cookie);
+      expect(yearFiltered.body.rows).toHaveLength(2); // both are in the same year here
+
+      // Search by name.
+      const byName = await request(app).get("/api/students/former?q=Priya").set("Cookie", cookie);
+      expect(byName.body.rows.map((r: any) => r.admission_no)).toEqual(["2026/811"]);
+
+      // Search by admission number.
+      const byAdm = await request(app).get("/api/students/former?q=2026/810").set("Cookie", cookie);
+      expect(byAdm.body.rows.map((r: any) => r.admission_no)).toEqual(["2026/810"]);
+    });
+
+    it("paginates server-side rather than returning everything at once", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const { year, classLevel, section } = await setUpAcademicStructure(cookie);
+      for (let i = 0; i < 5; i++) {
+        await admitAndWithdraw(cookie, {
+          admission_no: `2026/90${i}`, full_name: `Paged Student ${i}`, year, classLevel, section,
+        });
+      }
+      const page1 = await request(app).get("/api/students/former?page=1&page_size=2").set("Cookie", cookie);
+      expect(page1.body.rows).toHaveLength(2);
+      expect(page1.body.total).toBe(5);
+      expect(page1.body.page).toBe(1);
+
+      const page2 = await request(app).get("/api/students/former?page=2&page_size=2").set("Cookie", cookie);
+      expect(page2.body.rows).toHaveLength(2);
+      // Different rows on page 2 than page 1 — genuine pagination, not
+      // the same slice repeated.
+      const page1Ids = page1.body.rows.map((r: any) => r.enrollment_id);
+      const page2Ids = page2.body.rows.map((r: any) => r.enrollment_id);
+      expect(page1Ids.some((id: string) => page2Ids.includes(id))).toBe(false);
+    });
+
+    it("view details returns full student, guardian, academic, and TC information in one call", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const { year, classLevel, section } = await setUpAcademicStructure(cookie);
+      const enrollment = await admitAndIssueTc(cookie,
+        { admission_no: "2026/820", full_name: "Detail Test Student", year, classLevel, section });
+
+      const res = await request(app).get(`/api/students/former/${enrollment.id}`).set("Cookie", cookie);
+      expect(res.status).toBe(200);
+      // Student details.
+      expect(res.body.full_name).toBe("Detail Test Student");
+      expect(res.body.admission_no).toBe("2026/820");
+      // Guardian details — from the existing student/guardian columns,
+      // no separate table.
+      expect(res.body.guardian_name).toBe("Test Guardian TC");
+      expect(res.body.guardian_phone).toBe("9000000098");
+      // Academic details.
+      expect(res.body.academic_year_name).toBe(year.name);
+      expect(res.body.class_name).toBe(classLevel.name);
+      expect(res.body.section_name).toBe(section.name);
+      // TC details — the real, issued TC's own fields, not invented.
+      expect(res.body.outcome).toBe("tc_issued");
+      expect(res.body.tc_number).toMatch(/^TC\//);
+      expect(res.body.tc_conduct).toBe("Excellent");
+      expect(res.body.tc_qualified_for_promotion).toBe(true);
+      expect(res.body.tc_reason).toBe("Relocating");
+      expect(res.body.withdrawal_reason).toBe("Relocating");
+    });
+
+    it("a plain withdrawal's view details has no TC fields — genuinely null, not invented", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const { year, classLevel, section } = await setUpAcademicStructure(cookie);
+      const enrollment = await admitAndWithdraw(cookie,
+        { admission_no: "2026/821", full_name: "Plain Withdrawal", year, classLevel, section });
+
+      const res = await request(app).get(`/api/students/former/${enrollment.id}`).set("Cookie", cookie);
+      expect(res.status).toBe(200);
+      expect(res.body.outcome).toBe("left");
+      expect(res.body.withdrawal_reason).toBe("Moved to another city");
+      expect(res.body.tc_number).toBeNull();
+      expect(res.body.tc_issued_on).toBeNull();
+      expect(res.body.tc_conduct).toBeNull();
+    });
+
+    it("an active student's enrollment is not reachable through either endpoint", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const { year, classLevel, section } = await setUpAcademicStructure(cookie);
+      const admission = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
+        admission_no: "2026/830", full_name: "Never Left", gender: "male",
+        contact_type: "guardian", guardian_relationship: "Father", guardian_name: "Parent",
+        academic_year_id: year.id, class_level_id: classLevel.id, section_id: section.id,
+      });
+      const activeEnrollmentId = admission.body.enrollment.id;
+
+      const list = await request(app).get("/api/students/former").set("Cookie", cookie);
+      expect(list.body.rows.map((r: any) => r.enrollment_id)).not.toContain(activeEnrollmentId);
+
+      const detail = await request(app).get(`/api/students/former/${activeEnrollmentId}`).set("Cookie", cookie);
+      expect(detail.status).toBe(404);
+    });
+
+    it("front desk (manage_admissions) and accountant (manage_tc) can both view; viewer cannot", async () => {
+      const ownerCookie = await loginAs("owner@http.test");
+      const { year, classLevel, section } = await setUpAcademicStructure(ownerCookie);
+      await admitAndWithdraw(ownerCookie,
+        { admission_no: "2026/840", full_name: "Perm Test Student", year, classLevel, section });
+
+      const deskCookie = await loginAs("desk@http.test");
+      const deskRes = await request(app).get("/api/students/former").set("Cookie", deskCookie);
+      expect(deskRes.status).toBe(200);
+
+      const accCookie = await loginAs("acc@http.test");
+      const accRes = await request(app).get("/api/students/former").set("Cookie", accCookie);
+      expect(accRes.status).toBe(200);
+
+      const viewerUser = await createUser("viewer@http.test", "x".repeat(14));
+      await createMembership(viewerUser.id, school.id, "viewer");
+      const viewerCookie = await loginAs("viewer@http.test");
+      const viewerRes = await request(app).get("/api/students/former").set("Cookie", viewerCookie);
+      expect(viewerRes.status).toBe(403);
+    });
+
+    it("never returns another school's former students — tenant isolation", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const { year, classLevel, section } = await setUpAcademicStructure(cookie);
+      await admitAndWithdraw(cookie,
+        { admission_no: "2026/850", full_name: "School A Student", year, classLevel, section });
+
+      const otherSchool = await createSchool({ short_code: "http-test-other" });
+      const otherOwner = await createUser("owner2@http.test", "x".repeat(14));
+      await createMembership(otherOwner.id, otherSchool.id, "owner");
+      const otherCookie = await loginAs("owner2@http.test");
+
+      const res = await request(app).get("/api/students/former").set("Cookie", otherCookie);
+      expect(res.status).toBe(200);
+      expect(res.body.rows).toHaveLength(0); // sees none of School A's former students
+    });
+
+    it("existing active-student endpoints are completely unaffected", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const { year, classLevel, section } = await setUpAcademicStructure(cookie);
+      const withdrawn = await admitAndWithdraw(cookie,
+        { admission_no: "2026/860", full_name: "Gone Now", year, classLevel, section });
+
+      // The active roster (Fee Collection's own data source) must not
+      // include a withdrawn student — confirming this fix doesn't
+      // loosen that filtering to make the new screen work.
+      const roster = await request(app)
+        .get(`/api/students/enrollments?academic_year_id=${year.id}`).set("Cookie", cookie);
+      expect(roster.body.map((r: any) => r.id)).not.toContain(withdrawn.id);
+
+      // The existing profile endpoint is untouched — still reachable
+      // for a withdrawn enrollment too (it never filtered by is_active
+      // in the first place), exactly as it worked before this feature.
+      const profile = await request(app)
+        .get(`/api/students/enrollments/${withdrawn.id}/profile`).set("Cookie", cookie);
+      expect(profile.status).toBe(200);
+    });
+  });
+
   it("an accountant can see the day book after front desk collects", async () => {
     const ownerCookie = await loginAs("owner@http.test");
     const { year, classLevel, section } = await setUpAcademicStructure(ownerCookie);
