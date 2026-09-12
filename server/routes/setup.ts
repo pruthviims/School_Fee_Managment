@@ -203,7 +203,7 @@ const sectionSchema = z.object({
   academic_year_id: z.string().uuid(),
   class_level_id: z.string().uuid(),
   name: z.string().min(1).max(10),
-  capacity: z.number().int().positive().optional().default(40),
+  capacity: z.number().int().positive().optional().default(100),
 });
 
 setupRouter.get("/sections", async (req, res) => {

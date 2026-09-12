@@ -697,7 +697,7 @@ export async function commitImport(
       if (!sectionId) {
         const sectionResult = await client.query(
           `INSERT INTO sections (school_id, academic_year_id, class_level_id, name, capacity)
-           VALUES ($1, $2, $3, $4, 40)
+           VALUES ($1, $2, $3, $4, 100)
            ON CONFLICT (school_id, academic_year_id, class_level_id, name) DO UPDATE
              SET name = EXCLUDED.name
            RETURNING id`,

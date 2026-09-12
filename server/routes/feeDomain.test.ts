@@ -1362,6 +1362,14 @@ describe("admission -> billing -> collection, end to end", () => {
         .set("Cookie", otherCookie);
       expect(res.body.find((s: any) => s.id === otherSection.id).student_count).toBe(0);
     });
+
+    it("a new section defaults to a capacity of 100 when none is given", async () => {
+      const cookie = await loginAs("owner@http.test");
+      const { year, classLevel } = await setUpAcademicStructure(cookie);
+      const created = await request(app).post("/api/setup/sections").set("Cookie", cookie)
+        .send({ academic_year_id: year.id, class_level_id: classLevel.id, name: "Cap" });
+      expect(created.body.capacity).toBe(100);
+    });
   });
 
   it("an accountant can see the day book after front desk collects", async () => {

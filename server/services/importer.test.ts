@@ -242,6 +242,7 @@ describe("commitImport", () => {
       `SELECT * FROM sections WHERE academic_year_id = $1 AND name = 'Z'`, [year.id],
     );
     expect(section.rows).toHaveLength(1);
+    expect(section.rows[0].capacity).toBe(100);
   });
 
   it("matches a stream by fuzzy name for a class that requires one", async () => {
