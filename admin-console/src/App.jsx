@@ -1,7 +1,10 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
+  AlertCircle,
+  BarChart3,
   Bell,
   Bus,
+  Check,
   ChevronDown,
   FileSpreadsheet,
   History,
@@ -11,9 +14,11 @@ import {
   ReceiptIndianRupee,
   School,
   Sparkles,
+  Undo2,
   UserMinus,
   UserPlus,
   Users,
+  Wallet,
 } from "lucide-react";
 import { Login, ResetPasswordScreen, Setup } from "./Auth";
 import { api } from "./api";
@@ -27,6 +32,7 @@ import {
   NewAdmissionTab,
   PendingApprovalsScreen,
   PromoteTab,
+  ReportsScreen,
   QuickBalanceSearch,
   SchoolScreen,
   StaffScreen,
@@ -104,6 +110,7 @@ const NAV = [
   // shown-then-blocked.
   { id: "staff", label: "Staff Access", Icon: Users, ownerOnly: true },
   { id: "activityLog", label: "Activity Log", Icon: History, requiresCapability: "view_audit_log" },
+  { id: "reports", label: "Reports", Icon: BarChart3, requiresCapability: "view_reports" },
 ];
 
 // Screens where the working Academic Year actually matters. School Profile
@@ -652,6 +659,9 @@ export default function App() {
 
         {step === "activityLog" && state.school.capabilities.includes("view_audit_log") && (
           <ActivityLogScreen />
+        )}
+        {step === "reports" && state.school.capabilities.includes("view_reports") && (
+          <ReportsScreen academicYears={academicYears} classLevels={classLevels} state={state} />
         )}
         {step === "pendingApprovals" && canApproveRequests && (
           <PendingApprovalsScreen onChanged={refreshPendingApprovals} />

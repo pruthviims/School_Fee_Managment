@@ -16,6 +16,7 @@ import { transportRouter } from "./routes/transport.js";
 import { setupRouter } from "./routes/setup.js";
 import { staffRouter } from "./routes/staff.js";
 import { studentsRouter } from "./routes/students.js";
+import { reportsRouter } from "./routes/reports.js";
 
 export const app = express();
 
@@ -83,6 +84,7 @@ app.use("/api/school", schoolRouter);
 app.use("/api/transport", transportRouter);
 app.use("/api/audit-log", auditLogRouter);
 app.use("/api/import", importRouter);
+app.use("/api/reports", reportsRouter);
 
 // Keep error details out of responses — logged server-side only, since a
 // stack trace is an information leak, not a debugging aid, once this is
