@@ -117,10 +117,19 @@ export async function getReportsSummary(f: ReportFilters) {
 
   const kpis = {
     projectedFees, collected, outstanding, netCollection, refundAmount, concessionAmount,
+    // Net Collectible = what's actually collectible after concessions —
+    // the correct denominator for Collection %, since a concession was
+    // never collectible in the first place. Using gross projected fees
+    // understates collection whenever concessions exist. Both are
+    // exposed so the dashboard can show either, but collectionPct/
+    // outstandingPct below use the corrected one.
+    netCollectibleFees: projectedFees - concessionAmount,
     concessionStudents, concessionPct: rows.length ? (concessionStudents / rows.length) * 100 : 0,
     refundStudents,
-    collectionPct: projectedFees > 0 ? (netCollection / projectedFees) * 100 : 0,
-    outstandingPct: projectedFees > 0 ? (outstanding / projectedFees) * 100 : 0,
+    collectionPct: (projectedFees - concessionAmount) > 0
+      ? (netCollection / (projectedFees - concessionAmount)) * 100 : 0,
+    outstandingPct: (projectedFees - concessionAmount) > 0
+      ? (outstanding / (projectedFees - concessionAmount)) * 100 : 0,
   };
 
   const studentKpis = {
@@ -143,7 +152,9 @@ export async function getReportsSummary(f: ReportFilters) {
     collected: sum(list, "netPaid"), grossCollected: sum(list, "grossPaid"),
     pending: Math.max(0, sum(list, "outstanding")), concession: sum(list, "conceded"),
     refund: sum(list, "refunded"), netCollection: sum(list, "netPaid"),
-    collectionPct: sum(list, "charged") > 0 ? (sum(list, "netPaid") / sum(list, "charged")) * 100 : 0,
+    netCollectible: sum(list, "charged") - sum(list, "conceded"),
+    collectionPct: (sum(list, "charged") - sum(list, "conceded")) > 0
+      ? (sum(list, "netPaid") / (sum(list, "charged") - sum(list, "conceded"))) * 100 : 0,
     outstandingStudents: list.filter((r) => r.outstanding > 0).length,
     avgOutstanding: list.length ? Math.max(0, sum(list, "outstanding")) / list.length : 0,
     tcLeft: list.filter((r) => r.outcome === "tc_issued" || r.outcome === "left").length,
@@ -154,7 +165,9 @@ export async function getReportsSummary(f: ReportFilters) {
     students: list.length, projected: sum(list, "charged"),
     collected: sum(list, "netPaid"), grossCollected: sum(list, "grossPaid"),
     pending: Math.max(0, sum(list, "outstanding")),
-    collectionPct: sum(list, "charged") > 0 ? (sum(list, "netPaid") / sum(list, "charged")) * 100 : 0,
+    netCollectible: sum(list, "charged") - sum(list, "conceded"),
+    collectionPct: (sum(list, "charged") - sum(list, "conceded")) > 0
+      ? (sum(list, "netPaid") / (sum(list, "charged") - sum(list, "conceded"))) * 100 : 0,
     outstandingStudents: list.filter((r) => r.outstanding > 0).length,
   }));
 
@@ -223,7 +236,8 @@ export async function getPaymentModeBreakdown(f: ReportFilters) {
 export async function getRefundAnalytics(f: ReportFilters) {
   const params: unknown[] = [f.schoolId, f.academicYearId];
   let classFilter = "";
-  if (f.classLevelId) { params.push(f.classLevelId); classFilter = ` AND e.class_level_id = $${params.length}`; }
+  if (f.classLevelId) { params.push(f.classLevelId); classFilter += ` AND e.class_level_id = $${params.length}`; }
+  if (f.sectionId) { params.push(f.sectionId); classFilter += ` AND e.section_id = $${params.length}`; }
 
   const requests = await pool.query(
     `SELECT rr.status, COUNT(*) AS count, COALESCE(SUM(rr.amount), 0) AS amount
@@ -246,6 +260,16 @@ export async function getRefundAnalytics(f: ReportFilters) {
      GROUP BY 1 ORDER BY amount DESC`,
     params,
   );
+  const bySection = await pool.query(
+    `SELECT cl.name AS class_name, sec.name AS section_name,
+            SUM(r.amount) AS amount, COUNT(DISTINCT r.enrollment_id) AS students
+     FROM refunds r JOIN enrollments e ON e.id = r.enrollment_id
+     JOIN class_levels cl ON cl.id = e.class_level_id
+     JOIN sections sec ON sec.id = e.section_id
+     WHERE r.school_id = $1 AND e.academic_year_id = $2 ${classFilter}
+     GROUP BY cl.name, cl.ladder_order, sec.name ORDER BY cl.ladder_order, sec.name`,
+    params,
+  );
 
   const statusCounts: Record<string, { count: number; amount: number }> = {};
   for (const r of requests.rows) statusCounts[r.status] = { count: Number(r.count), amount: Number(r.amount) };
@@ -259,13 +283,18 @@ export async function getRefundAnalytics(f: ReportFilters) {
     totalRefunded: Number(processed.rows[0].amount),
     studentsRefunded: Number(processed.rows[0].students),
     byReason: byReason.rows.map((r) => ({ reason: r.reason, amount: Number(r.amount), count: Number(r.count) })),
+    bySection: bySection.rows.map((r) => ({
+      className: r.class_name, sectionName: r.section_name,
+      amount: Number(r.amount), students: Number(r.students),
+    })),
   };
 }
 
 export async function getTcAnalytics(f: ReportFilters) {
   const params: unknown[] = [f.schoolId, f.academicYearId];
   let classFilter = "";
-  if (f.classLevelId) { params.push(f.classLevelId); classFilter = ` AND e.class_level_id = $${params.length}`; }
+  if (f.classLevelId) { params.push(f.classLevelId); classFilter += ` AND e.class_level_id = $${params.length}`; }
+  if (f.sectionId) { params.push(f.sectionId); classFilter += ` AND e.section_id = $${params.length}`; }
 
   const requests = await pool.query(
     `SELECT tr.status, COUNT(*) AS count
@@ -282,6 +311,19 @@ export async function getTcAnalytics(f: ReportFilters) {
      GROUP BY 1, cl.name ORDER BY count DESC`,
     params,
   );
+  // By academic year — reads the same request-level status per year
+  // that already exists for this school, not fabricated to a fixed
+  // window (matches getYearComparison's own "bounded by real data"
+  // approach).
+  const byYear = await pool.query(
+    `SELECT ay.name AS year_name, COUNT(*) AS count
+     FROM tc_requests tr
+     JOIN enrollments e ON e.id = tr.enrollment_id
+     JOIN academic_years ay ON ay.id = e.academic_year_id
+     WHERE tr.school_id = $1
+     GROUP BY ay.name, ay.starts_on ORDER BY ay.starts_on DESC LIMIT 5`,
+    [f.schoolId],
+  );
 
   const statusCounts: Record<string, number> = {};
   for (const r of requests.rows) statusCounts[r.status] = Number(r.count);
@@ -293,74 +335,107 @@ export async function getTcAnalytics(f: ReportFilters) {
     issued: statusCounts.issued ?? 0,
     rejected: statusCounts.rejected ?? 0,
     byExitReason: byExitReason.rows.map((r) => ({ reason: r.reason, count: Number(r.count), className: r.class_name })),
+    byYear: byYear.rows.map((r) => ({ year: r.year_name, count: Number(r.count) })),
   };
 }
 
 export async function getPromotionAnalytics(f: ReportFilters) {
-  // "Considered for promotion" is every enrollment that batch touched
-  // in the FROM year — promoted if a NEW enrollment exists in the TO
-  // year linked back to the same batch, not promoted otherwise. Reuses
-  // promotion_batches/enrollments exactly as already modeled; no
-  // separate promotion-outcome table invented for this.
-  const result = await pool.query(
-    `SELECT pb.id AS batch_id, pb.from_year_id, pb.to_year_id, cl.name AS class_name,
-            COUNT(DISTINCT e_from.id) AS considered,
-            COUNT(DISTINCT e_to.id) AS promoted
-     FROM promotion_batches pb
-     JOIN enrollments e_from ON e_from.promotion_batch_id IS NULL
-       AND e_from.academic_year_id = pb.from_year_id AND e_from.school_id = pb.school_id
-     LEFT JOIN class_levels cl ON cl.id = e_from.class_level_id
-     LEFT JOIN enrollments e_to ON e_to.promotion_batch_id = pb.id AND e_to.student_id = e_from.student_id
-     WHERE pb.school_id = $1 AND pb.status = 'committed' AND pb.from_year_id = $2
-     GROUP BY pb.id, pb.from_year_id, pb.to_year_id, cl.name`,
+  // Rewritten after review: the original version joined promotion_batches
+  // to every enrollment in the year, so two committed batches for the
+  // same from_year_id (a school promoting in more than one sitting —
+  // confirmed possible, since commit() takes an arbitrary move subset)
+  // double-counted "considered". It also filtered nothing on outcome,
+  // so a student who'd withdrawn before promotion ever ran (no e_to,
+  // since they'd already left) was wrongly counted as "not promoted".
+  //
+  // Fixed by reading outcome directly off each enrollment instead of
+  // joining against batches at all — commit() sets exactly one of
+  // these per enrollment, once, regardless of how many separate batches
+  // a school runs: 'promoted', 'passed_out' (graduated — a real exit,
+  // not a concern, kept separate from "not promoted" rather than
+  // conflated with it), 'left'/'tc_issued' (withdrew beforehand,
+  // correctly excluded from "considered" entirely), or unchanged
+  // ('pending', still active) meaning promotion hasn't moved them —
+  // genuinely "not promoted" only once a batch has actually run for
+  // this year, checked separately below so a year where promotion
+  // simply hasn't happened yet doesn't show every student as a false
+  // "not promoted".
+  const batchExists = await pool.query(
+    `SELECT 1 FROM promotion_batches WHERE school_id = $1 AND from_year_id = $2 AND status = 'committed' LIMIT 1`,
     [f.schoolId, f.academicYearId],
   );
-  // The query above is intentionally simple and may not perfectly
-  // isolate a single batch's own considered-set if a class was
-  // promoted across multiple batches — acceptable for a first version
-  // given committed batches are rare, sequential events per year.
+  if (!batchExists.rows[0]) {
+    return { considered: 0, promoted: 0, notPromoted: 0, graduated: 0, byClass: [] };
+  }
+
+  const params: unknown[] = [f.schoolId, f.academicYearId];
+  let where = "e.school_id = $1 AND e.academic_year_id = $2";
+  if (f.classLevelId) { params.push(f.classLevelId); where += ` AND e.class_level_id = $${params.length}`; }
+  if (f.sectionId) { params.push(f.sectionId); where += ` AND e.section_id = $${params.length}`; }
+
+  const result = await pool.query(
+    `SELECT cl.name AS class_name, cl.ladder_order,
+            COUNT(*) FILTER (WHERE e.outcome IN ('promoted', 'passed_out', 'pending')) AS considered,
+            COUNT(*) FILTER (WHERE e.outcome = 'promoted') AS promoted,
+            COUNT(*) FILTER (WHERE e.outcome = 'passed_out') AS graduated,
+            COUNT(*) FILTER (WHERE e.outcome = 'pending' AND e.is_active = true) AS not_promoted
+     FROM enrollments e
+     JOIN class_levels cl ON cl.id = e.class_level_id
+     WHERE ${where}
+     GROUP BY cl.name, cl.ladder_order ORDER BY cl.ladder_order`,
+    params,
+  );
   const byClass = result.rows.map((r) => ({
     className: r.class_name, considered: Number(r.considered), promoted: Number(r.promoted),
-    notPromoted: Number(r.considered) - Number(r.promoted),
+    graduated: Number(r.graduated), notPromoted: Number(r.not_promoted),
     promotionPct: Number(r.considered) > 0 ? (Number(r.promoted) / Number(r.considered)) * 100 : 0,
   }));
   return {
     considered: byClass.reduce((t, r) => t + r.considered, 0),
     promoted: byClass.reduce((t, r) => t + r.promoted, 0),
+    graduated: byClass.reduce((t, r) => t + r.graduated, 0),
     notPromoted: byClass.reduce((t, r) => t + r.notPromoted, 0),
     byClass,
   };
 }
 
 export async function getAdmissionAnalytics(f: ReportFilters) {
+  const params: unknown[] = [f.schoolId, f.academicYearId];
+  let where = "e.school_id = $1 AND e.academic_year_id = $2 AND e.admission_type = 'new'";
+  if (f.classLevelId) { params.push(f.classLevelId); where += ` AND e.class_level_id = $${params.length}`; }
+  if (f.sectionId) { params.push(f.sectionId); where += ` AND e.section_id = $${params.length}`; }
+
   const trend = await pool.query(
     `SELECT to_char(e.created_at, 'YYYY-MM') AS month, COUNT(*) AS count
-     FROM enrollments e
-     WHERE e.school_id = $1 AND e.academic_year_id = $2 AND e.admission_type = 'new'
-     GROUP BY 1 ORDER BY 1`,
-    [f.schoolId, f.academicYearId],
+     FROM enrollments e WHERE ${where} GROUP BY 1 ORDER BY 1`,
+    params,
   );
   const byClass = await pool.query(
     `SELECT cl.name AS class_name, sec.name AS section_name, COUNT(*) AS count
      FROM enrollments e
      JOIN class_levels cl ON cl.id = e.class_level_id
      JOIN sections sec ON sec.id = e.section_id
-     WHERE e.school_id = $1 AND e.academic_year_id = $2 AND e.admission_type = 'new'
+     WHERE ${where}
      GROUP BY cl.name, cl.ladder_order, sec.name ORDER BY cl.ladder_order, sec.name`,
-    [f.schoolId, f.academicYearId],
+    params,
   );
   // "Admission cancelled" — the exit_reason category recorded at NOC
   // approval (already stored as the enrollment's own withdrawal_reason,
   // same source the Left/TC screen reads from), not a separate flag.
+  // Same class/section filter applied here as everywhere else above,
+  // so a filtered view doesn't silently mix in unfiltered cancellations.
+  let cancelledWhere = "e.school_id = $1 AND e.academic_year_id = $2 AND e.withdrawal_reason = 'Admission Cancelled'";
+  const cancelledParams: unknown[] = [f.schoolId, f.academicYearId];
+  if (f.classLevelId) { cancelledParams.push(f.classLevelId); cancelledWhere += ` AND e.class_level_id = $${cancelledParams.length}`; }
+  if (f.sectionId) { cancelledParams.push(f.sectionId); cancelledWhere += ` AND e.section_id = $${cancelledParams.length}`; }
   const cancelled = await pool.query(
     `SELECT COUNT(*) AS count, COALESCE(SUM(r.refunded), 0) AS refund_amount
      FROM enrollments e
      LEFT JOIN LATERAL (
        SELECT SUM(amount) AS refunded FROM refunds WHERE enrollment_id = e.id
      ) r ON true
-     WHERE e.school_id = $1 AND e.academic_year_id = $2
-       AND e.withdrawal_reason = 'Admission Cancelled'`,
-    [f.schoolId, f.academicYearId],
+     WHERE ${cancelledWhere}`,
+    cancelledParams,
   );
 
   return {
@@ -421,10 +496,13 @@ export async function getYearComparison(schoolId: string, limitYears = 5) {
       const promo = await getPromotionAnalytics({ schoolId, academicYearId: y.id });
       return {
         year: y.name, students: summary.totalEnrollments, newAdmissions: summary.studentKpis.newAdmissions,
-        projectedFees: summary.kpis.projectedFees,
+        projectedFees: summary.kpis.projectedFees, netCollectibleFees: summary.kpis.netCollectibleFees,
         // Net, not gross — so this row reconciles with its own
         // "pending" column exactly like byClass/bySection do, rather
         // than showing a pre-refund figure next to a post-refund one.
+        // collectionPct already uses netCollectibleFees as its
+        // denominator (fixed at the source in getReportsSummary), so
+        // this inherits that correction automatically.
         collected: summary.kpis.netCollection, grossCollected: summary.kpis.collected,
         collectionPct: summary.kpis.collectionPct, pending: summary.kpis.outstanding,
         concession: summary.kpis.concessionAmount, refund: summary.kpis.refundAmount,

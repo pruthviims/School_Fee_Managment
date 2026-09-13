@@ -3845,17 +3845,19 @@ export function ReportsScreen({ academicYears, classLevels, state }) {
             <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
               <StatCard icon={ReceiptIndianRupee} tint="bg-brand-50 text-brand-600" label="Projected Fees"
                 value={inr(summary.kpis.projectedFees / 100)} note={`${summary.totalEnrollments} students`} />
+              <StatCard icon={Percent} tint="bg-slate-50 text-slate-600" label="Net Collectible"
+                value={inr(summary.kpis.netCollectibleFees / 100)} note="Projected − concessions" />
               <StatCard icon={Wallet} tint="bg-emerald-50 text-emerald-600" label="Net Collection"
                 value={inr(summary.kpis.netCollection / 100)}
-                note={`${summary.kpis.collectionPct.toFixed(1)}% collected`} noteTint="text-emerald-600" />
+                note={`${summary.kpis.collectionPct.toFixed(1)}% of net collectible`} noteTint="text-emerald-600" />
               <StatCard icon={AlertCircle} tint="bg-red-50 text-red-600" label="Outstanding"
                 value={inr(summary.kpis.outstanding / 100)}
-                note={`${summary.kpis.outstandingPct.toFixed(1)}% pending`} noteTint="text-red-500" />
+                note={`${summary.kpis.outstandingPct.toFixed(1)}% of net collectible`} noteTint="text-red-500" />
+            </div>
+            <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
               <StatCard icon={Percent} tint="bg-amber-50 text-amber-600" label="Concessions"
                 value={inr(summary.kpis.concessionAmount / 100)}
                 note={`${summary.kpis.concessionStudents} students (${summary.kpis.concessionPct.toFixed(1)}%)`} />
-            </div>
-            <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
               <StatCard icon={Undo2} tint="bg-slate-50 text-slate-600" label="Refunds Processed"
                 value={inr(summary.kpis.refundAmount / 100)} note={`${summary.kpis.refundStudents} students`} />
               <StatCard icon={Users} tint="bg-brand-50 text-brand-600" label="Active Students"
@@ -3993,14 +3995,16 @@ export function ReportsScreen({ academicYears, classLevels, state }) {
           </ReportSection>
 
           <ReportSection title="Promotion Analytics">
-            <div className="grid sm:grid-cols-3 gap-4 mb-4">
+            <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
               <StatCard icon={Sparkles} tint="bg-brand-50 text-brand-600" label="Promoted"
                 value={promotion?.promoted ?? 0}
                 note={promotion?.considered ? `${((promotion.promoted / promotion.considered) * 100).toFixed(1)}%` : "—"} />
               <StatCard icon={AlertCircle} tint="bg-amber-50 text-amber-600" label="Not Promoted"
-                value={promotion?.notPromoted ?? 0} note="This year's promotion batch" />
+                value={promotion?.notPromoted ?? 0} note="Still active, not yet moved up" />
+              <StatCard icon={GraduationCap} tint="bg-slate-50 text-slate-600" label="Graduated"
+                value={promotion?.graduated ?? 0} note="Completed the top class — not a concern" />
               <StatCard icon={Users} tint="bg-slate-50 text-slate-600" label="Considered"
-                value={promotion?.considered ?? 0} note="Total in promotion batch" />
+                value={promotion?.considered ?? 0} note="Excludes students who'd already left" />
             </div>
           </ReportSection>
 

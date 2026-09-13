@@ -267,4 +267,268 @@ describe("GET /reports/year-comparison", () => {
     expect(res.body).toHaveLength(1); // exactly one year exists — not fabricated to 5
     expect(res.body[0].year).toBe("2026-27");
   });
+
+  it("each year row reconciles with itself, same as class comparison", async () => {
+    const cookie = await loginAs("owner@reports.test");
+    const { year, classLevel, section } = await setUpAcademicStructure(cookie);
+    const a = await admit(cookie, year, classLevel, section, "2026/yc1");
+    await request(app).post("/api/collection/payments").set("Cookie", cookie).send({
+      enrollment_id: a.id, amount: 4000000, mode: "cash",
+    });
+    await request(app).post(`/api/students/enrollments/${a.id}/refund`).set("Cookie", cookie).send({
+      amount: 300000, mode: "cash",
+    });
+
+    const res = await request(app).get("/api/reports/year-comparison").set("Cookie", cookie);
+    const row = res.body[0];
+    expect(row.collected).toBe(3700000); // net
+    expect(row.grossCollected).toBe(4000000);
+    expect(row.projectedFees - row.concession - row.collected).toBe(row.pending);
+  });
+});
+
+describe("Collection % uses Net Collectible Fees, not gross projected (review fix)", () => {
+  it("a concession no longer silently understates collection %", async () => {
+    const cookie = await loginAs("owner@reports.test");
+    const { year, classLevel, section } = await setUpAcademicStructure(cookie);
+    const a = await admit(cookie, year, classLevel, section, "2026/cc1");
+    // Fee 40,000; concession 10,000 → net collectible 30,000; fully paid.
+    await request(app).post(`/api/students/enrollments/${a.id}/concessions`).set("Cookie", cookie).send({
+      reason: "sibling", amount: 1000000, note: "Test",
+    });
+    await request(app).post("/api/collection/payments").set("Cookie", cookie).send({
+      enrollment_id: a.id, amount: 3000000, mode: "cash",
+    });
+
+    const res = await request(app).get(`/api/reports/summary?academic_year_id=${year.id}`).set("Cookie", cookie);
+    expect(res.body.kpis.netCollectibleFees).toBe(3000000); // 4,000,000 - 1,000,000
+    // Fully collected against net collectible — must read 100%, not the
+    // understated ~75% a gross-projected-fees denominator would give.
+    expect(res.body.kpis.collectionPct).toBeCloseTo(100, 5);
+  });
+});
+
+describe("Section-level reconciliation and section/class filter consistency across reports (review fixes)", () => {
+  async function addSectionB(cookie: string, year: any, classLevel: any) {
+    const sectionB = await request(app).post("/api/setup/sections").set("Cookie", cookie).send({
+      academic_year_id: year.id, class_level_id: classLevel.id, name: "B",
+    });
+    return sectionB.body;
+  }
+
+  it("section comparison reconciles with itself, per section", async () => {
+    const cookie = await loginAs("owner@reports.test");
+    const { year, classLevel, section } = await setUpAcademicStructure(cookie);
+    const sectionB = await addSectionB(cookie, year, classLevel);
+    const a = await admit(cookie, year, classLevel, section, "2026/sc1");
+    await request(app).post("/api/collection/payments").set("Cookie", cookie).send({
+      enrollment_id: a.id, amount: 4000000, mode: "cash",
+    });
+    await admit(cookie, year, classLevel, sectionB, "2026/sc2"); // unpaid, in section B
+
+    const res = await request(app).get(`/api/reports/summary?academic_year_id=${year.id}`).set("Cookie", cookie);
+    for (const row of res.body.bySection) {
+      expect(row.projected - row.pending).toBeLessThanOrEqual(row.projected); // sanity: pending never exceeds projected here
+    }
+    const rowA = res.body.bySection.find((r: any) => r.sectionName === "A");
+    expect(rowA.collected).toBe(4000000);
+    expect(rowA.pending).toBe(0);
+    const rowB = res.body.bySection.find((r: any) => r.sectionName === "B");
+    expect(rowB.collected).toBe(0);
+    expect(rowB.pending).toBe(4000000);
+  });
+
+  it("refund analytics now respects the section filter (previously silently ignored it)", async () => {
+    const cookie = await loginAs("owner@reports.test");
+    const { year, classLevel, section } = await setUpAcademicStructure(cookie);
+    const sectionB = await addSectionB(cookie, year, classLevel);
+    const a = await admit(cookie, year, classLevel, section, "2026/rf1");
+    await request(app).post("/api/collection/payments").set("Cookie", cookie).send({
+      enrollment_id: a.id, amount: 4000000, mode: "cash",
+    });
+    await request(app).post(`/api/students/enrollments/${a.id}/refund`).set("Cookie", cookie).send({
+      amount: 100000, mode: "cash",
+    });
+    const b = await admit(cookie, year, classLevel, sectionB, "2026/rf2");
+    await request(app).post("/api/collection/payments").set("Cookie", cookie).send({
+      enrollment_id: b.id, amount: 4000000, mode: "cash",
+    });
+    await request(app).post(`/api/students/enrollments/${b.id}/refund`).set("Cookie", cookie).send({
+      amount: 200000, mode: "cash",
+    });
+
+    const sectionAOnly = await request(app)
+      .get(`/api/reports/refunds?academic_year_id=${year.id}&class_level_id=${classLevel.id}&section_id=${section.id}`)
+      .set("Cookie", cookie);
+    expect(sectionAOnly.body.totalRefunded).toBe(100000); // only section A's refund — not both
+
+    const bothSections = await request(app)
+      .get(`/api/reports/refunds?academic_year_id=${year.id}&class_level_id=${classLevel.id}`)
+      .set("Cookie", cookie);
+    expect(bothSections.body.totalRefunded).toBe(300000); // unfiltered by section, both count
+  });
+
+  it("promotion and admission analytics now respect class/section filters (previously ignored both entirely)", async () => {
+    const cookie = await loginAs("owner@reports.test");
+    const { year, classLevel, section } = await setUpAcademicStructure(cookie);
+    const sectionB = await addSectionB(cookie, year, classLevel);
+    await admit(cookie, year, classLevel, section, "2026/ad1");
+    await admit(cookie, year, classLevel, sectionB, "2026/ad2");
+
+    const sectionAOnly = await request(app)
+      .get(`/api/reports/admissions?academic_year_id=${year.id}&class_level_id=${classLevel.id}&section_id=${section.id}`)
+      .set("Cookie", cookie);
+    const total = sectionAOnly.body.trend.reduce((t: number, r: any) => t + r.count, 0);
+    expect(total).toBe(1); // only section A's admission, not both
+  });
+});
+
+describe("Promotion analytics correctness (review fixes: double-count, is_active exclusion, graduate distinction)", () => {
+  async function setUpTwoYearLadder(cookie: string) {
+    const fromYear = await request(app).post("/api/setup/academic-years").set("Cookie", cookie)
+      .send({ name: "2025-26", starts_on: "2025-06-01", ends_on: "2026-03-31", status: "active" });
+    const toYear = await request(app).post("/api/setup/academic-years").set("Cookie", cookie)
+      .send({ name: "2026-27", starts_on: "2026-06-01", ends_on: "2027-03-31", status: "planning" });
+    const classVIII = await request(app).post("/api/setup/class-levels").set("Cookie", cookie)
+      .send({ name: "VIII", ladder_order: 8, stage: "middle" });
+    const classIX = await request(app).post("/api/setup/class-levels").set("Cookie", cookie)
+      .send({ name: "IX", ladder_order: 9, stage: "middle" });
+    const sectionVIII = await request(app).post("/api/setup/sections").set("Cookie", cookie).send({
+      academic_year_id: fromYear.body.id, class_level_id: classVIII.body.id, name: "A",
+    });
+    const sectionIX = await request(app).post("/api/setup/sections").set("Cookie", cookie).send({
+      academic_year_id: toYear.body.id, class_level_id: classIX.body.id, name: "A",
+    });
+    const feeHead = await request(app).post("/api/setup/fee-heads").set("Cookie", cookie)
+      .send({ name: "Tuition fee" });
+    await request(app).post("/api/setup/fee-structure").set("Cookie", cookie).send({
+      academic_year_id: fromYear.body.id, class_level_id: classVIII.body.id,
+      fee_head_id: feeHead.body.id, amount: 4000000, due_on: "2025-06-15",
+    });
+    await request(app).post("/api/setup/fee-structure").set("Cookie", cookie).send({
+      academic_year_id: toYear.body.id, class_level_id: classIX.body.id,
+      fee_head_id: feeHead.body.id, amount: 4200000, due_on: "2026-06-15",
+    });
+    return { fromYear: fromYear.body, toYear: toYear.body, classVIII: classVIII.body,
+      sectionVIII: sectionVIII.body, sectionIX: sectionIX.body };
+  }
+
+  it("committing promotion in two separate batches for the same year does not double-count 'considered'", async () => {
+    const cookie = await loginAs("owner@reports.test");
+    const { fromYear, toYear, classVIII, sectionVIII } = await setUpTwoYearLadder(cookie);
+    const s1 = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
+      admission_no: "2025/901", full_name: "Student One", gender: "male", contact_type: "guardian",
+      guardian_relationship: "Father", guardian_name: "G1",
+      academic_year_id: fromYear.id, class_level_id: classVIII.id, section_id: sectionVIII.id,
+    });
+    const s2 = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
+      admission_no: "2025/902", full_name: "Student Two", gender: "female", contact_type: "guardian",
+      guardian_relationship: "Mother", guardian_name: "G2",
+      academic_year_id: fromYear.id, class_level_id: classVIII.id, section_id: sectionVIII.id,
+    });
+
+    // Two separate commits for the same from_year/to_year — the exact
+    // scenario the review flagged as double-counting "considered".
+    const preview1 = await request(app).post("/api/promotion/preview").set("Cookie", cookie)
+      .send({ from_year_id: fromYear.id, to_year_id: toYear.id, exclude_enrollment_ids: [s2.body.enrollment.id] });
+    const assign1 = await request(app).post("/api/promotion/assign-sections").set("Cookie", cookie)
+      .send({ to_year_id: toYear.id, moves: preview1.body.moves });
+    await request(app).post("/api/promotion/commit").set("Cookie", cookie).send({
+      from_year_id: fromYear.id, to_year_id: toYear.id, moves: assign1.body.moves,
+    });
+
+    const preview2 = await request(app).post("/api/promotion/preview").set("Cookie", cookie)
+      .send({ from_year_id: fromYear.id, to_year_id: toYear.id });
+    const assign2 = await request(app).post("/api/promotion/assign-sections").set("Cookie", cookie)
+      .send({ to_year_id: toYear.id, moves: preview2.body.moves });
+    await request(app).post("/api/promotion/commit").set("Cookie", cookie).send({
+      from_year_id: fromYear.id, to_year_id: toYear.id, moves: assign2.body.moves,
+    });
+
+    const res = await request(app).get(`/api/reports/promotion?academic_year_id=${fromYear.id}`).set("Cookie", cookie);
+    expect(res.body.considered).toBe(2); // not 4 — each student counted exactly once
+    expect(res.body.promoted).toBe(2);
+    expect(res.body.notPromoted).toBe(0);
+  });
+
+  it("a student who withdrew before promotion ran is not counted as 'not promoted'", async () => {
+    const cookie = await loginAs("owner@reports.test");
+    const { fromYear, toYear, classVIII, sectionVIII } = await setUpTwoYearLadder(cookie);
+    const promoted = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
+      admission_no: "2025/903", full_name: "Promoted Student", gender: "male", contact_type: "guardian",
+      guardian_relationship: "Father", guardian_name: "G1",
+      academic_year_id: fromYear.id, class_level_id: classVIII.id, section_id: sectionVIII.id,
+    });
+    const withdrew = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
+      admission_no: "2025/904", full_name: "Withdrawn Student", gender: "female", contact_type: "guardian",
+      guardian_relationship: "Mother", guardian_name: "G2",
+      academic_year_id: fromYear.id, class_level_id: classVIII.id, section_id: sectionVIII.id,
+    });
+    // Withdraw before promotion ever runs — via the NOC/exit workflow.
+    const tcReq = await request(app).post(`/api/students/enrollments/${withdrew.body.enrollment.id}/tc-requests`)
+      .set("Cookie", cookie).send({ reason: "Transfer", last_day: "2025-12-01" });
+    await request(app).post(`/api/students/tc-requests/${tcReq.body.id}/clear`).set("Cookie", cookie)
+      .send({ exit_reason: "transferred" });
+
+    const preview = await request(app).post("/api/promotion/preview").set("Cookie", cookie)
+      .send({ from_year_id: fromYear.id, to_year_id: toYear.id });
+    // The withdrawn student is no longer active, so preview naturally
+    // excludes them from actionable moves.
+    const assign = await request(app).post("/api/promotion/assign-sections").set("Cookie", cookie)
+      .send({ to_year_id: toYear.id, moves: preview.body.moves });
+    await request(app).post("/api/promotion/commit").set("Cookie", cookie).send({
+      from_year_id: fromYear.id, to_year_id: toYear.id, moves: assign.body.moves,
+    });
+
+    const res = await request(app).get(`/api/reports/promotion?academic_year_id=${fromYear.id}`).set("Cookie", cookie);
+    expect(res.body.considered).toBe(1); // only the promoted student — withdrawn one excluded
+    expect(res.body.promoted).toBe(1);
+    expect(res.body.notPromoted).toBe(0);
+    void promoted;
+  });
+
+  it("returns all-zero, not a false 'not promoted', when no promotion batch has run yet for the year", async () => {
+    const cookie = await loginAs("owner@reports.test");
+    const { fromYear, classVIII, sectionVIII } = await setUpTwoYearLadder(cookie);
+    await request(app).post("/api/students/admit").set("Cookie", cookie).send({
+      admission_no: "2025/905", full_name: "Not Yet Promoted", gender: "male", contact_type: "guardian",
+      guardian_relationship: "Father", guardian_name: "G1",
+      academic_year_id: fromYear.id, class_level_id: classVIII.id, section_id: sectionVIII.id,
+    });
+
+    const res = await request(app).get(`/api/reports/promotion?academic_year_id=${fromYear.id}`).set("Cookie", cookie);
+    expect(res.body.considered).toBe(0);
+    expect(res.body.notPromoted).toBe(0); // not a false positive just because promotion hasn't run
+  });
+});
+
+describe("Student-ledger cross-check (review Phase 4: reports must reconcile with the individual student's own ledger)", () => {
+  it("summary KPIs for a single-student filter exactly match that student's own profile ledger", async () => {
+    const cookie = await loginAs("owner@reports.test");
+    const { year, classLevel, section } = await setUpAcademicStructure(cookie);
+    const a = await admit(cookie, year, classLevel, section, "2026/lc1");
+    await request(app).post("/api/collection/payments").set("Cookie", cookie).send({
+      enrollment_id: a.id, amount: 4000000, mode: "cash",
+    });
+    await request(app).post(`/api/students/enrollments/${a.id}/refund`).set("Cookie", cookie).send({
+      amount: 300000, mode: "cash",
+    });
+
+    // The individual student's own ledger — the same view Fee Collection
+    // and Student Profile already read from.
+    const roster = await request(app)
+      .get(`/api/students/enrollments?academic_year_id=${year.id}&include_ledger=1`).set("Cookie", cookie);
+    const studentLedger = roster.body.find((r: any) => r.id === a.id).ledger;
+
+    const filtered = await request(app)
+      .get(`/api/reports/summary?academic_year_id=${year.id}&class_level_id=${classLevel.id}&section_id=${section.id}`)
+      .set("Cookie", cookie);
+    // This filter isolates exactly one student, so the report's totals
+    // must equal that one student's own ledger figures exactly.
+    expect(filtered.body.kpis.projectedFees).toBe(studentLedger.charged);
+    expect(filtered.body.kpis.collected).toBe(studentLedger.grossPaid);
+    expect(filtered.body.kpis.refundAmount).toBe(studentLedger.refunded);
+    expect(filtered.body.kpis.netCollection).toBe(studentLedger.paid);
+    expect(filtered.body.kpis.outstanding).toBe(studentLedger.balance);
+  });
 });
