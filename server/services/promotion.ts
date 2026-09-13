@@ -420,6 +420,30 @@ export async function commit(
       );
     }
 
+    // Blocked (non-graduate) moves — most commonly held back for
+    // outstanding dues (block_on_dues) — were previously left entirely
+    // untouched: their enrollment simply stayed at its original
+    // 'pending' outcome forever, indistinguishable from "promotion
+    // hasn't been run for this student yet at all". Recording the
+    // decision explicitly, using 'detained' (already a valid outcome
+    // value read elsewhere in this file, just never previously
+    // written) lets this genuinely be reported as "considered and not
+    // promoted" rather than approximated after the fact. is_active is
+    // deliberately left true — a detained student stays fully active
+    // in their current class, unlike a promoted or graduated one.
+    // promotion_batch_id is set here too (previously only ever used on
+    // the new, promoted-into enrollment) purely so reverseBatch below
+    // can find and undo exactly this batch's own detentions, not
+    // guess based on outcome alone across possibly several batches
+    // sharing the same from_year_id.
+    const blocked = moves.filter((m) => m.kind === "blocked");
+    if (blocked.length > 0) {
+      await client.query(
+        `UPDATE enrollments SET outcome = 'detained', promotion_batch_id = $2 WHERE id = ANY($1::uuid[])`,
+        [blocked.map((m) => m.enrollmentId), batch.id],
+      );
+    }
+
     await client.query("COMMIT");
     return batch;
   } catch (err) {
@@ -457,9 +481,25 @@ export async function reverseBatch(batchId: string): Promise<unknown> {
     }
 
     const newEnrollments = await client.query(
-      `SELECT id, student_id FROM enrollments WHERE promotion_batch_id = $1`, [batchId],
+      `SELECT id, student_id FROM enrollments WHERE promotion_batch_id = $1 AND outcome != 'detained'`, [batchId],
     );
     const newEnrollmentIds = newEnrollments.rows.map((r) => r.id);
+
+    // Detained (blocked) enrollments this same batch touched — found the
+    // same way, via promotion_batch_id, but reverted directly rather
+    // than through the "look up the previous enrollment" chain below,
+    // since a detained row never had a new enrollment created for it
+    // in the first place — it's the same row that needs its own
+    // outcome put back, not a different one restored.
+    const detainedResult = await client.query(
+      `SELECT id FROM enrollments WHERE promotion_batch_id = $1 AND outcome = 'detained'`, [batchId],
+    );
+    if (detainedResult.rows.length > 0) {
+      await client.query(
+        `UPDATE enrollments SET outcome = 'pending', promotion_batch_id = NULL WHERE id = ANY($1::uuid[])`,
+        [detainedResult.rows.map((r) => r.id)],
+      );
+    }
 
     const paidCheck = await client.query(
       `SELECT 1 FROM payments WHERE enrollment_id = ANY($1::uuid[]) LIMIT 1`,

@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, api } from "./api";
 import {
+  AlertCircle,
   AlertTriangle,
   ArrowRight,
   Bus,
@@ -19,6 +20,7 @@ import {
   MapPin,
   Percent,
   Plus,
+  ReceiptIndianRupee,
   Save,
   Search,
   ShieldCheck,
@@ -1683,6 +1685,8 @@ export function PromoteTab({ academicYears, classLevels, ensureUnassignedSection
     [preview, classFilter, q]); // eslint-disable-line
   const graduating = useMemo(() => preview ? byClass(preview.graduating).filter(matches) : [],
     [preview, classFilter, q]); // eslint-disable-line
+  const blocked = useMemo(() => preview ? byClass(preview.blocked).filter(matches) : [],
+    [preview, classFilter, q]); // eslint-disable-line
 
   if (!priorYears.length) {
     return (
@@ -1901,6 +1905,86 @@ export function PromoteTab({ academicYears, classLevels, ensureUnassignedSection
                 rather than promote. Marking them as graduated needs at least one
                 other promotion in the same batch and isn't wired up from this
                 screen yet.
+              </p>
+            </div>
+          )}
+
+          {blocked.length > 0 && (
+            <div className={`${panel} overflow-hidden`}>
+              <div className="px-6 py-4 border-b border-slate-100 flex items-center gap-2">
+                <AlertTriangle size={17} className="text-amber-500" />
+                <h2 className="font-extrabold">Not promoted</h2>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[900px]">
+                  <thead className="bg-slate-50/70">
+                    <tr>
+                      <th className={th}>Student</th>
+                      <th className={th}>Class</th>
+                      <th className={`${th} text-right`}>Balance</th>
+                      <th className={th}>Reason</th>
+                      <th className={th} />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {blocked.map((m) => {
+                      const busy = busyId === m.enrollmentId;
+                      const balance = m.balance / 100;
+                      return (
+                        <tr key={m.enrollmentId} className="border-b border-slate-50 text-sm">
+                          <td className="px-4 py-2.5">
+                            <div className="font-bold">{m.studentName}</div>
+                            <div className="text-xs text-slate-400 tabular-nums">{m.admissionNo}</div>
+                          </td>
+                          <td className="px-4 py-2.5 text-slate-500 font-semibold">{m.fromClassName}</td>
+                          <td className="px-4 py-2.5 text-right tabular-nums font-semibold whitespace-nowrap">
+                            {balance > 0
+                              ? <span className="text-red-500">{inr(balance)}</span>
+                              : <span className="text-emerald-600">Paid up</span>}
+                          </td>
+                          <td className="px-4 py-2.5 text-xs text-slate-500 max-w-xs">{m.blockedReason}</td>
+                          <td className="px-4 py-2.5 whitespace-nowrap">
+                            {m.blockedReason === "Detained — repeats the same class." ? (
+                              <button disabled={busy} onClick={async () => {
+                                setBusyId(m.enrollmentId); setError("");
+                                try {
+                                  await api.post(`/promotion/enrollments/${m.enrollmentId}/undetain`, {});
+                                  await refetchPreview();
+                                } catch (err) {
+                                  setError(err instanceof Error ? err.message : "Could not undo that.");
+                                } finally {
+                                  setBusyId(null);
+                                }
+                              }} className="text-xs font-bold text-slate-500 hover:text-slate-700">
+                                {busy ? "Reverting…" : "Undo detention"}
+                              </button>
+                            ) : (
+                              <button disabled={busy} onClick={async () => {
+                                setBusyId(m.enrollmentId); setError("");
+                                try {
+                                  await api.post(`/promotion/enrollments/${m.enrollmentId}/detain`, {});
+                                  await refetchPreview();
+                                } catch (err) {
+                                  setError(err instanceof Error ? err.message : "Could not mark that student detained.");
+                                } finally {
+                                  setBusyId(null);
+                                }
+                              }} className="text-xs font-bold text-amber-600 hover:text-amber-700">
+                                {busy ? "Marking…" : "Mark as detained"}
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <p className="px-6 py-3 text-xs text-slate-400 border-t border-slate-100 max-w-2xl">
+                Marking a student detained records that they were considered and
+                held back this year — separate from simply not having gotten to
+                them yet — so Reports can tell the two apart. Reversible from
+                here if marked in error.
               </p>
             </div>
           )}
@@ -3685,6 +3769,465 @@ export function ActivityLogScreen() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function csvExport(filename, rows) {
+  if (!rows || rows.length === 0) return;
+  const headers = Object.keys(rows[0]);
+  const lines = [headers.join(","), ...rows.map((r) =>
+    headers.map((h) => {
+      const v = r[h] ?? "";
+      const s = String(v).replace(/"/g, '""');
+      return /[,"\n]/.test(s) ? `"${s}"` : s;
+    }).join(","))];
+  const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename; a.click();
+  URL.revokeObjectURL(url);
+}
+
+function ReportSection({ title, action, children }) {
+  return (
+    <div className="mb-8">
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="font-extrabold text-base">{title}</h2>
+        {action}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function MiniBar({ label, value, max, tint = "bg-brand-500" }) {
+  const pct = max > 0 ? Math.min(100, (value / max) * 100) : 0;
+  return (
+    <div className="flex items-center gap-3">
+      <span className="text-xs font-semibold text-slate-500 w-24 shrink-0 truncate">{label}</span>
+      <div className="flex-1 h-2.5 bg-slate-100 rounded-full overflow-hidden">
+        <div className={`h-full ${tint} rounded-full`} style={{ width: `${pct}%` }} />
+      </div>
+      <span className="text-xs font-bold tabular-nums w-20 text-right shrink-0">{value}</span>
+    </div>
+  );
+}
+
+/**
+ * Reports & Analytics — every number here reads from GET /reports/*,
+ * which itself reuses the same ledger definitions (charged/conceded/
+ * grossPaid/refunded/netPaid/outstanding) the rest of the app already
+ * uses for a single student. Nothing here is a second definition of
+ * "outstanding" or "collected" — filtering by class/section just
+ * narrows which enrollments those same figures are summed over.
+ * view_reports gates the whole screen (already Owner/Accountant/
+ * Viewer, not Front Desk), enforced server-side on every endpoint —
+ * this screen simply doesn't render for a role that can't reach it.
+ */
+export function ReportsScreen({ academicYears, classLevels, state }) {
+  const currentYear = academicYears.find((y) => y.name === state.year) || academicYears[0];
+  const [yearId, setYearId] = useState(currentYear?.id || "");
+  const [classLevelId, setClassLevelId] = useState("");
+  const [sectionId, setSectionId] = useState("");
+  const [sections, setSections] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [summary, setSummary] = useState(null);
+  const [trend, setTrend] = useState([]);
+  const [modes, setModes] = useState([]);
+  const [tc, setTc] = useState(null);
+  const [refunds, setRefunds] = useState(null);
+  const [promotion, setPromotion] = useState(null);
+  const [admissions, setAdmissions] = useState(null);
+  const [yearComparison, setYearComparison] = useState([]);
+  const [dailyDate, setDailyDate] = useState(new Date().toISOString().slice(0, 10));
+  const [daily, setDaily] = useState(null);
+  const [classSort, setClassSort] = useState("className");
+  const [exceptions, setExceptions] = useState(null);
+  const [operatorAudit, setOperatorAudit] = useState(null);
+  const canViewAudit = state.school.capabilities.includes("view_audit_log");
+
+  useEffect(() => {
+    if (!classLevelId) { setSections([]); setSectionId(""); return; }
+    api.get(`/setup/sections?academic_year_id=${yearId}&class_level_id=${classLevelId}`)
+      .then(setSections).catch(() => setSections([]));
+  }, [classLevelId, yearId]);
+
+  useEffect(() => {
+    if (!yearId) return;
+    setLoading(true);
+    const qs = new URLSearchParams({
+      academic_year_id: yearId,
+      ...(classLevelId ? { class_level_id: classLevelId } : {}),
+      ...(sectionId ? { section_id: sectionId } : {}),
+    }).toString();
+    Promise.all([
+      api.get(`/reports/summary?${qs}`), api.get(`/reports/collection-trend?${qs}`),
+      api.get(`/reports/payment-modes?${qs}`), api.get(`/reports/tc?${qs}`),
+      api.get(`/reports/refunds?${qs}`), api.get(`/reports/promotion?${qs}`),
+      api.get(`/reports/admissions?${qs}`), api.get(`/reports/exceptions?${qs}`),
+    ]).then(([s, t, m, tcRes, r, p, a, exc]) => {
+      setSummary(s); setTrend(t); setModes(m); setTc(tcRes); setRefunds(r);
+      setPromotion(p); setAdmissions(a); setExceptions(exc);
+    }).catch(() => {}).finally(() => setLoading(false));
+  }, [yearId, classLevelId, sectionId]);
+
+  useEffect(() => {
+    api.get("/reports/year-comparison").then(setYearComparison).catch(() => setYearComparison([]));
+  }, []);
+
+  useEffect(() => {
+    if (!canViewAudit) return;
+    api.get("/reports/operator-audit").then(setOperatorAudit).catch(() => setOperatorAudit([]));
+  }, [canViewAudit]);
+
+  useEffect(() => {
+    api.get(`/reports/daily-collection?date=${dailyDate}`).then(setDaily).catch(() => setDaily(null));
+  }, [dailyDate]);
+
+  if (!yearId) {
+    return (
+      <div>
+        <PageHead title="Reports" subtitle="Set up an academic year first to see analytics." />
+      </div>
+    );
+  }
+
+  const sortedByClass = summary ? [...summary.byClass].sort((a, b) => {
+    if (classSort === "className") return a.className.localeCompare(b.className);
+    return (b[classSort] ?? 0) - (a[classSort] ?? 0);
+  }) : [];
+
+  return (
+    <div>
+      <PageHead title="Reports" subtitle="Financial, student-movement, and audit analytics across the school." />
+
+      <div className={`${panel} p-5 mb-6 flex flex-wrap items-end gap-4`}>
+        <div className="min-w-[150px]">
+          <label className={eyebrow}>Academic Year</label>
+          <FilterSelect value={yearId} active className="mt-2" onChange={(e) => setYearId(e.target.value)}>
+            {academicYears.map((y) => <option key={y.id} value={y.id}>{y.name}</option>)}
+          </FilterSelect>
+        </div>
+        <div className="min-w-[150px]">
+          <label className={eyebrow}>Class</label>
+          <FilterSelect value={classLevelId} active={Boolean(classLevelId)} className="mt-2"
+            onChange={(e) => setClassLevelId(e.target.value)}>
+            <option value="">All classes</option>
+            {classLevels.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </FilterSelect>
+        </div>
+        <div className="min-w-[150px]">
+          <label className={eyebrow}>Section</label>
+          <FilterSelect value={sectionId} active={Boolean(sectionId)} disabled={!classLevelId} className="mt-2"
+            onChange={(e) => setSectionId(e.target.value)}>
+            <option value="">All sections</option>
+            {sections.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </FilterSelect>
+        </div>
+      </div>
+
+      {loading || !summary ? (
+        <div className={`${panel} p-12 text-center text-slate-400 font-semibold`}>Loading…</div>
+      ) : (
+        <>
+          <ReportSection title="Executive Summary">
+            <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-4">
+              <StatCard icon={ReceiptIndianRupee} tint="bg-brand-50 text-brand-600" label="Projected Fees"
+                value={inr(summary.kpis.projectedFees / 100)} note={`${summary.totalEnrollments} students`} />
+              <StatCard icon={Percent} tint="bg-slate-50 text-slate-600" label="Net Collectible"
+                value={inr(summary.kpis.netCollectibleFees / 100)} note="Projected − concessions" />
+              <StatCard icon={Wallet} tint="bg-emerald-50 text-emerald-600" label="Net Collection"
+                value={inr(summary.kpis.netCollection / 100)}
+                note={`${summary.kpis.collectionPct.toFixed(1)}% of net collectible`} noteTint="text-emerald-600" />
+              <StatCard icon={AlertCircle} tint="bg-red-50 text-red-600" label="Outstanding"
+                value={inr(summary.kpis.outstanding / 100)}
+                note={`${summary.kpis.outstandingPct.toFixed(1)}% of net collectible`} noteTint="text-red-500" />
+            </div>
+            <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              <StatCard icon={Percent} tint="bg-amber-50 text-amber-600" label="Concessions"
+                value={inr(summary.kpis.concessionAmount / 100)}
+                note={`${summary.kpis.concessionStudents} students (${summary.kpis.concessionPct.toFixed(1)}%)`} />
+              <StatCard icon={Undo2} tint="bg-slate-50 text-slate-600" label="Refunds Processed"
+                value={inr(summary.kpis.refundAmount / 100)} note={`${summary.kpis.refundStudents} students`} />
+              <StatCard icon={Users} tint="bg-brand-50 text-brand-600" label="Active Students"
+                value={summary.studentKpis.totalActive} note={`${summary.studentKpis.newAdmissions} new admissions`} />
+              <StatCard icon={UserMinus} tint="bg-amber-50 text-amber-600" label="TC / Left"
+                value={summary.studentKpis.tcIssued + summary.studentKpis.left}
+                note={`${summary.studentKpis.tcIssued} TC · ${summary.studentKpis.left} left`} />
+              <StatCard icon={Check} tint="bg-emerald-50 text-emerald-600" label="Zero Outstanding"
+                value={summary.studentKpis.zeroOutstandingStudents}
+                note={`${summary.studentKpis.outstandingStudents} still owe`} />
+            </div>
+          </ReportSection>
+
+          <ReportSection title="Collection Trend (by month)"
+            action={<button onClick={() => csvExport("collection-trend.csv", trend)} className={ghost}>
+              <Download size={13} /> Export
+            </button>}>
+            <div className={`${panel} p-5`}>
+              {trend.length === 0 ? <p className="text-sm text-slate-400">No payments recorded yet.</p> : (
+                <div className="space-y-2.5">
+                  {trend.map((t) => (
+                    <MiniBar key={t.month} label={t.month} value={t.amount / 100}
+                      max={Math.max(...trend.map((x) => x.amount / 100))} />
+                  ))}
+                </div>
+              )}
+            </div>
+          </ReportSection>
+
+          <ReportSection title="Payment Mode Breakdown">
+            <div className={`${panel} p-5`}>
+              {modes.length === 0 ? <p className="text-sm text-slate-400">No payments recorded yet.</p> : (
+                <div className="space-y-2.5">
+                  {modes.map((m) => (
+                    <MiniBar key={m.mode} label={m.mode} value={m.amount / 100}
+                      max={Math.max(...modes.map((x) => x.amount / 100))} tint="bg-emerald-500" />
+                  ))}
+                </div>
+              )}
+            </div>
+          </ReportSection>
+
+          <ReportSection title="Outstanding Aging">
+            <div className={`${panel} overflow-hidden`}>
+              <table className="w-full">
+                <thead className="bg-slate-50/70">
+                  <tr><th className={th}>Range</th><th className={th}>Students</th><th className={th}>Amount</th></tr>
+                </thead>
+                <tbody>
+                  {summary.agingBuckets.map((b) => (
+                    <tr key={b.label} className="border-b border-slate-50 text-sm">
+                      <td className="px-5 py-3 font-semibold">{b.label}</td>
+                      <td className="px-5 py-3 tabular-nums">{b.count}</td>
+                      <td className="px-5 py-3 tabular-nums font-bold">{inr(b.amount / 100)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </ReportSection>
+
+          <ReportSection title="Class Comparison"
+            action={<button onClick={() => csvExport("class-comparison.csv", sortedByClass)} className={ghost}>
+              <Download size={13} /> Export
+            </button>}>
+            <div className={`${panel} overflow-hidden overflow-x-auto`}>
+              <table className="w-full">
+                <thead className="bg-slate-50/70">
+                  <tr>
+                    {[["className", "Class"], ["students", "Students"], ["projected", "Projected"],
+                      ["collected", "Collected"], ["pending", "Pending"], ["collectionPct", "Collection %"],
+                      ["concession", "Concession"], ["refund", "Refund"], ["tcLeft", "TC/Left"]].map(([key, label]) => (
+                      <th key={key} className={`${th} cursor-pointer select-none`} onClick={() => setClassSort(key)}>
+                        {label} {classSort === key && "↓"}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortedByClass.map((c) => (
+                    <tr key={c.className} className="border-b border-slate-50 text-sm">
+                      <td className="px-5 py-3 font-bold">{c.className}</td>
+                      <td className="px-5 py-3 tabular-nums">{c.students}</td>
+                      <td className="px-5 py-3 tabular-nums">{inr(c.projected / 100)}</td>
+                      <td className="px-5 py-3 tabular-nums">{inr(c.collected / 100)}</td>
+                      <td className="px-5 py-3 tabular-nums text-red-500 font-bold">{inr(c.pending / 100)}</td>
+                      <td className="px-5 py-3 tabular-nums">{c.collectionPct.toFixed(1)}%</td>
+                      <td className="px-5 py-3 tabular-nums">{inr(c.concession / 100)}</td>
+                      <td className="px-5 py-3 tabular-nums">{inr(c.refund / 100)}</td>
+                      <td className="px-5 py-3 tabular-nums">{c.tcLeft}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </ReportSection>
+
+          <ReportSection title="Section Comparison">
+            <div className={`${panel} overflow-hidden overflow-x-auto`}>
+              <table className="w-full">
+                <thead className="bg-slate-50/70">
+                  <tr>
+                    <th className={th}>Class-Section</th><th className={th}>Students</th>
+                    <th className={th}>Projected</th><th className={th}>Collected</th>
+                    <th className={th}>Pending</th><th className={th}>Collection %</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {summary.bySection.map((s) => (
+                    <tr key={s.classSection} className="border-b border-slate-50 text-sm">
+                      <td className="px-5 py-3 font-bold">{s.classSection}</td>
+                      <td className="px-5 py-3 tabular-nums">{s.students}</td>
+                      <td className="px-5 py-3 tabular-nums">{inr(s.projected / 100)}</td>
+                      <td className="px-5 py-3 tabular-nums">{inr(s.collected / 100)}</td>
+                      <td className="px-5 py-3 tabular-nums text-red-500 font-bold">{inr(s.pending / 100)}</td>
+                      <td className="px-5 py-3 tabular-nums">{s.collectionPct.toFixed(1)}%</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </ReportSection>
+
+          <ReportSection title="TC / Student Movement">
+            <div className="grid sm:grid-cols-4 gap-4">
+              <StatCard icon={UserMinus} tint="bg-slate-50 text-slate-600" label="Total Requests"
+                value={tc?.totalRequests ?? 0} note="This year" />
+              <StatCard icon={AlertCircle} tint="bg-amber-50 text-amber-600" label="Pending"
+                value={tc?.pending ?? 0} note="Awaiting review" />
+              <StatCard icon={Check} tint="bg-emerald-50 text-emerald-600" label="Approved (NOC)"
+                value={tc?.approved ?? 0} note="Cleared for exit" />
+              <StatCard icon={FileSpreadsheet} tint="bg-brand-50 text-brand-600" label="Official TC Issued"
+                value={tc?.issued ?? 0} note="Via government portal, separately" />
+            </div>
+          </ReportSection>
+
+          <ReportSection title="Promotion Analytics">
+            <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              <StatCard icon={Sparkles} tint="bg-brand-50 text-brand-600" label="Promoted"
+                value={promotion?.promoted ?? 0}
+                note={promotion?.considered ? `${((promotion.promoted / promotion.considered) * 100).toFixed(1)}%` : "—"} />
+              <StatCard icon={AlertCircle} tint="bg-amber-50 text-amber-600" label="Not Promoted"
+                value={promotion?.notPromoted ?? 0} note="Still active, not yet moved up" />
+              <StatCard icon={GraduationCap} tint="bg-slate-50 text-slate-600" label="Graduated"
+                value={promotion?.graduated ?? 0} note="Completed the top class — not a concern" />
+              <StatCard icon={Users} tint="bg-slate-50 text-slate-600" label="Considered"
+                value={promotion?.considered ?? 0} note="Excludes students who'd already left" />
+            </div>
+          </ReportSection>
+
+          <ReportSection title="Admissions">
+            <div className={`${panel} p-5`}>
+              {(!admissions || admissions.trend.length === 0) ? (
+                <p className="text-sm text-slate-400">No new admissions yet.</p>
+              ) : (
+                <div className="space-y-2.5">
+                  {admissions.trend.map((t) => (
+                    <MiniBar key={t.month} label={t.month} value={t.count}
+                      max={Math.max(...admissions.trend.map((x) => x.count))} tint="bg-amber-500" />
+                  ))}
+                </div>
+              )}
+              {admissions?.cancelledCount > 0 && (
+                <p className="text-xs text-slate-400 mt-3">
+                  {admissions.cancelledCount} admission(s) cancelled, {inr(admissions.cancelledRefundAmount / 100)} refunded.
+                </p>
+              )}
+            </div>
+          </ReportSection>
+
+          <ReportSection title="Daily Collection">
+            <div className={`${panel} p-5`}>
+              <input type="date" value={dailyDate} onChange={(e) => setDailyDate(e.target.value)}
+                className={`${field} max-w-[200px] mb-4`} />
+              {daily && (
+                <div className="grid sm:grid-cols-3 gap-4 text-sm">
+                  <div><p className={eyebrow}>Total Collected</p><p className="font-extrabold text-lg mt-1">{inr(daily.totalCollected / 100)}</p></div>
+                  <div><p className={eyebrow}>Receipts</p><p className="font-extrabold text-lg mt-1">{daily.receiptCount}</p></div>
+                  <div><p className={eyebrow}>Net (after refunds)</p><p className="font-extrabold text-lg mt-1">{inr(daily.netCollection / 100)}</p></div>
+                  {daily.firstReceiptNo && (
+                    <div className="sm:col-span-3 text-xs text-slate-400">
+                      Receipts {daily.firstReceiptNo} – {daily.lastReceiptNo}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </ReportSection>
+
+          <ReportSection title="Academic Year Comparison"
+            action={<button onClick={() => csvExport("year-comparison.csv", yearComparison)} className={ghost}>
+              <Download size={13} /> Export
+            </button>}>
+            <div className={`${panel} overflow-hidden overflow-x-auto`}>
+              <table className="w-full">
+                <thead className="bg-slate-50/70">
+                  <tr>
+                    <th className={th}>Year</th><th className={th}>Students</th><th className={th}>Projected</th>
+                    <th className={th}>Collected</th><th className={th}>Collection %</th><th className={th}>Pending</th>
+                    <th className={th}>Concession</th><th className={th}>Refunds</th><th className={th}>TC/Exit</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {yearComparison.map((y) => (
+                    <tr key={y.year} className="border-b border-slate-50 text-sm">
+                      <td className="px-5 py-3 font-bold">{y.year}</td>
+                      <td className="px-5 py-3 tabular-nums">{y.students}</td>
+                      <td className="px-5 py-3 tabular-nums">{inr(y.projectedFees / 100)}</td>
+                      <td className="px-5 py-3 tabular-nums">{inr(y.collected / 100)}</td>
+                      <td className="px-5 py-3 tabular-nums">{y.collectionPct.toFixed(1)}%</td>
+                      <td className="px-5 py-3 tabular-nums">{inr(y.pending / 100)}</td>
+                      <td className="px-5 py-3 tabular-nums">{inr(y.concession / 100)}</td>
+                      <td className="px-5 py-3 tabular-nums">{inr(y.refund / 100)}</td>
+                      <td className="px-5 py-3 tabular-nums">{y.tcExitCount}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </ReportSection>
+
+          <ReportSection title="Exceptions & Attention Required">
+            {!exceptions || exceptions.totalExceptions === 0 ? (
+              <div className={`${panel} p-6 text-sm text-slate-400 font-semibold`}>Nothing flagged.</div>
+            ) : (
+              <div className="space-y-2">
+                {[...exceptions.highOutstanding, ...exceptions.refundedWithOutstanding,
+                  ...exceptions.inactiveWithOutstanding, ...exceptions.unusualConcessions,
+                  ...exceptions.pendingApprovals].map((ex, i) => (
+                  <div key={i} className={`${panel} px-5 py-3 flex items-center justify-between gap-4`}>
+                    <div>
+                      <span className={`text-xs font-bold rounded-lg px-2 py-0.5 mr-2 ${
+                        ex.severity === "high" ? "bg-red-50 text-red-700"
+                          : ex.severity === "medium" ? "bg-amber-50 text-amber-700" : "bg-slate-100 text-slate-600"}`}>
+                        {ex.rule}
+                      </span>
+                      <span className="text-sm text-slate-600">{ex.reason}</span>
+                      {ex.className && <span className="text-xs text-slate-400 ml-2">{ex.className}{ex.sectionName ? `-${ex.sectionName}` : ""}</span>}
+                    </div>
+                    {ex.amount > 0 && <span className="text-sm font-bold tabular-nums shrink-0">{inr(ex.amount / 100)}</span>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </ReportSection>
+
+          {canViewAudit && (
+            <ReportSection title="User / Operator Audit">
+              <div className={`${panel} overflow-hidden overflow-x-auto`}>
+                <table className="w-full">
+                  <thead className="bg-slate-50/70">
+                    <tr>
+                      <th className={th}>User</th><th className={th}>Role</th>
+                      <th className={th}>Payments</th><th className={th}>Refunds</th>
+                      <th className={th}>Concessions</th><th className={th}>TC Approvals</th>
+                      <th className={th}>Refund Approvals</th><th className={th}>Reversals</th>
+                      <th className={th}>Total</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(operatorAudit || []).map((u) => (
+                      <tr key={u.userId} className="border-b border-slate-50 text-sm">
+                        <td className="px-5 py-3 font-bold">{u.userName}</td>
+                        <td className="px-5 py-3 text-slate-500">{u.userRole}</td>
+                        <td className="px-5 py-3 tabular-nums">{u.paymentsEntered}</td>
+                        <td className="px-5 py-3 tabular-nums">{u.refundsProcessed}</td>
+                        <td className="px-5 py-3 tabular-nums">{u.concessionsCreated}</td>
+                        <td className="px-5 py-3 tabular-nums">{u.tcApprovals}</td>
+                        <td className="px-5 py-3 tabular-nums">{u.refundApprovals}</td>
+                        <td className="px-5 py-3 tabular-nums">{u.paymentReversals}</td>
+                        <td className="px-5 py-3 tabular-nums font-bold">{u.totalActions}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </ReportSection>
+          )}
+        </>
+      )}
     </div>
   );
 }

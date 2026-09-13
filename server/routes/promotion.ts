@@ -124,3 +124,53 @@ promotionRouter.post("/batches/:id/reverse", async (req, res) => {
     throw err;
   }
 });
+
+// Direct, per-student marking — separate from commit() entirely,
+// deliberately, because this UI commits one promotable student at a
+// time (see PromoteTab's own single-move commit call), never a
+// batch-wide "everyone else is therefore blocked" operation. A
+// student shown as blocked here needs an explicit, standalone action
+// to actually record that decision, the same directness the rest of
+// this per-student screen already works in. No promotion_batch_id is
+// set (there's no batch involved in a single manual action), so this
+// has no effect on reverseBatch() — undo is its own explicit endpoint
+// below, not folded into batch reversal.
+promotionRouter.post("/enrollments/:id/detain", async (req, res) => {
+  const result = await pool.query(
+    `UPDATE enrollments SET outcome = 'detained'
+     WHERE id = $1 AND school_id = $2 AND is_active = true AND outcome = 'pending'
+     RETURNING id, student_id`,
+    [req.params.id, req.school!.id],
+  );
+  if (!result.rows[0]) {
+    return res.status(400).json({ detail: "This enrollment isn't an active, pending student." });
+  }
+  await logActivity(pool, req, {
+    action: "promotion.detain",
+    entityType: "enrollment",
+    entityId: String(req.params.id),
+    description: "Marked a student as detained (not promoted) for this academic year",
+    metadata: {},
+  });
+  res.json({ id: result.rows[0].id, outcome: "detained" });
+});
+
+promotionRouter.post("/enrollments/:id/undetain", async (req, res) => {
+  const result = await pool.query(
+    `UPDATE enrollments SET outcome = 'pending'
+     WHERE id = $1 AND school_id = $2 AND outcome = 'detained'
+     RETURNING id`,
+    [req.params.id, req.school!.id],
+  );
+  if (!result.rows[0]) {
+    return res.status(400).json({ detail: "This enrollment isn't currently marked detained." });
+  }
+  await logActivity(pool, req, {
+    action: "promotion.undetain",
+    entityType: "enrollment",
+    entityId: String(req.params.id),
+    description: "Reverted a student's detained marking",
+    metadata: {},
+  });
+  res.json({ id: result.rows[0].id, outcome: "pending" });
+});
