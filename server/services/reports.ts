@@ -48,9 +48,18 @@ async function getEnrollmentFinancials(f: ReportFilters): Promise<EnrollmentFina
                       WHERE c.enrollment_id = e.id AND c.reversed_by IS NULL), 0) AS charged,
             COALESCE((SELECT SUM(co.amount) FROM concessions co
                       WHERE co.enrollment_id = e.id AND co.reversed_by IS NULL), 0) AS conceded,
-            COALESCE((SELECT SUM(a.amount) FROM allocations a
+            -- Scoped by charges.enrollment_id first (already indexed),
+            -- not "all cleared payments globally, then filter by
+            -- charge_id IN (this enrollment's charges)" — that
+            -- ordering, measured directly with EXPLAIN ANALYZE against
+            -- 5,000 seeded enrollments, took 53+ seconds because it
+            -- forced a payments scan filtered only by clearing_status
+            -- (no supporting index) inside the per-row nested loop.
+            -- This ordering: 21ms for the same 5,000 rows.
+            COALESCE((SELECT SUM(a.amount) FROM charges c2
+                      JOIN allocations a ON a.charge_id = c2.id
                       JOIN payments p ON p.id = a.payment_id
-                      WHERE a.charge_id IN (SELECT id FROM charges WHERE enrollment_id = e.id)
+                      WHERE c2.enrollment_id = e.id
                         AND p.clearing_status = 'cleared' AND p.reversed_by IS NULL), 0) AS gross_paid,
             COALESCE((SELECT SUM(r.amount) FROM refunds r WHERE r.enrollment_id = e.id), 0) AS refunded
      FROM enrollments e
@@ -340,26 +349,29 @@ export async function getTcAnalytics(f: ReportFilters) {
 }
 
 export async function getPromotionAnalytics(f: ReportFilters) {
-  // Rewritten after review: the original version joined promotion_batches
-  // to every enrollment in the year, so two committed batches for the
-  // same from_year_id (a school promoting in more than one sitting —
-  // confirmed possible, since commit() takes an arbitrary move subset)
-  // double-counted "considered". It also filtered nothing on outcome,
-  // so a student who'd withdrawn before promotion ever ran (no e_to,
-  // since they'd already left) was wrongly counted as "not promoted".
-  //
-  // Fixed by reading outcome directly off each enrollment instead of
-  // joining against batches at all — commit() sets exactly one of
-  // these per enrollment, once, regardless of how many separate batches
-  // a school runs: 'promoted', 'passed_out' (graduated — a real exit,
-  // not a concern, kept separate from "not promoted" rather than
-  // conflated with it), 'left'/'tc_issued' (withdrew beforehand,
-  // correctly excluded from "considered" entirely), or unchanged
-  // ('pending', still active) meaning promotion hasn't moved them —
-  // genuinely "not promoted" only once a batch has actually run for
-  // this year, checked separately below so a year where promotion
-  // simply hasn't happened yet doesn't show every student as a false
+  // Rewritten after review, then again after adding explicit
+  // 'detained' recording to promotion.ts's commit(). The original
+  // version joined promotion_batches to every enrollment in the year,
+  // so two committed batches for the same from_year_id (a school
+  // promoting in more than one sitting — confirmed possible, since
+  // commit() takes an arbitrary move subset) double-counted
+  // "considered". It also filtered nothing on outcome, so a student
+  // who'd withdrawn before promotion ever ran was wrongly counted as
   // "not promoted".
+  //
+  // Reads outcome directly off each enrollment instead of joining
+  // against batches at all — commit() sets exactly one of these per
+  // enrollment, once, regardless of how many separate batches a school
+  // runs: 'promoted', 'passed_out' (graduated — a real exit, not a
+  // concern, kept separate from "not promoted"), 'detained' (now
+  // explicitly recorded at commit time for blocked/held-back moves,
+  // rather than inferred after the fact from a student simply still
+  // being 'pending' — the earlier version's one remaining
+  // approximation, now resolved at the source), or 'left'/'tc_issued'
+  // (withdrew beforehand, correctly excluded from "considered"
+  // entirely). Historical batches committed before 'detained' existed
+  // never marked anyone this way, so the existence check below still
+  // guards against a year where promotion genuinely hasn't run yet.
   const batchExists = await pool.query(
     `SELECT 1 FROM promotion_batches WHERE school_id = $1 AND from_year_id = $2 AND status = 'committed' LIMIT 1`,
     [f.schoolId, f.academicYearId],
@@ -375,10 +387,10 @@ export async function getPromotionAnalytics(f: ReportFilters) {
 
   const result = await pool.query(
     `SELECT cl.name AS class_name, cl.ladder_order,
-            COUNT(*) FILTER (WHERE e.outcome IN ('promoted', 'passed_out', 'pending')) AS considered,
+            COUNT(*) FILTER (WHERE e.outcome IN ('promoted', 'passed_out', 'detained')) AS considered,
             COUNT(*) FILTER (WHERE e.outcome = 'promoted') AS promoted,
             COUNT(*) FILTER (WHERE e.outcome = 'passed_out') AS graduated,
-            COUNT(*) FILTER (WHERE e.outcome = 'pending' AND e.is_active = true) AS not_promoted
+            COUNT(*) FILTER (WHERE e.outcome = 'detained') AS not_promoted
      FROM enrollments e
      JOIN class_levels cl ON cl.id = e.class_level_id
      WHERE ${where}
@@ -513,4 +525,147 @@ export async function getYearComparison(schoolId: string, limitYears = 5) {
     }),
   );
   return perYear.reverse(); // oldest first, for left-to-right trend reading
+}
+
+/**
+ * Per-operator audit — reuses audit_log entirely (Phase 14: "do not
+ * create a second audit system"). One GROUP BY over the exact action
+ * strings already logged throughout the app; no new logging added.
+ * Gated more strictly than the rest of Reports (view_audit_log, not
+ * view_reports) at the route level, since Viewer holds view_reports
+ * but not view_audit_log and shouldn't see who did what.
+ */
+export async function getOperatorAudit(schoolId: string, from?: string, to?: string) {
+  const params: unknown[] = [schoolId];
+  let where = "school_id = $1";
+  if (from) { params.push(from); where += ` AND created_at >= $${params.length}`; }
+  if (to) { params.push(to); where += ` AND created_at <= $${params.length}::date + interval '1 day'`; }
+
+  const result = await pool.query(
+    `SELECT user_id, user_name, user_role,
+            COUNT(*) FILTER (WHERE action = 'payment.record') AS payments_entered,
+            COUNT(*) FILTER (WHERE action = 'refund.create') AS refunds_processed,
+            COUNT(*) FILTER (WHERE action = 'concession.grant') AS concessions_created,
+            COUNT(*) FILTER (WHERE action = 'tc.clear') AS tc_approvals,
+            COUNT(*) FILTER (WHERE action = 'tc.reject') AS tc_rejections,
+            COUNT(*) FILTER (WHERE action = 'refund_request.approve') AS refund_approvals,
+            COUNT(*) FILTER (WHERE action = 'refund_request.reject') AS refund_rejections,
+            COUNT(*) FILTER (WHERE action = 'payment.void') AS payment_reversals,
+            COUNT(*) AS total_actions
+     FROM audit_log
+     WHERE ${where}
+     GROUP BY user_id, user_name, user_role
+     ORDER BY total_actions DESC`,
+    params,
+  );
+
+  return result.rows.map((r) => ({
+    userId: r.user_id, userName: r.user_name, userRole: r.user_role,
+    paymentsEntered: Number(r.payments_entered), refundsProcessed: Number(r.refunds_processed),
+    concessionsCreated: Number(r.concessions_created), tcApprovals: Number(r.tc_approvals),
+    tcRejections: Number(r.tc_rejections), refundApprovals: Number(r.refund_approvals),
+    refundRejections: Number(r.refund_rejections), paymentReversals: Number(r.payment_reversals),
+    totalActions: Number(r.total_actions),
+  }));
+}
+
+/**
+ * Exceptions / Risk — every rule here reads only from data already
+ * confirmed reliable elsewhere in this file (Phase 12: "do not invent
+ * arbitrary business rules; if an exception can't be reliably
+ * determined from existing data, don't display it"). Deliberately
+ * narrower than the original wishlist: rules needing data this schema
+ * doesn't reliably capture (duplicate payment references, receipt
+ * gaps) are left out rather than approximated.
+ */
+export async function getExceptions(f: ReportFilters) {
+  const rows = await getEnrollmentFinancials(f);
+
+  const highOutstanding = rows
+    .filter((r) => r.outstanding > 2500000) // > ₹25,000 — the same top aging bucket already used above
+    .sort((a, b) => b.outstanding - a.outstanding)
+    .slice(0, 25)
+    .map((r) => ({
+      rule: "High Outstanding", severity: "high" as const, enrollmentId: r.enrollment_id,
+      className: r.class_name, sectionName: r.section_name, amount: r.outstanding,
+      reason: `₹${(r.outstanding / 100).toLocaleString("en-IN")} outstanding`,
+    }));
+
+  // Refunded but still owing — the exact case the review called out:
+  // a partial refund followed by outstanding still remaining, worth a
+  // second look rather than assumed settled.
+  const refundedWithOutstanding = rows
+    .filter((r) => r.refunded > 0 && r.outstanding > 0)
+    .sort((a, b) => b.outstanding - a.outstanding)
+    .slice(0, 25)
+    .map((r) => ({
+      rule: "Refund + Remaining Outstanding", severity: "medium" as const, enrollmentId: r.enrollment_id,
+      className: r.class_name, sectionName: r.section_name, amount: r.outstanding,
+      reason: `Refunded ₹${(r.refunded / 100).toLocaleString("en-IN")}, still ₹${(r.outstanding / 100).toLocaleString("en-IN")} outstanding`,
+    }));
+
+  // Exited (left/TC) while still financially outstanding — a real,
+  // reliably-detectable pattern: is_active/outcome and outstanding are
+  // both already-trusted fields, just not previously cross-checked
+  // against each other.
+  const inactiveWithOutstanding = rows
+    .filter((r) => !r.is_active && r.outstanding > 0)
+    .sort((a, b) => b.outstanding - a.outstanding)
+    .slice(0, 25)
+    .map((r) => ({
+      rule: "Exited With Outstanding Balance", severity: "high" as const, enrollmentId: r.enrollment_id,
+      className: r.class_name, sectionName: r.section_name, amount: r.outstanding,
+      reason: `${r.withdrawal_reason || r.outcome}, ₹${(r.outstanding / 100).toLocaleString("en-IN")} still owed`,
+    }));
+
+  // Unusually large concession — flagged relative to this school's own
+  // data (more than 3x the median concession among students who got
+  // one), not an arbitrary fixed rupee threshold that wouldn't fit
+  // every school's fee scale.
+  const concessions = rows.filter((r) => r.conceded > 0).map((r) => r.conceded).sort((a, b) => a - b);
+  const medianConcession = concessions.length ? concessions[Math.floor(concessions.length / 2)] : 0;
+  const unusualConcessions = medianConcession > 0
+    ? rows.filter((r) => r.conceded > medianConcession * 3).sort((a, b) => b.conceded - a.conceded).slice(0, 25)
+        .map((r) => ({
+          rule: "Unusually Large Concession", severity: "medium" as const, enrollmentId: r.enrollment_id,
+          className: r.class_name, sectionName: r.section_name, amount: r.conceded,
+          reason: `₹${(r.conceded / 100).toLocaleString("en-IN")} concession, over 3× this school's median of ₹${(medianConcession / 100).toLocaleString("en-IN")}`,
+        }))
+    : [];
+
+  const pendingTc = await pool.query(
+    `SELECT tr.id, s.full_name, cl.name AS class_name, sec.name AS section_name, tr.requested_on
+     FROM tc_requests tr JOIN enrollments e ON e.id = tr.enrollment_id
+     JOIN students s ON s.id = e.student_id
+     JOIN class_levels cl ON cl.id = e.class_level_id JOIN sections sec ON sec.id = e.section_id
+     WHERE tr.school_id = $1 AND tr.status = 'pending_clearance' ORDER BY tr.requested_on ASC LIMIT 25`,
+    [f.schoolId],
+  );
+  const pendingRefunds = await pool.query(
+    `SELECT rr.id, s.full_name, cl.name AS class_name, sec.name AS section_name, rr.amount, rr.requested_on
+     FROM refund_requests rr JOIN enrollments e ON e.id = rr.enrollment_id
+     JOIN students s ON s.id = e.student_id
+     JOIN class_levels cl ON cl.id = e.class_level_id JOIN sections sec ON sec.id = e.section_id
+     WHERE rr.school_id = $1 AND rr.status = 'pending' ORDER BY rr.requested_on ASC LIMIT 25`,
+    [f.schoolId],
+  );
+
+  const pendingApprovals = [
+    ...pendingTc.rows.map((r) => ({
+      rule: "Pending TC Approval", severity: "low" as const, enrollmentId: null,
+      className: r.class_name, sectionName: r.section_name, amount: 0,
+      reason: `${r.full_name} — requested ${new Date(r.requested_on).toLocaleDateString("en-IN")}`,
+    })),
+    ...pendingRefunds.rows.map((r) => ({
+      rule: "Pending Refund Approval", severity: "low" as const, enrollmentId: null,
+      className: r.class_name, sectionName: r.section_name, amount: Number(r.amount),
+      reason: `${r.full_name} — ₹${(Number(r.amount) / 100).toLocaleString("en-IN")} requested`,
+    })),
+  ];
+
+  return {
+    highOutstanding, refundedWithOutstanding, inactiveWithOutstanding, unusualConcessions, pendingApprovals,
+    totalExceptions: highOutstanding.length + refundedWithOutstanding.length + inactiveWithOutstanding.length
+      + unusualConcessions.length + pendingApprovals.length,
+  };
 }

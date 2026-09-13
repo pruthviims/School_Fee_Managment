@@ -1685,6 +1685,8 @@ export function PromoteTab({ academicYears, classLevels, ensureUnassignedSection
     [preview, classFilter, q]); // eslint-disable-line
   const graduating = useMemo(() => preview ? byClass(preview.graduating).filter(matches) : [],
     [preview, classFilter, q]); // eslint-disable-line
+  const blocked = useMemo(() => preview ? byClass(preview.blocked).filter(matches) : [],
+    [preview, classFilter, q]); // eslint-disable-line
 
   if (!priorYears.length) {
     return (
@@ -1903,6 +1905,86 @@ export function PromoteTab({ academicYears, classLevels, ensureUnassignedSection
                 rather than promote. Marking them as graduated needs at least one
                 other promotion in the same batch and isn't wired up from this
                 screen yet.
+              </p>
+            </div>
+          )}
+
+          {blocked.length > 0 && (
+            <div className={`${panel} overflow-hidden`}>
+              <div className="px-6 py-4 border-b border-slate-100 flex items-center gap-2">
+                <AlertTriangle size={17} className="text-amber-500" />
+                <h2 className="font-extrabold">Not promoted</h2>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[900px]">
+                  <thead className="bg-slate-50/70">
+                    <tr>
+                      <th className={th}>Student</th>
+                      <th className={th}>Class</th>
+                      <th className={`${th} text-right`}>Balance</th>
+                      <th className={th}>Reason</th>
+                      <th className={th} />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {blocked.map((m) => {
+                      const busy = busyId === m.enrollmentId;
+                      const balance = m.balance / 100;
+                      return (
+                        <tr key={m.enrollmentId} className="border-b border-slate-50 text-sm">
+                          <td className="px-4 py-2.5">
+                            <div className="font-bold">{m.studentName}</div>
+                            <div className="text-xs text-slate-400 tabular-nums">{m.admissionNo}</div>
+                          </td>
+                          <td className="px-4 py-2.5 text-slate-500 font-semibold">{m.fromClassName}</td>
+                          <td className="px-4 py-2.5 text-right tabular-nums font-semibold whitespace-nowrap">
+                            {balance > 0
+                              ? <span className="text-red-500">{inr(balance)}</span>
+                              : <span className="text-emerald-600">Paid up</span>}
+                          </td>
+                          <td className="px-4 py-2.5 text-xs text-slate-500 max-w-xs">{m.blockedReason}</td>
+                          <td className="px-4 py-2.5 whitespace-nowrap">
+                            {m.blockedReason === "Detained — repeats the same class." ? (
+                              <button disabled={busy} onClick={async () => {
+                                setBusyId(m.enrollmentId); setError("");
+                                try {
+                                  await api.post(`/promotion/enrollments/${m.enrollmentId}/undetain`, {});
+                                  await refetchPreview();
+                                } catch (err) {
+                                  setError(err instanceof Error ? err.message : "Could not undo that.");
+                                } finally {
+                                  setBusyId(null);
+                                }
+                              }} className="text-xs font-bold text-slate-500 hover:text-slate-700">
+                                {busy ? "Reverting…" : "Undo detention"}
+                              </button>
+                            ) : (
+                              <button disabled={busy} onClick={async () => {
+                                setBusyId(m.enrollmentId); setError("");
+                                try {
+                                  await api.post(`/promotion/enrollments/${m.enrollmentId}/detain`, {});
+                                  await refetchPreview();
+                                } catch (err) {
+                                  setError(err instanceof Error ? err.message : "Could not mark that student detained.");
+                                } finally {
+                                  setBusyId(null);
+                                }
+                              }} className="text-xs font-bold text-amber-600 hover:text-amber-700">
+                                {busy ? "Marking…" : "Mark as detained"}
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <p className="px-6 py-3 text-xs text-slate-400 border-t border-slate-100 max-w-2xl">
+                Marking a student detained records that they were considered and
+                held back this year — separate from simply not having gotten to
+                them yet — so Reports can tell the two apart. Reversible from
+                here if marked in error.
               </p>
             </div>
           )}
@@ -3761,6 +3843,9 @@ export function ReportsScreen({ academicYears, classLevels, state }) {
   const [dailyDate, setDailyDate] = useState(new Date().toISOString().slice(0, 10));
   const [daily, setDaily] = useState(null);
   const [classSort, setClassSort] = useState("className");
+  const [exceptions, setExceptions] = useState(null);
+  const [operatorAudit, setOperatorAudit] = useState(null);
+  const canViewAudit = state.school.capabilities.includes("view_audit_log");
 
   useEffect(() => {
     if (!classLevelId) { setSections([]); setSectionId(""); return; }
@@ -3780,16 +3865,21 @@ export function ReportsScreen({ academicYears, classLevels, state }) {
       api.get(`/reports/summary?${qs}`), api.get(`/reports/collection-trend?${qs}`),
       api.get(`/reports/payment-modes?${qs}`), api.get(`/reports/tc?${qs}`),
       api.get(`/reports/refunds?${qs}`), api.get(`/reports/promotion?${qs}`),
-      api.get(`/reports/admissions?${qs}`),
-    ]).then(([s, t, m, tcRes, r, p, a]) => {
+      api.get(`/reports/admissions?${qs}`), api.get(`/reports/exceptions?${qs}`),
+    ]).then(([s, t, m, tcRes, r, p, a, exc]) => {
       setSummary(s); setTrend(t); setModes(m); setTc(tcRes); setRefunds(r);
-      setPromotion(p); setAdmissions(a);
+      setPromotion(p); setAdmissions(a); setExceptions(exc);
     }).catch(() => {}).finally(() => setLoading(false));
   }, [yearId, classLevelId, sectionId]);
 
   useEffect(() => {
     api.get("/reports/year-comparison").then(setYearComparison).catch(() => setYearComparison([]));
   }, []);
+
+  useEffect(() => {
+    if (!canViewAudit) return;
+    api.get("/reports/operator-audit").then(setOperatorAudit).catch(() => setOperatorAudit([]));
+  }, [canViewAudit]);
 
   useEffect(() => {
     api.get(`/reports/daily-collection?date=${dailyDate}`).then(setDaily).catch(() => setDaily(null));
@@ -4078,6 +4168,64 @@ export function ReportsScreen({ academicYears, classLevels, state }) {
               </table>
             </div>
           </ReportSection>
+
+          <ReportSection title="Exceptions & Attention Required">
+            {!exceptions || exceptions.totalExceptions === 0 ? (
+              <div className={`${panel} p-6 text-sm text-slate-400 font-semibold`}>Nothing flagged.</div>
+            ) : (
+              <div className="space-y-2">
+                {[...exceptions.highOutstanding, ...exceptions.refundedWithOutstanding,
+                  ...exceptions.inactiveWithOutstanding, ...exceptions.unusualConcessions,
+                  ...exceptions.pendingApprovals].map((ex, i) => (
+                  <div key={i} className={`${panel} px-5 py-3 flex items-center justify-between gap-4`}>
+                    <div>
+                      <span className={`text-xs font-bold rounded-lg px-2 py-0.5 mr-2 ${
+                        ex.severity === "high" ? "bg-red-50 text-red-700"
+                          : ex.severity === "medium" ? "bg-amber-50 text-amber-700" : "bg-slate-100 text-slate-600"}`}>
+                        {ex.rule}
+                      </span>
+                      <span className="text-sm text-slate-600">{ex.reason}</span>
+                      {ex.className && <span className="text-xs text-slate-400 ml-2">{ex.className}{ex.sectionName ? `-${ex.sectionName}` : ""}</span>}
+                    </div>
+                    {ex.amount > 0 && <span className="text-sm font-bold tabular-nums shrink-0">{inr(ex.amount / 100)}</span>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </ReportSection>
+
+          {canViewAudit && (
+            <ReportSection title="User / Operator Audit">
+              <div className={`${panel} overflow-hidden overflow-x-auto`}>
+                <table className="w-full">
+                  <thead className="bg-slate-50/70">
+                    <tr>
+                      <th className={th}>User</th><th className={th}>Role</th>
+                      <th className={th}>Payments</th><th className={th}>Refunds</th>
+                      <th className={th}>Concessions</th><th className={th}>TC Approvals</th>
+                      <th className={th}>Refund Approvals</th><th className={th}>Reversals</th>
+                      <th className={th}>Total</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(operatorAudit || []).map((u) => (
+                      <tr key={u.userId} className="border-b border-slate-50 text-sm">
+                        <td className="px-5 py-3 font-bold">{u.userName}</td>
+                        <td className="px-5 py-3 text-slate-500">{u.userRole}</td>
+                        <td className="px-5 py-3 tabular-nums">{u.paymentsEntered}</td>
+                        <td className="px-5 py-3 tabular-nums">{u.refundsProcessed}</td>
+                        <td className="px-5 py-3 tabular-nums">{u.concessionsCreated}</td>
+                        <td className="px-5 py-3 tabular-nums">{u.tcApprovals}</td>
+                        <td className="px-5 py-3 tabular-nums">{u.refundApprovals}</td>
+                        <td className="px-5 py-3 tabular-nums">{u.paymentReversals}</td>
+                        <td className="px-5 py-3 tabular-nums font-bold">{u.totalActions}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </ReportSection>
+          )}
         </>
       )}
     </div>

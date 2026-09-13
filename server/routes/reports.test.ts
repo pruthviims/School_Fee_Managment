@@ -500,6 +500,66 @@ describe("Promotion analytics correctness (review fixes: double-count, is_active
     expect(res.body.considered).toBe(0);
     expect(res.body.notPromoted).toBe(0); // not a false positive just because promotion hasn't run
   });
+
+  it("a student blocked for outstanding dues can be explicitly marked detained via the direct action — reported correctly as 'not promoted', reversible, and never confused with 'not yet considered'", async () => {
+    const cookie = await loginAs("owner@reports.test");
+    const { fromYear, toYear, classVIII, sectionVIII } = await setUpTwoYearLadder(cookie);
+    const duesStudent = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
+      admission_no: "2025/906", full_name: "Dues Student", gender: "male", contact_type: "guardian",
+      guardian_relationship: "Father", guardian_name: "G1",
+      academic_year_id: fromYear.id, class_level_id: classVIII.id, section_id: sectionVIII.id,
+    });
+    const clearStudent = await request(app).post("/api/students/admit").set("Cookie", cookie).send({
+      admission_no: "2025/907", full_name: "Clear Student", gender: "female", contact_type: "guardian",
+      guardian_relationship: "Mother", guardian_name: "G2",
+      academic_year_id: fromYear.id, class_level_id: classVIII.id, section_id: sectionVIII.id,
+    });
+    // Pay off the second student in full so only the first is actually
+    // blocked for dues — otherwise both are unpaid and both block.
+    await request(app).post("/api/collection/payments").set("Cookie", cookie).send({
+      enrollment_id: clearStudent.body.enrollment.id, amount: 4000000, mode: "cash",
+    });
+
+    const preview = await request(app).post("/api/promotion/preview").set("Cookie", cookie)
+      .send({ from_year_id: fromYear.id, to_year_id: toYear.id, block_on_dues: true });
+    const blockedIds = preview.body.blocked.map((m: any) => m.enrollmentId);
+    expect(blockedIds).toContain(duesStudent.body.enrollment.id);
+    expect(blockedIds).not.toContain(clearStudent.body.enrollment.id); // paid up — actually promotable
+    expect(preview.body.moves.map((m: any) => m.enrollmentId)).toContain(clearStudent.body.enrollment.id);
+
+    // Actually promote the clear student, exactly as the real UI does —
+    // one student committed at a time.
+    const assign = await request(app).post("/api/promotion/assign-sections").set("Cookie", cookie)
+      .send({ to_year_id: toYear.id, moves: preview.body.moves });
+    await request(app).post("/api/promotion/commit").set("Cookie", cookie).send({
+      from_year_id: fromYear.id, to_year_id: toYear.id, moves: assign.body.moves,
+    });
+
+    // Explicitly mark the blocked student detained — the actual,
+    // reachable action this UI provides for a blocked student, not an
+    // inferred side effect of someone else's commit.
+    const detain = await request(app).post(`/api/promotion/enrollments/${duesStudent.body.enrollment.id}/detain`)
+      .set("Cookie", cookie).send({});
+    expect(detain.status).toBe(200);
+    expect(detain.body.outcome).toBe("detained");
+
+    const res = await request(app).get(`/api/reports/promotion?academic_year_id=${fromYear.id}`).set("Cookie", cookie);
+    expect(res.body.considered).toBe(2);
+    expect(res.body.promoted).toBe(1);
+    expect(res.body.notPromoted).toBe(1);
+
+    // Reversible — a mistaken detention shouldn't be permanent.
+    const undetain = await request(app).post(`/api/promotion/enrollments/${duesStudent.body.enrollment.id}/undetain`)
+      .set("Cookie", cookie).send({});
+    expect(undetain.status).toBe(200);
+    const afterUndetain = await pool.query(`SELECT outcome FROM enrollments WHERE id = $1`, [duesStudent.body.enrollment.id]);
+    expect(afterUndetain.rows[0].outcome).toBe("pending");
+
+    // With nobody marked detained yet again, this reverts to correctly
+    // showing 0 "not promoted" rather than a stale count.
+    const res2 = await request(app).get(`/api/reports/promotion?academic_year_id=${fromYear.id}`).set("Cookie", cookie);
+    expect(res2.body.notPromoted).toBe(0);
+  });
 });
 
 describe("Student-ledger cross-check (review Phase 4: reports must reconcile with the individual student's own ledger)", () => {
@@ -530,5 +590,74 @@ describe("Student-ledger cross-check (review Phase 4: reports must reconcile wit
     expect(filtered.body.kpis.refundAmount).toBe(studentLedger.refunded);
     expect(filtered.body.kpis.netCollection).toBe(studentLedger.paid);
     expect(filtered.body.kpis.outstanding).toBe(studentLedger.balance);
+  });
+});
+
+describe("GET /reports/operator-audit (Phase 14 — reuses audit_log, gated stricter than the rest of Reports)", () => {
+  it("aggregates real actions per user, and is denied to viewer (view_reports only, not view_audit_log)", async () => {
+    const cookie = await loginAs("owner@reports.test");
+    const { year, classLevel, section } = await setUpAcademicStructure(cookie);
+    const a = await admit(cookie, year, classLevel, section, "2026/oa1");
+    await request(app).post("/api/collection/payments").set("Cookie", cookie).send({
+      enrollment_id: a.id, amount: 1000000, mode: "cash",
+    });
+    await request(app).post(`/api/students/enrollments/${a.id}/refund`).set("Cookie", cookie).send({
+      amount: 100000, mode: "cash",
+    });
+
+    const res = await request(app).get("/api/reports/operator-audit").set("Cookie", cookie);
+    expect(res.status).toBe(200);
+    const ownerRow = res.body.find((u: any) => u.userRole === "owner");
+    expect(ownerRow.paymentsEntered).toBeGreaterThanOrEqual(1);
+    expect(ownerRow.refundsProcessed).toBeGreaterThanOrEqual(1);
+
+    const viewer = await createUser("viewer2@reports.test", "x".repeat(14));
+    await createMembership(viewer.id, school.id, "viewer");
+    const viewerRes = await request(app).get("/api/reports/operator-audit")
+      .set("Cookie", await loginAs("viewer2@reports.test"));
+    expect(viewerRes.status).toBe(403); // holds view_reports but not view_audit_log
+  });
+});
+
+describe("GET /reports/exceptions (Phase 12 — only reliably-detectable rules)", () => {
+  it("flags high outstanding, refund-plus-remaining-outstanding, and pending approvals correctly", async () => {
+    const cookie = await loginAs("owner@reports.test");
+    const { year, classLevel, section } = await setUpAcademicStructure(cookie);
+
+    // High outstanding: fully unpaid ₹40,000 (over the ₹25,000 threshold).
+    await admit(cookie, year, classLevel, section, "2026/ex1");
+
+    // Refund + remaining outstanding: partial refund, balance still owed.
+    const b = await admit(cookie, year, classLevel, section, "2026/ex2");
+    await request(app).post("/api/collection/payments").set("Cookie", cookie).send({
+      enrollment_id: b.id, amount: 4000000, mode: "cash",
+    });
+    await request(app).post(`/api/students/enrollments/${b.id}/refund`).set("Cookie", cookie).send({
+      amount: 500000, mode: "cash",
+    });
+
+    // A pending TC request should also show up.
+    const c = await admit(cookie, year, classLevel, section, "2026/ex3");
+    await request(app).post(`/api/students/enrollments/${c.id}/tc-requests`).set("Cookie", cookie)
+      .send({ reason: "Transfer", last_day: "2026-10-01" });
+
+    const res = await request(app).get(`/api/reports/exceptions?academic_year_id=${year.id}`).set("Cookie", cookie);
+    expect(res.status).toBe(200);
+    expect(res.body.highOutstanding.length).toBeGreaterThanOrEqual(1);
+    expect(res.body.refundedWithOutstanding.length).toBeGreaterThanOrEqual(1);
+    expect(res.body.pendingApprovals.some((p: any) => p.rule === "Pending TC Approval")).toBe(true);
+    expect(res.body.totalExceptions).toBeGreaterThan(0);
+  });
+
+  it("flags nothing when there is genuinely nothing to flag", async () => {
+    const cookie = await loginAs("owner@reports.test");
+    const { year, classLevel, section } = await setUpAcademicStructure(cookie);
+    const a = await admit(cookie, year, classLevel, section, "2026/ex4");
+    await request(app).post("/api/collection/payments").set("Cookie", cookie).send({
+      enrollment_id: a.id, amount: 4000000, mode: "cash",
+    });
+
+    const res = await request(app).get(`/api/reports/exceptions?academic_year_id=${year.id}`).set("Cookie", cookie);
+    expect(res.body.totalExceptions).toBe(0);
   });
 });

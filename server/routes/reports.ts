@@ -1,8 +1,9 @@
 import { Router } from "express";
 import { requireCapability } from "../middleware/permissions.js";
 import {
-  getAdmissionAnalytics, getCollectionTrend, getDailyCollection, getPaymentModeBreakdown,
-  getPromotionAnalytics, getRefundAnalytics, getReportsSummary, getTcAnalytics, getYearComparison,
+  getAdmissionAnalytics, getCollectionTrend, getDailyCollection, getExceptions, getOperatorAudit,
+  getPaymentModeBreakdown, getPromotionAnalytics, getRefundAnalytics, getReportsSummary, getTcAnalytics,
+  getYearComparison,
 } from "../services/reports.js";
 
 export const reportsRouter = Router();
@@ -68,4 +69,18 @@ reportsRouter.get("/daily-collection", async (req, res) => {
 
 reportsRouter.get("/year-comparison", async (req, res) => {
   res.json(await getYearComparison(req.school!.id));
+});
+
+reportsRouter.get("/exceptions", async (req, res) => {
+  if (!req.query.academic_year_id) return res.status(400).json({ detail: "academic_year_id is required." });
+  res.json(await getExceptions(filtersFrom(req)));
+});
+
+// Stricter than the router-wide view_reports gate above — Viewer holds
+// view_reports but not view_audit_log, and shouldn't see who
+// individually processed what.
+reportsRouter.get("/operator-audit", requireCapability("view_audit_log"), async (req, res) => {
+  res.json(await getOperatorAudit(
+    req.school!.id, req.query.from as string | undefined, req.query.to as string | undefined,
+  ));
 });
